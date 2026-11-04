@@ -57,6 +57,13 @@ pub enum Command {
     TogglePreview,
     ToggleLeftPane,
     ToggleRightPane,
+    OpenWithApp,
+    Compress,
+    EditTags,
+    CommandPalette,
+    SelectMatching,
+    Search,
+    SaveWorkspace,
 }
 
 impl Command {
@@ -110,6 +117,13 @@ impl Command {
         Command::TogglePreview,
         Command::ToggleLeftPane,
         Command::ToggleRightPane,
+        Command::OpenWithApp,
+        Command::Compress,
+        Command::EditTags,
+        Command::CommandPalette,
+        Command::SelectMatching,
+        Command::Search,
+        Command::SaveWorkspace,
     ];
 
     pub fn tag(self) -> isize {
@@ -190,6 +204,13 @@ impl Command {
             Command::TogglePreview => "Show Preview Pane",
             Command::ToggleLeftPane => "Hide Left Pane",
             Command::ToggleRightPane => "Hide Right Pane",
+            Command::OpenWithApp => "Open with Default App",
+            Command::Compress => "Compress\u{2026}",
+            Command::EditTags => "Tags\u{2026}",
+            Command::CommandPalette => "Command Palette\u{2026}",
+            Command::SelectMatching => "Select Matching\u{2026}",
+            Command::Search => "Search\u{2026}",
+            Command::SaveWorkspace => "Save Workspace\u{2026}",
         }
     }
 
@@ -252,6 +273,13 @@ impl Command {
             Command::TogglePreview => ("p", shift_cmd),
             Command::ToggleLeftPane => ("1", opt_cmd),
             Command::ToggleRightPane => ("2", opt_cmd),
+            Command::OpenWithApp => ("o", opt_cmd),
+            Command::Compress => ("", cmd),
+            Command::EditTags => ("", cmd),
+            Command::CommandPalette => ("p", opt_cmd),
+            Command::SelectMatching => ("a", opt_cmd),
+            Command::Search => ("f", shift_cmd),
+            Command::SaveWorkspace => ("s", cmd | NSEventModifierFlags::Control),
         }
     }
 

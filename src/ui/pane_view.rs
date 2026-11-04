@@ -683,6 +683,16 @@ impl PaneController {
             "modified" => format_date(entry.modified),
             "permissions" => fs::format_permissions(entry),
             "owner" => entry.owner.clone().unwrap_or_default(),
+            "tags" if state.is_local() => super::util::tags_of(&entry.path).join(", "),
+            "tags" => String::new(),
+            "folder" => {
+                let parent = entry.path.parent().unwrap_or(Path::new("/"));
+                match parent.strip_prefix(state.location()) {
+                    Ok(inside) if inside.as_os_str().is_empty() => ".".to_string(),
+                    Ok(inside) => inside.display().to_string(),
+                    Err(_) => parent.display().to_string(),
+                }
+            }
             "group" => entry.group.clone().unwrap_or_default(),
             _ => kind_of(entry),
         };
@@ -746,6 +756,9 @@ impl PaneController {
             ("permissions", "Permissions", 104.0, NSTextAlignment::Left),
             ("owner", "Owner", 90.0, NSTextAlignment::Left),
             ("group", "Group", 90.0, NSTextAlignment::Left),
+            ("tags", "Tags", 110.0, NSTextAlignment::Left),
+            // Search results: where each item is.
+            ("folder", "Folder", 170.0, NSTextAlignment::Left),
         ] {
             let column = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), &ns(id));
             column.setTitle(&ns(title));
@@ -755,7 +768,7 @@ impl PaneController {
             column.headerCell().setAlignment(align);
             // Size and date sort largest/newest first on the first click.
             let ascending = !matches!(id, "size" | "modified");
-            if !matches!(id, "permissions" | "owner" | "group") {
+            if !matches!(id, "permissions" | "owner" | "group" | "tags" | "folder") {
                 let prototype = NSSortDescriptor::sortDescriptorWithKey_ascending(Some(&ns(id)), ascending);
                 column.setSortDescriptorPrototype(Some(&prototype));
             }
@@ -1335,6 +1348,13 @@ impl PaneController {
     pub fn apply_columns(&self) {
         let visible = super::visible_columns(self.is_local());
         let mut changed = false;
+        if let Some(column) = self.table().tableColumnWithIdentifier(&ns("folder")) {
+            let hidden = !self.showing_results();
+            if column.isHidden() != hidden {
+                column.setHidden(hidden);
+                changed = true;
+            }
+        }
         for (id, _) in crate::settings::COLUMNS {
             if let Some(column) = self.table().tableColumnWithIdentifier(&ns(id)) {
                 let hidden = !visible.iter().any(|v| v == id);
@@ -1456,6 +1476,40 @@ impl PaneController {
         let selected = self.selected_paths();
         table.reloadData();
         self.select_paths(&selected);
+    }
+
+    pub fn sort(&self) -> Sort {
+        self.ivars().state.borrow().sort
+    }
+
+    /// Whether the pane shows search results.
+    pub fn showing_results(&self) -> bool {
+        let state = self.ivars().state.borrow();
+        state.fs().title_for(state.location()).is_some()
+    }
+
+    /// Selects the items whose names match; returns how many.
+    pub fn select_matching(&self, patterns: &crate::fs::glob::Patterns) -> usize {
+        let rows: Vec<usize> = {
+            let state = self.ivars().state.borrow();
+            let offset = parent_offset(&state);
+            state
+                .entries()
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| patterns.matches(&e.name))
+                .map(|(i, _)| i + offset)
+                .collect()
+        };
+        let set = NSMutableIndexSet::new();
+        for row in &rows {
+            set.addIndex(*row);
+        }
+        self.table().selectRowIndexes_byExtendingSelection(&set, false);
+        if let Some(first) = rows.first() {
+            self.table().scrollRowToVisible(*first as NSInteger);
+        }
+        rows.len()
     }
 
     /// How many items the folder shows.

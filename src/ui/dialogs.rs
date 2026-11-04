@@ -129,6 +129,15 @@ pub fn show_info(message: String, detail: String) {
 /// Asks for a line of text. `select` is how many characters to select at
 /// the start (the name without its extension when renaming).
 pub fn prompt(message: &str, informative: &str, ok: &str, initial: &str, select: Option<usize>) -> Option<String> {
+    prompt_text(message, informative, ok, initial, select).filter(|t| !t.trim().is_empty())
+}
+
+/// Like `prompt`, but an empty answer is an answer (None only if cancelled).
+pub fn prompt_allow_empty(message: &str, informative: &str, ok: &str, initial: &str) -> Option<String> {
+    prompt_text(message, informative, ok, initial, None)
+}
+
+fn prompt_text(message: &str, informative: &str, ok: &str, initial: &str, select: Option<usize>) -> Option<String> {
     let mtm = mtm();
     let alert = alert(mtm, message, informative);
     alert.addButtonWithTitle(&ns(ok));
@@ -150,8 +159,7 @@ pub fn prompt(message: &str, informative: &str, ok: &str, initial: &str, select:
     if run(&alert) != 0 {
         return None;
     }
-    let text = field.stringValue().to_string();
-    if text.trim().is_empty() { None } else { Some(text) }
+    Some(field.stringValue().to_string())
 }
 
 /// Asks whether to trust a server's host key (never seen, or changed).

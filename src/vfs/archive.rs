@@ -41,6 +41,28 @@ unsafe extern "C" {
     fn archive_entry_mtime_is_set(e: *mut RawEntry) -> c_int;
     fn archive_entry_filetype(e: *mut RawEntry) -> libc::mode_t;
     fn archive_entry_perm(e: *mut RawEntry) -> libc::mode_t;
+
+    fn archive_write_new() -> *mut RawArchive;
+    fn archive_write_set_format_zip(a: *mut RawArchive) -> c_int;
+    fn archive_write_set_format_pax_restricted(a: *mut RawArchive) -> c_int;
+    fn archive_write_set_format_7zip(a: *mut RawArchive) -> c_int;
+    fn archive_write_add_filter_gzip(a: *mut RawArchive) -> c_int;
+    fn archive_write_add_filter_bzip2(a: *mut RawArchive) -> c_int;
+    fn archive_write_add_filter_xz(a: *mut RawArchive) -> c_int;
+    fn archive_write_open_filename(a: *mut RawArchive, path: *const c_char) -> c_int;
+    fn archive_write_header(a: *mut RawArchive, entry: *mut RawEntry) -> c_int;
+    fn archive_write_data(a: *mut RawArchive, buffer: *const c_void, size: usize) -> isize;
+    fn archive_write_finish_entry(a: *mut RawArchive) -> c_int;
+    fn archive_write_close(a: *mut RawArchive) -> c_int;
+    fn archive_write_free(a: *mut RawArchive) -> c_int;
+    fn archive_entry_new() -> *mut RawEntry;
+    fn archive_entry_free(e: *mut RawEntry);
+    fn archive_entry_set_pathname_utf8(e: *mut RawEntry, name: *const c_char);
+    fn archive_entry_set_size(e: *mut RawEntry, size: i64);
+    fn archive_entry_set_filetype(e: *mut RawEntry, kind: u32);
+    fn archive_entry_set_perm(e: *mut RawEntry, perm: libc::mode_t);
+    fn archive_entry_set_mtime(e: *mut RawEntry, seconds: libc::time_t, nanoseconds: std::ffi::c_long);
+    fn archive_entry_set_symlink_utf8(e: *mut RawEntry, target: *const c_char);
 }
 
 const ARCHIVE_OK: c_int = 0;
@@ -49,6 +71,7 @@ const ARCHIVE_WARN: c_int = -20;
 const AE_IFMT: u32 = 0o170000;
 const AE_IFDIR: u32 = 0o040000;
 const AE_IFLNK: u32 = 0o120000;
+const AE_IFREG: u32 = 0o100000;
 
 /// Names forkz opens as archives (by extension).
 const EXTENSIONS: &[&str] = &[
@@ -361,6 +384,171 @@ impl Vfs for ArchiveFs {
     }
 }
 
+/// What `compress` can make, by the new file's name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    Zip,
+    Tar,
+    TarGz,
+    TarBz2,
+    TarXz,
+    SevenZip,
+}
+
+impl Format {
+    pub fn for_name(name: &str) -> Option<Format> {
+        let lower = name.to_lowercase();
+        let ends = |s: &str| lower.ends_with(s);
+        Some(match () {
+            _ if ends(".zip") => Format::Zip,
+            _ if ends(".tar.gz") || ends(".tgz") => Format::TarGz,
+            _ if ends(".tar.bz2") || ends(".tbz2") => Format::TarBz2,
+            _ if ends(".tar.xz") || ends(".txz") => Format::TarXz,
+            _ if ends(".tar") => Format::Tar,
+            _ if ends(".7z") => Format::SevenZip,
+            _ => return None,
+        })
+    }
+}
+
+/// Writes an archive in progress; freed (and closed) when dropped.
+struct Writer(*mut RawArchive);
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        unsafe { archive_write_free(self.0) };
+    }
+}
+
+impl Writer {
+    fn check(&self, code: c_int) -> io::Result<()> {
+        if code >= ARCHIVE_WARN { Ok(()) } else { Err(self.error()) }
+    }
+
+    fn error(&self) -> io::Error {
+        let text = unsafe { archive_error_string(self.0) };
+        let message = if text.is_null() {
+            "The archive could not be written".to_string()
+        } else {
+            unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+        };
+        io::Error::other(message)
+    }
+}
+
+/// Makes an archive at `destination` (its name decides the format) of
+/// `sources` and everything in them, named relative to their folder.
+/// `progress` gets the bytes written so far; returning false stops.
+/// Nothing is left behind if it fails or is stopped.
+pub fn compress(sources: &[PathBuf], destination: &Path, progress: &mut dyn FnMut(u64) -> bool) -> io::Result<()> {
+    let name = destination.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let format = Format::for_name(&name).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "Use .zip, .tar, .tar.gz, .tar.bz2, .tar.xz, or .7z.")
+    })?;
+    let partial = destination.with_file_name(format!(".{name}.forkz-partial"));
+    let result = write_archive(sources, &partial, format, progress);
+    match result {
+        Ok(()) => std::fs::rename(&partial, destination),
+        Err(e) => {
+            let _ = std::fs::remove_file(&partial);
+            Err(e)
+        }
+    }
+}
+
+fn write_archive(
+    sources: &[PathBuf],
+    file: &Path,
+    format: Format,
+    progress: &mut dyn FnMut(u64) -> bool,
+) -> io::Result<()> {
+    let writer = Writer(unsafe { archive_write_new() });
+    unsafe {
+        let a = writer.0;
+        let set = match format {
+            Format::Zip => archive_write_set_format_zip(a),
+            Format::SevenZip => archive_write_set_format_7zip(a),
+            _ => archive_write_set_format_pax_restricted(a),
+        };
+        writer.check(set)?;
+        match format {
+            Format::TarGz => writer.check(archive_write_add_filter_gzip(a))?,
+            Format::TarBz2 => writer.check(archive_write_add_filter_bzip2(a))?,
+            Format::TarXz => writer.check(archive_write_add_filter_xz(a))?,
+            _ => {}
+        }
+        let path = CString::new(file.as_os_str().as_encoded_bytes()).map_err(io::Error::other)?;
+        writer.check(archive_write_open_filename(a, path.as_ptr()))?;
+    }
+    let mut written = 0u64;
+    let mut buffer = vec![0u8; 256 * 1024];
+    for source in sources {
+        let base = source.parent().unwrap_or(Path::new("/"));
+        let mut stack = vec![source.clone()];
+        while let Some(path) = stack.pop() {
+            let meta = std::fs::symlink_metadata(&path)?;
+            let relative = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().into_owned();
+            let entry = unsafe { archive_entry_new() };
+            let name = CString::new(if meta.is_dir() { format!("{relative}/") } else { relative })
+                .map_err(io::Error::other)?;
+            unsafe {
+                use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                archive_entry_set_pathname_utf8(entry, name.as_ptr());
+                archive_entry_set_perm(entry, (meta.permissions().mode() & 0o7777) as libc::mode_t);
+                archive_entry_set_mtime(entry, meta.mtime(), meta.mtime_nsec() as std::ffi::c_long);
+            }
+            let mut target = None;
+            if meta.file_type().is_symlink() {
+                target = Some(
+                    CString::new(std::fs::read_link(&path)?.as_os_str().as_encoded_bytes())
+                        .map_err(io::Error::other)?,
+                );
+                unsafe {
+                    archive_entry_set_filetype(entry, AE_IFLNK);
+                    archive_entry_set_symlink_utf8(entry, target.as_ref().map_or(std::ptr::null(), |t| t.as_ptr()));
+                }
+            } else if meta.is_dir() {
+                unsafe { archive_entry_set_filetype(entry, AE_IFDIR) };
+            } else {
+                unsafe {
+                    archive_entry_set_filetype(entry, AE_IFREG);
+                    archive_entry_set_size(entry, meta.len() as i64);
+                }
+            }
+            let header = writer.check(unsafe { archive_write_header(writer.0, entry) });
+            unsafe { archive_entry_free(entry) };
+            drop(target);
+            header?;
+            if meta.is_file() {
+                let mut input = std::fs::File::open(&path)?;
+                loop {
+                    let n = input.read(&mut buffer)?;
+                    if n == 0 {
+                        break;
+                    }
+                    if unsafe { archive_write_data(writer.0, buffer.as_ptr().cast(), n) } < 0 {
+                        return Err(writer.error());
+                    }
+                    written += n as u64;
+                    if !progress(written) {
+                        return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
+                    }
+                }
+            }
+            writer.check(unsafe { archive_write_finish_entry(writer.0) })?;
+            if meta.is_dir() {
+                let mut children: Vec<PathBuf> =
+                    std::fs::read_dir(&path)?.map(|e| e.map(|e| e.path())).collect::<io::Result<_>>()?;
+                // Popped from the end: reversed for name order.
+                children.sort();
+                children.reverse();
+                stack.extend(children);
+            }
+        }
+    }
+    writer.check(unsafe { archive_write_close(writer.0) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +652,34 @@ mod tests {
         assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
         assert_eq!(std::fs::read_to_string(out.join("docs/b.md")).unwrap(), "# bravo");
         assert_eq!(std::fs::read_to_string(out.join("docs/deep/c \u{e4}.txt")).unwrap().len(), 70_000);
+    }
+
+    #[test]
+    fn compresses_in_every_format_and_reads_back() {
+        let dir = sample();
+        let src = dir.path().join("src");
+        let sources = vec![src.join("a.txt"), src.join("docs")];
+        for name in ["out.zip", "out.tar", "out.tar.gz", "out.tbz2", "out.tar.xz", "out.7z"] {
+            let destination = dir.path().join(name);
+            let mut calls = 0;
+            compress(&sources, &destination, &mut |_| {
+                calls += 1;
+                true
+            })
+            .unwrap();
+            assert!(calls > 0, "{name}");
+            let fs = ArchiveFs::open(&destination, None).unwrap();
+            assert_eq!(names(&fs, "/"), [("a.txt".into(), false), ("docs".into(), true)], "{name}");
+            assert_eq!(read(&fs, "/docs/b.md"), "# bravo", "{name}");
+            let deep = fs.list(Path::new("/docs/deep")).unwrap().remove(0).path;
+            assert_eq!(read(&fs, &deep.to_string_lossy()).len(), 70_000, "{name}");
+        }
+        // Stopped: nothing is left.
+        let stopped = dir.path().join("stopped.zip");
+        let error = compress(&sources, &stopped, &mut |_| false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(!stopped.exists() && !dir.path().join(".stopped.zip.forkz-partial").exists());
+        assert!(compress(&sources, &dir.path().join("out.rar"), &mut |_| true).is_err());
     }
 
     #[test]

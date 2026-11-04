@@ -33,6 +33,35 @@ pub struct Settings {
     /// Toolbar items added since the toolbar was first saved, so they are
     /// added to saved toolbars once (1: pane and preview buttons).
     pub toolbar_version: u32,
+    /// Saved sets of tabs for both panes.
+    pub workspaces: Vec<Workspace>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Workspace {
+    pub name: String,
+    pub left: WorkspacePane,
+    pub right: WorkspacePane,
+    /// The pane that was active (0 or 1).
+    #[serde(default)]
+    pub active: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct WorkspacePane {
+    pub tabs: Vec<WorkspaceTab>,
+    pub active_tab: usize,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+}
+
+/// A folder on the Mac, or on a saved site.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkspaceTab {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -125,6 +154,7 @@ pub const COLUMNS: &[(&str, &str)] = &[
     ("modified", "Date Modified"),
     ("size", "Size"),
     ("kind", "Kind"),
+    ("tags", "Tags"),
     ("permissions", "Permissions"),
     ("owner", "Owner"),
     ("group", "Group"),
@@ -254,6 +284,7 @@ impl Default for Settings {
             shortcuts: Default::default(),
             preview: PreviewSettings::default(),
             toolbar_version: 0,
+            workspaces: Vec::new(),
         }
     }
 }

@@ -65,19 +65,20 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `pane`, `rename`
 ## Phase 3: parity
 
 - [x] Tabs in each pane (restored at launch)
-- [ ] Workspaces (saved sets of tabs and locations)
+- [x] Workspaces (saved sets of tabs and locations)
 - [ ] Column and icon views; Group by
 - [x] Preview pane (info, preview, activity, log)
 - [x] Filter field on each list
-- [ ] Search (name, content, Spotlight locally, scanning remotely), Quick Select
+- [x] Search (name, content, Spotlight locally, scanning remotely), Quick Select
 - [ ] Folder sync with preview, saved as "synclets"
 - [x] Multi-rename with rules and presets
 - [x] Archives browsed as folders (libarchive), extracting by copying out
-- [ ] Compressing, and changing archives
+- [x] Compressing (zip, tar, tar.gz, tar.bz2, tar.xz, 7z)
+- [ ] Changing archives in place
 - [ ] App deleter (leftover files when trashing an app)
 - [ ] Git status in the list; add, commit, push, pull
 - [x] Open in Terminal for iTerm, Warp, Ghostty, Kitty (and SSH sessions in them)
-- [ ] Tags
+- [x] Tags (column and editing)
 - [ ] Cloud drives (Google Drive, OneDrive, Dropbox) through OAuth
 - [x] Settings window
 - [x] Compare Files in an external tool (FileMerge, Kaleidoscope, Beyond Compare, BBEdit, VS Code)
@@ -88,7 +89,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `pane`, `rename`
 
 - [ ] Built-in diff for text and folders
 - [ ] Terminal pane that follows the current folder
-- [ ] Command palette
+- [x] Command palette
 - [ ] Remote locations in Finder (File Provider)
 - [x] Checksums (SHA-256, MD5)
 - [ ] Disk usage view, duplicate finder, hex viewer

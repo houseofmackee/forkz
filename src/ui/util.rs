@@ -13,6 +13,29 @@ use objc2_uniform_type_identifiers::UTType;
 
 use crate::fs::{Entry, EntryKind};
 
+/// A file's Finder tags (on the Mac).
+pub fn tags_of(path: &Path) -> Vec<String> {
+    let url = file_url(path);
+    let mut value: Option<Retained<objc2::runtime::AnyObject>> = None;
+    let key = unsafe { objc2_foundation::NSURLTagNamesKey };
+    if unsafe { url.getResourceValue_forKey_error(&mut value, key) }.is_err() {
+        return Vec::new();
+    }
+    value
+        .and_then(|v| v.downcast::<objc2_foundation::NSArray>().ok())
+        .map(|tags| tags.iter().filter_map(|t| t.downcast::<NSString>().ok()).map(|t| t.to_string()).collect())
+        .unwrap_or_default()
+}
+
+/// Replaces a file's Finder tags.
+pub fn set_tags(path: &Path, tags: &[String]) -> Result<(), String> {
+    let url = file_url(path);
+    let names: Vec<Retained<NSString>> = tags.iter().map(|t| ns(t)).collect();
+    let array = objc2_foundation::NSArray::from_retained_slice(&names);
+    let key = unsafe { objc2_foundation::NSURLTagNamesKey };
+    unsafe { url.setResourceValue_forKey_error(Some(&array), key) }.map_err(|e| e.localizedDescription().to_string())
+}
+
 pub fn mtm() -> MainThreadMarker {
     MainThreadMarker::new().expect("on the main thread")
 }

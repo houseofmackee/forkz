@@ -7,6 +7,18 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-04
+
+### Added
+
+- Search (Shift-Command-F): find items by name (with * and ? patterns) or by what files contain, in the active pane's folder and everything in it. On the Mac it uses Spotlight where the folder is indexed and searches the folders itself elsewhere; on servers and in archives it searches the folders. Results show in the pane like a folder, with a Folder column, and can be opened, copied, moved, renamed, or deleted. ".." returns to the folder searched.
+- Workspaces (Window > Workspaces): save the tabs of both panes, including folders on saved sites and hidden panes, and open them again with Control-Command-1 to 9. Server tabs connect one after another.
+- Compress (File > Compress…): makes a zip, tar, tar.gz, tar.bz2, tar.xz, or 7z archive of the selection; the name chosen picks the format.
+- Open with Default App (Option-Command-O): opens items in their usual app, archives too (instead of browsing them).
+- Finder tags: a Tags column, and File > Tags… to set or remove tags on the selection.
+- A command palette (Option-Command-P): type part of a command's name, choose it with the arrow keys, and press Return. Saved workspaces are in it too.
+- Select Matching (Option-Command-A): selects the items whose names match a pattern such as `*.jpg`.
+
 ## [0.4.0] - 2026-11-04
 
 ### Added
@@ -89,7 +101,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/houseofmackee/forkz/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/houseofmackee/forkz/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/houseofmackee/forkz/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/houseofmackee/forkz/compare/v0.2.0...v0.2.1

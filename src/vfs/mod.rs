@@ -5,6 +5,7 @@ pub mod archive;
 pub mod ftp;
 pub mod http;
 pub mod known_hosts;
+pub mod results;
 pub mod s3;
 pub mod sftp;
 pub mod ssh_config;
@@ -73,6 +74,17 @@ pub trait Vfs: Send + Sync {
     /// For a file system inside a file (an archive): where that file is,
     /// so going up from the top leaves it.
     fn outside(&self) -> Option<(FsRef, PathBuf)> {
+        None
+    }
+
+    /// For a view over another file system (search results): that file
+    /// system, where browsing beyond the view's top continues.
+    fn browse_fs(&self) -> Option<FsRef> {
+        None
+    }
+
+    /// A title for a place, instead of the folder's name.
+    fn title_for(&self, _path: &Path) -> Option<String> {
         None
     }
 

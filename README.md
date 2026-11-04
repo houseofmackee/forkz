@@ -16,7 +16,10 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - A filter field on each list, folder sizes, SHA-256 and MD5 checksums, Compare Files in your diff tool, and Open in Terminal with your terminal app
 - Rename Multiple Items with rules (replace, regular expressions, insert, remove, case, numbers, dates), a live preview, and presets
 - A preview pane with Info, a Quick Look preview (or an archive's contents), the session's transfers, and a log
-- Archives (zip, tar, 7z, rar, iso, and more) browsed like folders, read-only: copy items out to extract them
+- Archives (zip, tar, 7z, rar, iso, and more) browsed like folders, read-only: copy items out to extract them; Compress makes zip, tar.gz, 7z, and other archives
+- Search by name or contents (Spotlight on the Mac, and on servers and in archives too), with the results in a pane
+- Workspaces: saved sets of tabs for both panes, including server folders
+- Finder tags, a command palette, and Select Matching
 - A Settings window (Command-comma), with light and dark appearance, text size and row spacing, and your own keyboard shortcuts
 
 ## SFTP
@@ -70,6 +73,11 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 | F8 or Command-Delete | Move to Trash |
 | Command-D | Duplicate |
 | Option-Command-R | Rename multiple items |
+| Option-Command-O | Open with the default app |
+| Option-Command-A | Select matching items |
+| Shift-Command-F | Search |
+| Option-Command-P | Command palette |
+| Control-Command-S, Control-Command-1 to 9 | Save a workspace, open a workspace |
 | Shift-Command-. | Show or hide hidden files |
 | Shift-Command-G | Go to folder |
 | Command-U | Swap panes |

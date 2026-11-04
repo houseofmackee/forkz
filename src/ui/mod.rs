@@ -6,16 +6,19 @@ pub mod commands;
 mod dialogs;
 mod multi_rename;
 mod oplog;
+mod palette;
 mod pane_view;
 mod permissions;
 mod preview;
 mod promises;
 mod remote_edit;
+mod search;
 mod settings_window;
 mod sidebar;
 mod site_form;
 mod tools;
 mod util;
+mod workspaces;
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
@@ -108,6 +111,17 @@ define_class!(
             if let Some((id, _)) = crate::settings::COLUMNS.get(sender.tag() as usize) {
                 toggle_column(local, id);
             }
+        }
+
+        /// Window > Workspaces.
+        #[unsafe(method(openWorkspace:))]
+        fn open_workspace(&self, sender: &NSMenuItem) {
+            workspaces::open((sender.tag() - WORKSPACE_TAG) as usize);
+        }
+
+        #[unsafe(method(deleteWorkspace:))]
+        fn delete_workspace(&self, sender: &NSMenuItem) {
+            workspaces::delete((sender.tag() - WORKSPACE_TAG) as usize);
         }
 
         /// Commands > Simultaneous Transfers.
@@ -212,6 +226,9 @@ pub fn toggle_column(local: bool, id: &str) {
         }
     }
 }
+
+/// Tags of the workspace menu items: this plus the workspace's index.
+const WORKSPACE_TAG: isize = 3000;
 
 /// Tags of the Simultaneous Transfers items: this plus the number.
 const TRANSFER_LIMIT_TAG: isize = 2000;
@@ -371,7 +388,8 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     // drops Show Tab Bar and Show All Tabs from the View menu.
     NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
     let settings = Settings::load();
-    ns_app.setMainMenu(Some(&main_menu(mtm, &delegate, &settings.shortcuts)));
+    let names: Vec<String> = settings.workspaces.iter().map(|w| w.name.clone()).collect();
+    ns_app.setMainMenu(Some(&main_menu(mtm, &delegate, &settings.shortcuts, &names)));
     let panes = [
         PaneController::new(
             mtm,
@@ -554,14 +572,18 @@ fn first_launch_layout(window: &NSWindow) {
 pub fn rebuild_main_menu() {
     let Some(app) = app() else { return };
     let mtm = mtm();
-    let overrides = app.settings.borrow().shortcuts.clone();
-    NSApplication::sharedApplication(mtm).setMainMenu(Some(&main_menu(mtm, &app._delegate, &overrides)));
+    let (overrides, names) = {
+        let settings = app.settings.borrow();
+        (settings.shortcuts.clone(), settings.workspaces.iter().map(|w| w.name.clone()).collect::<Vec<_>>())
+    };
+    NSApplication::sharedApplication(mtm).setMainMenu(Some(&main_menu(mtm, &app._delegate, &overrides, &names)));
 }
 
 fn main_menu(
     mtm: MainThreadMarker,
     delegate: &AppDelegate,
     overrides: &std::collections::BTreeMap<String, String>,
+    workspaces_saved: &[String],
 ) -> Retained<NSMenu> {
     let bar = NSMenu::new(mtm);
     let submenu = |title: &str| {
@@ -624,16 +646,17 @@ fn main_menu(
     command(&file, Command::Disconnect);
     command(&file, Command::ImportFileZilla);
     separator(&file);
-    for c in [Command::Open, Command::QuickLook] {
+    for c in [Command::Open, Command::OpenWithApp, Command::QuickLook] {
         command(&file, c);
     }
     separator(&file);
-    for c in [Command::NewFolder, Command::Rename, Command::MultiRename, Command::Duplicate] {
+    for c in [Command::NewFolder, Command::Rename, Command::MultiRename, Command::Duplicate, Command::Compress] {
         command(&file, c);
     }
     separator(&file);
     command(&file, Command::Trash);
     command(&file, Command::Permissions);
+    command(&file, Command::EditTags);
     separator(&file);
     for c in [Command::CompareFiles, Command::CalculateSizes, Command::CopySha256, Command::CopyMd5] {
         command(&file, c);
@@ -652,8 +675,10 @@ fn main_menu(
     command(&edit, Command::MoveFilesHere);
     command(&edit, Command::CopyPath);
     standard(&edit, "Select All", sel!(selectAll:), "a");
+    command(&edit, Command::SelectMatching);
     separator(&edit);
     command(&edit, Command::Filter);
+    command(&edit, Command::Search);
 
     let view = submenu("View");
     for c in [Command::ToggleHidden, Command::Refresh] {
@@ -701,6 +726,8 @@ fn main_menu(
     command(&go, Command::GoToFolder);
 
     let commands = submenu("Commands");
+    command(&commands, Command::CommandPalette);
+    separator(&commands);
     for c in [Command::CopyToOther, Command::MoveToOther] {
         command(&commands, c);
     }
@@ -735,6 +762,43 @@ fn main_menu(
     separator(&window);
     command(&window, Command::NextTab);
     command(&window, Command::PreviousTab);
+    separator(&window);
+    let workspace_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Workspaces"));
+    command(&workspace_menu, Command::SaveWorkspace);
+    if !workspaces_saved.is_empty() {
+        workspace_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        let delete_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Delete Workspace"));
+        for (index, name) in workspaces_saved.iter().enumerate() {
+            let key = if index < 9 { (index + 1).to_string() } else { String::new() };
+            for (menu, action, key) in
+                [(&workspace_menu, sel!(openWorkspace:), key.as_str()), (&delete_menu, sel!(deleteWorkspace:), "")]
+            {
+                let item = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(mtm),
+                        &ns(name),
+                        Some(action),
+                        &ns(key),
+                    )
+                };
+                item.setKeyEquivalentModifierMask(
+                    objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Control,
+                );
+                item.setTag(WORKSPACE_TAG + index as isize);
+                unsafe { item.setTarget(Some(delegate)) };
+                menu.addItem(&item);
+            }
+        }
+        workspace_menu.addItem(&NSMenuItem::separatorItem(mtm));
+        let delete_item = NSMenuItem::new(mtm);
+        delete_item.setTitle(&ns("Delete Workspace"));
+        delete_item.setSubmenu(Some(&delete_menu));
+        workspace_menu.addItem(&delete_item);
+    }
+    let workspace_item = NSMenuItem::new(mtm);
+    workspace_item.setTitle(&ns("Workspaces"));
+    workspace_item.setSubmenu(Some(&workspace_menu));
+    window.addItem(&workspace_item);
     NSApplication::sharedApplication(mtm).setWindowsMenu(Some(&window));
     bar
 }
@@ -793,6 +857,9 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
             here == 2 || (here == 1 && app.panes[1 - index].selected_paths().len() == 1)
         }
         Command::Disconnect => !local,
+        Command::OpenWithApp => has_selection,
+        Command::Compress => has_selection && local && !pane.fs().read_only(),
+        Command::EditTags => has_selection && local,
         // One pane always stays.
         Command::ToggleLeftPane => app.panes[0].view().isHidden() || !app.panes[1].view().isHidden(),
         Command::ToggleRightPane => app.panes[1].view().isHidden() || !app.panes[0].view().isHidden(),
@@ -820,6 +887,13 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::Rename => rename(&pane),
         Command::MultiRename => multi_rename(&pane),
         Command::TogglePreview => toggle_preview(),
+        Command::OpenWithApp => open_with_app(&pane),
+        Command::Compress => compress(&pane),
+        Command::EditTags => edit_tags(&pane),
+        Command::CommandPalette => command_palette(),
+        Command::SelectMatching => select_matching(&pane),
+        Command::Search => search::run(&pane),
+        Command::SaveWorkspace => workspaces::save(),
         Command::ToggleLeftPane => toggle_pane(0),
         Command::ToggleRightPane => toggle_pane(1),
         Command::Duplicate => {
@@ -988,14 +1062,15 @@ pub fn update_settings(change: impl FnOnce(&mut Settings)) {
     let Some(app) = app() else { return };
     let (show_hidden, limit, appearance_changed, shortcuts_changed) = {
         let mut settings = app.settings.borrow_mut();
-        let (appearance, shortcuts) = (settings.appearance.clone(), settings.shortcuts.clone());
+        let (appearance, shortcuts, workspaces) =
+            (settings.appearance.clone(), settings.shortcuts.clone(), settings.workspaces.clone());
         change(&mut settings);
         settings.save();
         (
             settings.show_hidden,
             settings.transfers.max_transfers,
             settings.appearance != appearance,
-            settings.shortcuts != shortcuts,
+            settings.shortcuts != shortcuts || settings.workspaces != workspaces,
         )
     };
     for pane in &app.panes {
@@ -1564,6 +1639,191 @@ fn job_finished(id: isize, job: Job, outcome: Outcome) {
     activity::report_problems(&outcome);
 }
 
+fn activity_view() -> Option<Retained<Activity>> {
+    app().map(|a| a.activity.clone())
+}
+
+fn pane(index: usize) -> Option<Retained<PaneController>> {
+    app().and_then(|a| a.panes.get(index).cloned())
+}
+
+/// Opens the selection with each item's default app (archives too, instead
+/// of browsing them). Server and archive items are downloaded first.
+fn open_with_app(pane: &PaneController) {
+    let paths = pane.target_paths();
+    if paths.is_empty() {
+        return;
+    }
+    if pane.is_local() {
+        let workspace = NSWorkspace::sharedWorkspace();
+        for path in &paths {
+            workspace.openURL(&file_url(path));
+        }
+    } else {
+        let files: Vec<PathBuf> =
+            pane.entries_for(&paths).into_iter().filter(|e| !e.is_folder_like()).map(|e| e.path).collect();
+        open_remote(pane.fs(), files);
+    }
+}
+
+/// Compresses the selection into an archive beside it (the name chosen
+/// picks the format).
+fn compress(pane: &PaneController) {
+    let paths = pane.target_paths();
+    let Some(first) = paths.first() else { return };
+    let folder = pane.location();
+    let suggested = if paths.len() == 1 { format!("{}.zip", title_of(first)) } else { "Archive.zip".to_string() };
+    let stem = suggested.len() - ".zip".len();
+    let Some(name) = dialogs::prompt(
+        "Compress",
+        "Name of the archive: .zip, .tar.gz, .tar.bz2, .tar.xz, .tar, or .7z.",
+        "Compress",
+        &suggested,
+        Some(suggested[..stem].chars().count()),
+    ) else {
+        return;
+    };
+    let name = name.trim().to_string();
+    if vfs::archive::Format::for_name(&name).is_none() {
+        dialogs::show_error(
+            "forkz cannot make that kind of archive.".into(),
+            "End the name with .zip, .tar.gz, .tar.bz2, .tar.xz, .tar, or .7z.".into(),
+        );
+        return;
+    }
+    let destination = folder.join(&name);
+    if destination.exists() {
+        dialogs::show_error(format!("\u{201c}{name}\u{201d} already exists."), "Choose another name.".into());
+        return;
+    }
+    let Some(app) = app() else { return };
+    let note = app.activity.begin_note(&format!("Compressing into \u{201c}{name}\u{201d}\u{2026}"));
+    let index = pane.index();
+    std::thread::spawn(move || {
+        let result = vfs::archive::compress(&paths, &destination, &mut |_| true);
+        DispatchQueue::main().exec_async(move || {
+            let Some(app) = self::app() else { return };
+            app.activity.remove(note);
+            match result {
+                Ok(()) => {
+                    let what = if paths.len() == 1 {
+                        format!("\u{201c}{}\u{201d}", title_of(&paths[0]))
+                    } else {
+                        format!("{} items", paths.len())
+                    };
+                    oplog::record(
+                        oplog::Kind::Change,
+                        format!("Compressed {what} into \u{201c}{name}\u{201d}"),
+                        folder.display().to_string(),
+                    );
+                    app.panes[index].reload_selecting(&[destination]);
+                }
+                Err(e) => {
+                    oplog::record(
+                        oplog::Kind::Problem,
+                        format!("Could not compress into \u{201c}{name}\u{201d}"),
+                        e.to_string(),
+                    );
+                    dialogs::show_error(format!("\u{201c}{name}\u{201d} could not be made."), e.to_string());
+                }
+            }
+        });
+    });
+}
+
+/// Sets the Finder tags of the selection.
+fn edit_tags(pane: &PaneController) {
+    let paths = pane.target_paths();
+    let Some(first) = paths.first() else { return };
+    let current = util::tags_of(first).join(", ");
+    let what = if paths.len() == 1 {
+        format!("\u{201c}{}\u{201d}", title_of(first))
+    } else {
+        format!("{} items", paths.len())
+    };
+    let Some(text) = dialogs::prompt_allow_empty(
+        &format!("Tags for {what}"),
+        "Separate tags with commas. Finder's colors (Red, Orange, Yellow, Green, Blue, Purple, Gray) work as tags. Leave it empty to remove all tags.",
+        "Set Tags",
+        &current,
+    ) else {
+        return;
+    };
+    let tags: Vec<String> = text.split(',').map(str::trim).filter(|t| !t.is_empty()).map(str::to_string).collect();
+    let failed: Vec<String> =
+        paths.iter().filter_map(|p| util::set_tags(p, &tags).err().map(|e| format!("{}: {e}", title_of(p)))).collect();
+    oplog::record(
+        oplog::Kind::Change,
+        format!("Tagged {what}: {}", if tags.is_empty() { "no tags".into() } else { tags.join(", ") }),
+        "",
+    );
+    pane.reload();
+    if !failed.is_empty() {
+        dialogs::show_error("Some tags could not be set.".into(), failed.join("\n"));
+    }
+}
+
+/// Selects the items matching a pattern.
+fn select_matching(pane: &PaneController) {
+    thread_local! {
+        static LAST: RefCell<String> = const { RefCell::new(String::new()) };
+    }
+    let last = LAST.with(|l| l.borrow().clone());
+    let Some(text) = dialogs::prompt(
+        "Select Matching",
+        "Names matching: * is any text, ? one character, [a-z] one of these. Separate several with ; (plain text matches names containing it).",
+        "Select",
+        &last,
+        None,
+    ) else {
+        return;
+    };
+    LAST.with(|l| *l.borrow_mut() = text.clone());
+    if pane.select_matching(&crate::fs::glob::Patterns::new(&text)) == 0 {
+        objc2_app_kit::NSBeep();
+    }
+}
+
+/// Shows the command palette and runs what is chosen.
+fn command_palette() {
+    let Some(app) = app() else { return };
+    let active = app.active.get();
+    #[derive(Clone, Copy)]
+    enum Action {
+        Run(Command),
+        Workspace(usize),
+    }
+    let overrides = app.settings.borrow().shortcuts.clone();
+    let mut items: Vec<palette::Item<Action>> = Command::ALL
+        .iter()
+        .copied()
+        .filter(|c| {
+            *c != Command::CommandPalette && is_enabled_in(*c, active, !app.panes[active].selected_paths().is_empty())
+        })
+        .map(|c| {
+            let (key, modifiers) = c.effective_shortcut(&overrides);
+            palette::Item {
+                title: command_title(c, active).trim_end_matches('\u{2026}').to_string(),
+                detail: commands::display(&key, modifiers),
+                value: Action::Run(c),
+            }
+        })
+        .collect();
+    let names: Vec<String> = app.settings.borrow().workspaces.iter().map(|w| w.name.clone()).collect();
+    items.extend(names.into_iter().enumerate().map(|(i, name)| palette::Item {
+        title: format!("Open Workspace \u{201c}{name}\u{201d}"),
+        detail: if i < 9 { format!("\u{2303}\u{2318}{}", i + 1) } else { String::new() },
+        value: Action::Workspace(i),
+    }));
+    let window = app.window.clone();
+    drop(app);
+    match palette::show(items, Some(&window)) {
+        Some(Action::Run(command)) => run_command(command, Some(active)),
+        Some(Action::Workspace(index)) => workspaces::open(index),
+        None => {}
+    }
+}
+
 /// The pane commands go to by default.
 pub fn active_index() -> usize {
     app().map_or(0, |a| a.active.get())
@@ -1687,7 +1947,10 @@ fn update_title(app: &App) {
     let pane = &app.panes[app.active.get()];
     let location = pane.location();
     let fs = pane.fs();
-    if fs.is_local() {
+    if let Some(title) = fs.title_for(&location) {
+        app.window.setTitle(&ns(&title));
+        app.window.setRepresentedURL(None);
+    } else if fs.is_local() {
         app.window.setTitle(&ns(&title_of(&location)));
         app.window.setRepresentedURL(Some(&file_url(&location)));
     } else {
@@ -1888,6 +2151,7 @@ fn connect_site(site: crate::sites::Site, pane_index: usize, password: Option<St
     let existing = app.connections.borrow().iter().find(|(id, _)| *id == site.id).map(|(_, fs)| fs.clone());
     if let Some(fs) = existing {
         show_site(&site, fs, pane_index);
+        workspaces::connection_done();
         return;
     }
     let (timeout, extra_keys) = {
@@ -1921,10 +2185,12 @@ fn connect_site(site: crate::sites::Site, pane_index: usize, password: Option<St
                     oplog::record(oplog::Kind::Connection, format!("Connected to {}", site.address()), "");
                     app.connections.borrow_mut().push((site.id.clone(), fs.clone()));
                     show_site(&site, fs, pane_index);
+                    workspaces::connection_done();
                 }
                 Err(e) => {
                     // The site stays clickable: show what the pane shows.
                     update_title(&app);
+                    workspaces::connection_done();
                     if e.kind() != std::io::ErrorKind::Interrupted {
                         let message = format!("Could not connect to {}", site.address());
                         oplog::record(oplog::Kind::Problem, message.clone(), e.to_string());

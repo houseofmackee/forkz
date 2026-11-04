@@ -122,6 +122,9 @@ impl PaneState {
 
     /// The display name of the location ("Macintosh HD" for "/").
     pub fn title(&self) -> String {
+        if let Some(title) = self.fs.title_for(&self.location) {
+            return title;
+        }
         if self.fs.is_local() || self.location.parent().is_some() { title_of(&self.location) } else { self.fs.label() }
     }
 
@@ -129,7 +132,9 @@ impl PaneState {
     /// Locally, falls back to the nearest existing parent if the folder is
     /// gone (deleted, or its volume ejected).
     pub fn reload(&mut self) {
-        if !self.fs.is_local() {
+        // Remote folders, and views such as search results, list through
+        // their file system.
+        if !self.fs.is_local() || self.fs.title_for(&self.location).is_some() {
             let result = self.fs.list(&self.location);
             let generation = self.generation;
             self.set_listing(generation, result);
@@ -221,7 +226,11 @@ impl PaneState {
     /// Goes to a folder on the same file system, recording the current one
     /// for Back.
     pub fn navigate(&mut self, path: PathBuf) {
-        let fs = self.fs.clone();
+        // Leaving search results for a folder in them: the real one.
+        let fs = match self.fs.browse_fs() {
+            Some(inner) if path != self.fs.home() => inner,
+            _ => self.fs.clone(),
+        };
         self.navigate_to(fs, path);
     }
 
@@ -252,6 +261,14 @@ impl PaneState {
     /// Goes to the parent folder. Returns the folder it came from, to
     /// select it.
     pub fn go_up(&mut self) -> Option<PathBuf> {
+        // Search results: up is the folder searched.
+        if let Some(inner) = self.fs.browse_fs()
+            && self.location == self.fs.home()
+        {
+            let folder = self.location.clone();
+            self.navigate_to(inner, folder);
+            return Some(PathBuf::new());
+        }
         // At the top of an archive: out to the folder it is in.
         if self.location.parent().is_none()
             && let Some((fs, file)) = self.fs.outside()
