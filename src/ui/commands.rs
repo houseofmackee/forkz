@@ -40,6 +40,12 @@ pub enum Command {
     Disconnect,
     ImportFileZilla,
     Permissions,
+    CompareFiles,
+    CalculateSizes,
+    CopySha256,
+    CopyMd5,
+    Filter,
+    Settings,
 }
 
 impl Command {
@@ -78,6 +84,12 @@ impl Command {
         Command::Disconnect,
         Command::ImportFileZilla,
         Command::Permissions,
+        Command::CompareFiles,
+        Command::CalculateSizes,
+        Command::CopySha256,
+        Command::CopyMd5,
+        Command::Filter,
+        Command::Settings,
     ];
 
     pub fn tag(self) -> isize {
@@ -124,6 +136,12 @@ impl Command {
             Command::Disconnect => "Disconnect",
             Command::ImportFileZilla => "Import from FileZilla\u{2026}",
             Command::Permissions => "Permissions\u{2026}",
+            Command::CompareFiles => "Compare Files",
+            Command::CalculateSizes => "Calculate Folder Sizes",
+            Command::CopySha256 => "Copy SHA-256 Checksum",
+            Command::CopyMd5 => "Copy MD5 Checksum",
+            Command::Filter => "Filter\u{2026}",
+            Command::Settings => "Settings\u{2026}",
         }
     }
 
@@ -167,6 +185,13 @@ impl Command {
             Command::Disconnect => ("e", cmd),
             Command::ImportFileZilla => ("", cmd),
             Command::Permissions => ("i", cmd),
+            // Not Option-Command-D: macOS uses it to hide the Dock.
+            Command::CompareFiles => ("c", cmd | NSEventModifierFlags::Control),
+            Command::CalculateSizes => ("s", opt_cmd),
+            Command::CopySha256 => ("", cmd),
+            Command::CopyMd5 => ("", cmd),
+            Command::Filter => ("f", cmd),
+            Command::Settings => (",", cmd),
         }
     }
 

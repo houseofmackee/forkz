@@ -7,6 +7,17 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+### Added
+
+- A Settings window (Command-comma) with General, Transfers, and SFTP: hidden files, starting on "..", the terminal and compare apps, automatic update checks, simultaneous transfers, keeping dates, what to do when a file exists on download or upload, the connection timeout, extra key files, and the trusted host keys file.
+- A filter field above each list (Command-F): shows only names containing what you type, on the Mac and on servers. Escape clears it.
+- Calculate Folder Sizes (Option-Command-S): sizes of the selected folders, or all of them, in the background, locally and on servers; folders then sort by size.
+- Copy SHA-256 Checksum and Copy MD5 Checksum, for files on the Mac or on a server.
+- Compare Files (Control-Command-C): two files in one pane, or one in each, in FileMerge, Kaleidoscope, Beyond Compare, BBEdit, or Visual Studio Code. Server files are downloaded first.
+- Open in Terminal can use iTerm, Warp, Ghostty, or Kitty instead of Terminal.
+- Server folders can be added to the sidebar; clicking one connects and opens it.
+- An option to select ".." when opening a folder.
+
 ## [0.1.0] - 2026-11-04
 
 ### Added

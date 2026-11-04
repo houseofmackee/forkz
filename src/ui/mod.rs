@@ -6,8 +6,10 @@ pub mod commands;
 mod dialogs;
 mod pane_view;
 mod permissions;
+mod settings_window;
 mod sidebar;
 mod site_form;
+mod tools;
 mod util;
 
 use std::cell::{Cell, OnceCell, RefCell};
@@ -528,6 +530,8 @@ fn main_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSMenu> 
 
     let app_menu = submenu("forkz");
     standard(&app_menu, "About forkz", sel!(orderFrontStandardAboutPanel:), "");
+    separator(&app_menu);
+    command(&app_menu, Command::Settings);
     for (title, action) in [
         ("Check for Updates\u{2026}", sel!(checkForUpdates:)),
         ("Check for Updates Automatically", sel!(toggleAutomaticUpdates:)),
@@ -561,6 +565,10 @@ fn main_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSMenu> 
     command(&file, Command::Trash);
     command(&file, Command::Permissions);
     separator(&file);
+    for c in [Command::CompareFiles, Command::CalculateSizes, Command::CopySha256, Command::CopyMd5] {
+        command(&file, c);
+    }
+    separator(&file);
     for c in [Command::RevealInFinder, Command::OpenInTerminal, Command::AddToSidebar] {
         command(&file, c);
     }
@@ -574,6 +582,8 @@ fn main_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSMenu> 
     command(&edit, Command::MoveFilesHere);
     command(&edit, Command::CopyPath);
     standard(&edit, "Select All", sel!(selectAll:), "a");
+    separator(&edit);
+    command(&edit, Command::Filter);
 
     let view = submenu("View");
     for c in [Command::ToggleHidden, Command::Refresh] {
@@ -676,8 +686,22 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         }
         // These need files on the Mac.
         Command::CopyFiles | Command::QuickLook => has_selection && local,
-        Command::RevealInFinder | Command::AddToSidebar => local,
-        Command::RemoveFromSidebar => local && app.settings.borrow().favorites.contains(&pane.location()),
+        Command::RevealInFinder => local,
+        Command::AddToSidebar => local || site_of(&pane.fs()).is_some(),
+        Command::RemoveFromSidebar => {
+            let settings = app.settings.borrow();
+            if local {
+                settings.favorites.contains(&pane.location())
+            } else {
+                let site = site_of(&pane.fs());
+                settings.remote_favorites.iter().any(|f| Some(&f.site_id) == site.as_ref() && f.path == pane.location())
+            }
+        }
+        Command::CopySha256 | Command::CopyMd5 => has_selection,
+        Command::CompareFiles => {
+            let here = pane.selected_paths().len();
+            here == 2 || (here == 1 && app.panes[1 - index].selected_paths().len() == 1)
+        }
         Command::Disconnect => !local,
         Command::PasteFiles | Command::MoveFilesHere => {
             !pane_view::paths_on_pasteboard(&NSPasteboard::generalPasteboard()).is_empty()
@@ -752,8 +776,13 @@ pub fn run_command(command: Command, pane: Option<usize>) {
                 folders.into_iter().for_each(add_favorite);
             }
         }
-        Command::AddToSidebar => {}
-        Command::RemoveFromSidebar => remove_favorite(&pane.location()),
+        Command::AddToSidebar => add_remote_favorites(&pane),
+        Command::RemoveFromSidebar if pane.is_local() => remove_favorite(&pane.location()),
+        Command::RemoveFromSidebar => {
+            if let Some(site_id) = site_of(&pane.fs()) {
+                remove_remote_favorite(&site_id, &pane.location());
+            }
+        }
         Command::ToggleHidden => {
             let show = {
                 let mut settings = app.settings.borrow_mut();
@@ -797,7 +826,233 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::Disconnect => disconnect(&pane.fs().key()),
         Command::ImportFileZilla => import_filezilla(),
         Command::Permissions => change_permissions(&pane),
+        Command::CompareFiles => compare_files(&pane, &other),
+        Command::CalculateSizes => calculate_sizes(&pane),
+        Command::CopySha256 => copy_checksums(&pane, crate::fs::checksum::Algorithm::Sha256),
+        Command::CopyMd5 => copy_checksums(&pane, crate::fs::checksum::Algorithm::Md5),
+        Command::Filter => pane.focus_filter(),
+        Command::Settings => settings_window::show(),
     }
+}
+
+/// A copy of the settings (for the Settings window).
+pub fn current_settings() -> Option<Settings> {
+    app().map(|a| a.settings.borrow().clone())
+}
+
+/// Changes settings, saves them, and applies what changed.
+pub fn update_settings(change: impl FnOnce(&mut Settings)) {
+    let Some(app) = app() else { return };
+    let (show_hidden, limit) = {
+        let mut settings = app.settings.borrow_mut();
+        change(&mut settings);
+        settings.save();
+        (settings.show_hidden, settings.transfers.max_transfers)
+    };
+    for pane in &app.panes {
+        if pane.show_hidden() != show_hidden {
+            pane.set_show_hidden(show_hidden);
+        }
+    }
+    app.activity.set_limit(limit);
+}
+
+/// The saved site a connection was opened from.
+fn site_of(fs: &FsRef) -> Option<String> {
+    let app = app()?;
+    let connections = app.connections.borrow();
+    connections.iter().find(|(_, c)| vfs::same(c, fs)).map(|(id, _)| id.clone())
+}
+
+/// Entering a folder selects ".." (a setting).
+pub fn start_on_parent() -> bool {
+    app().is_some_and(|a| a.settings.borrow().general.start_on_parent)
+}
+
+/// Compare Files: two files in the pane, or one in each pane, in the
+/// chosen compare tool. Server files are downloaded first.
+fn compare_files(pane: &PaneController, other: &PaneController) {
+    let here = pane.target_paths();
+    let there = other.selected_paths();
+    let pair: Vec<(FsRef, PathBuf)> = match (here.as_slice(), there.as_slice()) {
+        ([a, b], _) => vec![(pane.fs(), a.clone()), (pane.fs(), b.clone())],
+        ([a], [b]) => vec![(pane.fs(), a.clone()), (other.fs(), b.clone())],
+        _ => {
+            dialogs::show_error(
+                "Select two files to compare.".into(),
+                "Select two files in one pane, or one file in each pane.".into(),
+            );
+            return;
+        }
+    };
+    // Two files or two folders: tools cannot compare a file with a folder.
+    let kinds: Vec<Option<bool>> = pair.iter().map(|(fs, p)| fs.stat(p).ok().map(|e| e.is_folder_like())).collect();
+    if kinds[0] != kinds[1] {
+        dialogs::show_error(
+            "A file cannot be compared with a folder.".into(),
+            "Select two files, or two folders.".into(),
+        );
+        return;
+    }
+    let tool = app().map(|a| a.settings.borrow().general.compare_tool.clone()).unwrap_or_default();
+    std::thread::spawn(move || {
+        let local: std::io::Result<Vec<PathBuf>> = pair.iter().map(|(fs, path)| local_copy(fs, path)).collect();
+        DispatchQueue::main().exec_async(move || {
+            let result = local.and_then(|paths| tools::compare(&tool, &paths[0], &paths[1]));
+            if let Err(e) = result {
+                dialogs::show_error("The files could not be compared.".into(), e.to_string());
+            }
+        });
+    });
+}
+
+/// A local path for a file: itself on the Mac, a downloaded copy for a
+/// server file (in a temporary folder).
+fn local_copy(fs: &FsRef, path: &Path) -> std::io::Result<PathBuf> {
+    if fs.is_local() {
+        return Ok(path.to_path_buf());
+    }
+    if fs.stat(path)?.kind == crate::fs::EntryKind::Folder {
+        return Err(std::io::Error::other("Folders on servers cannot be compared yet."));
+    }
+    let folder = std::env::temp_dir().join("forkz-compare").join(crate::sites::new_id());
+    std::fs::create_dir_all(&folder)?;
+    let target = folder.join(title_of(path));
+    let mut reader = fs.open_read(path)?;
+    let mut writer = std::fs::File::create(&target)?;
+    std::io::copy(&mut reader, &mut writer)?;
+    Ok(target)
+}
+
+/// Calculate Folder Sizes: for the selected folders, or every folder in
+/// the list, in the background.
+fn calculate_sizes(pane: &PaneController) {
+    let Some(app) = app() else { return };
+    let selected: Vec<PathBuf> = pane
+        .entries_for(&pane.target_paths())
+        .into_iter()
+        .filter(|e| e.kind == crate::fs::EntryKind::Folder)
+        .map(|e| e.path)
+        .collect();
+    let folders = if selected.is_empty() { pane.folder_paths() } else { selected };
+    if folders.is_empty() {
+        return;
+    }
+    let (fs, location, index) = (pane.fs(), pane.location(), pane.index());
+    let note = app.activity.begin_note("Calculating folder sizes\u{2026}");
+    std::thread::spawn(move || {
+        // A server gets a connection of its own, so browsing stays quick.
+        let walker = if fs.is_local() { fs.clone() } else { fs.connect_another().unwrap_or_else(|_| fs.clone()) };
+        for folder in folders {
+            let (bytes, _) = ops::measure(&walker, &folder);
+            let (fs, location) = (fs.clone(), location.clone());
+            DispatchQueue::main().exec_async(move || {
+                let Some(app) = self::app() else { return };
+                let pane = &app.panes[index];
+                if vfs::same(&pane.fs(), &fs) && pane.location() == location {
+                    pane.set_folder_size(&folder, bytes);
+                }
+            });
+        }
+        DispatchQueue::main().exec_async(move || {
+            if let Some(app) = self::app() {
+                app.activity.remove(note);
+            }
+        });
+    });
+}
+
+/// Copy SHA-256 or MD5 Checksum: of the selected files, to the clipboard.
+fn copy_checksums(pane: &PaneController, algorithm: crate::fs::checksum::Algorithm) {
+    let Some(app) = app() else { return };
+    let files: Vec<PathBuf> =
+        pane.entries_for(&pane.target_paths()).into_iter().filter(|e| !e.is_folder_like()).map(|e| e.path).collect();
+    if files.is_empty() {
+        return;
+    }
+    let fs = pane.fs();
+    let note = app.activity.begin_note(&format!("Calculating {}\u{2026}", algorithm.name()));
+    std::thread::spawn(move || {
+        let reader = if fs.is_local() { fs.clone() } else { fs.connect_another().unwrap_or_else(|_| fs.clone()) };
+        let results: Vec<(PathBuf, std::io::Result<String>)> =
+            files.into_iter().map(|f| (f.clone(), crate::fs::checksum::checksum(&reader, &f, algorithm))).collect();
+        DispatchQueue::main().exec_async(move || {
+            let Some(app) = self::app() else { return };
+            app.activity.remove(note);
+            let mut copied = Vec::new();
+            let mut shown = Vec::new();
+            for (path, result) in &results {
+                let name = title_of(path);
+                match result {
+                    Ok(hash) => {
+                        // Like shasum: "hash  name" (just the hash for one file).
+                        copied.push(if results.len() == 1 { hash.clone() } else { format!("{hash}  {name}") });
+                        // Groups of 8 wrap cleanly (the alert would hyphenate).
+                        let grouped: Vec<String> =
+                            hash.as_bytes().chunks(8).map(|c| String::from_utf8_lossy(c).into_owned()).collect();
+                        shown.push(format!("{name}\n{}", grouped.join(" ")));
+                    }
+                    Err(e) => shown.push(format!("{name}\ncould not be read: {e}")),
+                }
+            }
+            if !copied.is_empty() {
+                let pasteboard = NSPasteboard::generalPasteboard();
+                pasteboard.clearContents();
+                pasteboard.setString_forType(&ns(&copied.join("\n")), unsafe { NSPasteboardTypeString });
+            }
+            let message = if copied.is_empty() {
+                format!("The {} could not be calculated.", algorithm.name())
+            } else {
+                format!("{} copied to the clipboard.", algorithm.name())
+            };
+            dialogs::show_info(message, shown.join("\n\n"));
+        });
+    });
+}
+
+/// Add to Sidebar on a server: the selected folders, or the current one,
+/// as bookmarks of the site.
+fn add_remote_favorites(pane: &PaneController) {
+    let Some(app) = app() else { return };
+    let Some(site_id) = site_of(&pane.fs()) else { return };
+    let folders: Vec<PathBuf> =
+        pane.entries_for(&pane.target_paths()).into_iter().filter(|e| e.is_folder_like()).map(|e| e.path).collect();
+    let folders = if folders.is_empty() { vec![pane.location()] } else { folders };
+    {
+        let mut settings = app.settings.borrow_mut();
+        for path in folders {
+            let favorite = crate::settings::RemoteFavorite { site_id: site_id.clone(), path };
+            if !settings.remote_favorites.contains(&favorite) {
+                settings.remote_favorites.push(favorite);
+            }
+        }
+        settings.save();
+    }
+    reload_sidebar();
+}
+
+fn remove_remote_favorite(site_id: &str, path: &Path) {
+    let Some(app) = app() else { return };
+    {
+        let mut settings = app.settings.borrow_mut();
+        settings.remote_favorites.retain(|f| !(f.site_id == site_id && f.path == path));
+        settings.save();
+    }
+    reload_sidebar();
+}
+
+/// A server bookmark in the sidebar: connects (or reuses the connection)
+/// and opens the folder.
+fn open_remote_favorite(site_id: &str, path: &Path) {
+    let Some(app) = app() else { return };
+    let Some(mut site) = app.sites.borrow().get(site_id).cloned() else {
+        dialogs::show_error("The site of this bookmark was deleted.".into(), String::new());
+        return;
+    };
+    site.remote_dir = Some(path.display().to_string());
+    // A bookmark is about this folder: the other pane stays where it is.
+    site.local_dir = None;
+    connect_site(site, app.active.get(), None, false);
 }
 
 /// Asks for new permissions and applies them in the background.
@@ -891,11 +1146,8 @@ fn open_in_terminal(pane: &PaneController) {
         [one] if pane.is_local() && one.is_dir() => one.clone(),
         _ => pane.location(),
     };
-    let result = if fs.is_local() {
-        std::process::Command::new("/usr/bin/open").args(["-a", "Terminal"]).arg(&folder).spawn().map(|_| ())
-    } else {
-        ssh_in_terminal(&fs, &folder)
-    };
+    let terminal = app().map(|a| a.settings.borrow().general.terminal.clone()).unwrap_or_default();
+    let result = if fs.is_local() { tools::open_terminal(&terminal, &folder) } else { ssh_in_terminal(&fs, &folder) };
     if let Err(e) = result {
         dialogs::show_error("Terminal could not be opened.".into(), e.to_string());
     }
@@ -920,7 +1172,7 @@ fn ssh_in_terminal(fs: &FsRef, folder: &Path) -> std::io::Result<()> {
     std::fs::write(&script, format!("#!/bin/sh\nrm -f \"$0\"\nexec {command}\n"))?;
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
-    std::process::Command::new("/usr/bin/open").args(["-a", "Terminal"]).arg(&script).spawn().map(|_| ())
+    tools::run_in_terminal(&app.settings.borrow().general.terminal, &script)
 }
 
 fn new_folder(pane: &PaneController) {
@@ -1073,7 +1325,7 @@ fn current_place(app: &App) -> sidebar::Current {
     }
     let connections = app.connections.borrow();
     match connections.iter().find(|(_, c)| vfs::same(c, &fs)) {
-        Some((id, _)) => sidebar::Current::Site(id.clone()),
+        Some((id, _)) => sidebar::Current::Site(id.clone(), pane.location()),
         None => sidebar::Current::Other,
     }
 }
@@ -1148,9 +1400,12 @@ fn remove_favorite(path: &Path) {
 
 fn reload_sidebar() {
     let Some(app) = app() else { return };
-    let favorites = app.settings.borrow().favorites.clone();
+    let (favorites, remote) = {
+        let settings = app.settings.borrow();
+        (settings.favorites.clone(), settings.remote_favorites.clone())
+    };
     let sites = app.sites.borrow().sites.clone();
-    app.sidebar.reload(&favorites, &sites, current_place(&app));
+    app.sidebar.reload(&favorites, &remote, &sites, current_place(&app));
 }
 
 // Sites and connections.

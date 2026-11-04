@@ -13,6 +13,8 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - Copy, move, duplicate, trash, rename, and new folder, with progress, Stop, and a conflict dialog (Replace, Replace if Older, Keep Both, Skip, Merge, and "Apply to all")
 - Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files
 - Quick Look, a hidden files toggle, and live updates when folders change
+- A filter field on each list, folder sizes, SHA-256 and MD5 checksums, Compare Files in your diff tool, and Open in Terminal with your terminal app
+- A Settings window (Command-comma)
 
 ## SFTP
 
@@ -60,6 +62,10 @@ FTP sites and passwords protected by a FileZilla master password are listed as n
 | Command-K | Connect to a server |
 | Command-E | Disconnect |
 | Command-I | Permissions |
+| Command-F | Filter the list |
+| Option-Command-S | Calculate folder sizes |
+| Control-Command-C | Compare files |
+| Command-comma | Settings |
 
 ## Requirements
 

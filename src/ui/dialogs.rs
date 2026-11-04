@@ -118,6 +118,14 @@ pub fn show_error(message: String, detail: String) {
     });
 }
 
+/// Tells about something that worked (no warning style).
+pub fn show_info(message: String, detail: String) {
+    present(move || {
+        let alert = alert(mtm(), &message, &detail);
+        run(&alert);
+    });
+}
+
 /// Asks for a line of text. `select` is how many characters to select at
 /// the start (the name without its extension when renaming).
 pub fn prompt(message: &str, informative: &str, ok: &str, initial: &str, select: Option<usize>) -> Option<String> {

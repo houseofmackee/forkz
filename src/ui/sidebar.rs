@@ -22,8 +22,24 @@ use crate::pane::title_of;
 #[derive(Debug, Clone, PartialEq)]
 enum Row {
     Header(&'static str),
-    Place { title: String, path: PathBuf, symbol: Option<&'static str>, favorite: bool },
-    Site { id: String, title: String, detail: String },
+    Place {
+        title: String,
+        path: PathBuf,
+        symbol: Option<&'static str>,
+        favorite: bool,
+    },
+    Site {
+        id: String,
+        title: String,
+        detail: String,
+    },
+    /// A folder on a saved site.
+    RemoteFavorite {
+        site_id: String,
+        path: PathBuf,
+        title: String,
+        detail: String,
+    },
 }
 
 /// Actions in the Sites context menu (menu item tags).
@@ -77,8 +93,10 @@ define_class!(
         #[unsafe(method(removeFavorite:))]
         fn remove_favorite(&self, _sender: Option<&AnyObject>) {
             let Some(row) = self.ivars().menu_row.take() else { return };
-            if let Some(Row::Place { path, favorite: true, .. }) = self.ivars().rows.borrow().get(row).cloned() {
-                super::remove_favorite(&path);
+            match self.ivars().rows.borrow().get(row).cloned() {
+                Some(Row::Place { path, favorite: true, .. }) => super::remove_favorite(&path),
+                Some(Row::RemoteFavorite { site_id, path, .. }) => super::remove_remote_favorite(&site_id, &path),
+                _ => {}
             }
         }
     }
@@ -159,6 +177,7 @@ define_class!(
             match usize::try_from(row).ok().and_then(|r| self.ivars().rows.borrow().get(r).cloned()) {
                 Some(Row::Place { path, .. }) => super::open_in_active_pane(path),
                 Some(Row::Site { id, .. }) => super::site_action(SiteAction::Connect, Some(id)),
+                Some(Row::RemoteFavorite { site_id, path, .. }) => super::open_remote_favorite(&site_id, &path),
                 _ => {}
             }
         }
@@ -200,7 +219,7 @@ define_class!(
                 }
                 _ => {}
             }
-            if let Some(Row::Place { favorite: true, .. }) = favorite {
+            if let Some(Row::Place { favorite: true, .. } | Row::RemoteFavorite { .. }) = favorite {
                 self.ivars().menu_row.set(row);
                 let item = unsafe {
                     NSMenuItem::initWithTitle_action_keyEquivalent(
@@ -235,6 +254,7 @@ impl Sidebar {
             }
             Row::Place { title, path, symbol: name, .. } => place_cell(self.mtm(), title, path, *name),
             Row::Site { title, detail, .. } => site_cell(self.mtm(), title, detail),
+            Row::RemoteFavorite { title, detail, .. } => site_cell(self.mtm(), title, detail),
         })
     }
 
@@ -285,7 +305,13 @@ impl Sidebar {
     }
 
     /// Rebuilds the rows from the favorites and mounted volumes.
-    pub fn reload(&self, favorites: &[PathBuf], sites: &[crate::sites::Site], current: Current) {
+    pub fn reload(
+        &self,
+        favorites: &[PathBuf],
+        remote_favorites: &[crate::settings::RemoteFavorite],
+        sites: &[crate::sites::Site],
+        current: Current,
+    ) {
         let mut rows = vec![Row::Header("Favorites")];
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let standard = [
@@ -303,6 +329,17 @@ impl Sidebar {
         }
         for path in favorites {
             rows.push(Row::Place { title: title_of(path), path: path.clone(), symbol: None, favorite: true });
+        }
+        for favorite in remote_favorites {
+            // Bookmarks of deleted sites are left out.
+            let Some(site) = sites.iter().find(|s| s.id == favorite.site_id) else { continue };
+            let folder = if favorite.path.parent().is_none() { "/".to_string() } else { title_of(&favorite.path) };
+            rows.push(Row::RemoteFavorite {
+                site_id: favorite.site_id.clone(),
+                path: favorite.path.clone(),
+                title: format!("{folder} ({})", site.name),
+                detail: format!("{}{}", site.address(), favorite.path.display()),
+            });
         }
         rows.push(Row::Header("Locations"));
         for (title, path) in volumes() {
@@ -326,7 +363,10 @@ impl Sidebar {
     pub fn highlight(&self, current: Current) {
         let row = self.ivars().rows.borrow().iter().position(|r| match (r, &current) {
             (Row::Place { path, .. }, Current::Local(current)) => path == current,
-            (Row::Site { id, .. }, Current::Site(current)) => id == current,
+            (Row::RemoteFavorite { site_id, path, .. }, Current::Site(current, location)) => {
+                site_id == current && path == location
+            }
+            (Row::Site { id, .. }, Current::Site(current, _)) => id == current,
             _ => false,
         });
         self.ivars().updating.set(true);
@@ -341,8 +381,8 @@ impl Sidebar {
 /// What the active pane shows, to highlight it in the sidebar.
 pub enum Current {
     Local(PathBuf),
-    /// A connection opened from this site (by id).
-    Site(String),
+    /// A folder on a connection opened from this site (by id).
+    Site(String, PathBuf),
     Other,
 }
 

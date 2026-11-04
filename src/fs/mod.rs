@@ -1,6 +1,7 @@
 //! The file system as the panes see it: listing folders, sorting entries,
 //! and formatting sizes. Pure Rust, so it can be tested without AppKit.
 
+pub mod checksum;
 pub mod ops;
 
 use std::cmp::Ordering;

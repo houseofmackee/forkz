@@ -19,6 +19,51 @@ pub struct Settings {
     pub transfers: TransferSettings,
     pub sftp: SftpSettings,
     pub columns: ColumnSettings,
+    pub general: GeneralSettings,
+    /// Server folders added to the sidebar.
+    pub remote_favorites: Vec<RemoteFavorite>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct GeneralSettings {
+    /// Entering a folder selects ".." instead of the first item.
+    pub start_on_parent: bool,
+    /// The terminal app for Open in Terminal (a key of `TERMINALS`).
+    pub terminal: String,
+    /// The tool for Compare Files (a key of `COMPARE_TOOLS`).
+    pub compare_tool: String,
+}
+
+impl Default for GeneralSettings {
+    fn default() -> Self {
+        GeneralSettings { start_on_parent: false, terminal: "terminal".into(), compare_tool: "filemerge".into() }
+    }
+}
+
+/// Terminal apps: (key, name, bundle identifier).
+pub const TERMINALS: &[(&str, &str, &str)] = &[
+    ("terminal", "Terminal", "com.apple.Terminal"),
+    ("iterm", "iTerm", "com.googlecode.iterm2"),
+    ("warp", "Warp", "dev.warp.Warp-Stable"),
+    ("ghostty", "Ghostty", "com.mitchellh.ghostty"),
+    ("kitty", "Kitty", "net.kovidgoyal.kitty"),
+];
+
+/// Compare tools: (key, name, bundle identifier of the app it needs).
+pub const COMPARE_TOOLS: &[(&str, &str, &str)] = &[
+    ("filemerge", "FileMerge", "com.apple.FileMerge"),
+    ("kaleidoscope", "Kaleidoscope", "app.kaleidoscope.v4,com.kaleidoscopeapp.v3,com.blackpixel.kaleidoscope"),
+    ("beyondcompare", "Beyond Compare", "com.ScooterSoftware.BeyondCompare"),
+    ("bbedit", "BBEdit", "com.barebones.bbedit"),
+    ("vscode", "Visual Studio Code", "com.microsoft.VSCode"),
+];
+
+/// A folder on a saved site, shown in the sidebar.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteFavorite {
+    pub site_id: String,
+    pub path: PathBuf,
 }
 
 /// The optional list columns, in order: (identifier, title).
@@ -125,6 +170,8 @@ impl Default for Settings {
             transfers: TransferSettings::default(),
             sftp: SftpSettings::default(),
             columns: ColumnSettings::default(),
+            general: GeneralSettings::default(),
+            remote_favorites: Vec::new(),
         }
     }
 }

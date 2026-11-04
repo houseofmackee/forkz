@@ -27,6 +27,10 @@ pub struct PaneState {
     pub loading: bool,
     /// Counts loads, so a slow listing for a folder already left is ignored.
     generation: u64,
+    /// Only names containing this are shown (case-insensitive); "" for all.
+    filter_text: String,
+    /// Sizes of folders calculated in this folder, kept across reloads.
+    folder_sizes: std::collections::HashMap<PathBuf, u64>,
 }
 
 impl PaneState {
@@ -43,6 +47,8 @@ impl PaneState {
             error: None,
             loading: false,
             generation: 0,
+            filter_text: String::new(),
+            folder_sizes: std::collections::HashMap::new(),
         };
         pane.load();
         pane
@@ -79,9 +85,9 @@ impl PaneState {
         }
         self.loading = false;
         match result {
-            Ok(mut entries) => {
-                fs::sort_entries(&mut entries, self.sort);
+            Ok(entries) => {
                 self.all = entries;
+                self.apply_sizes_and_sort();
                 self.error = None;
             }
             Err(e) => {
@@ -131,9 +137,9 @@ impl PaneState {
             }
         }
         match fs::list_dir(&self.location) {
-            Ok(mut entries) => {
-                fs::sort_entries(&mut entries, self.sort);
+            Ok(entries) => {
                 self.all = entries;
+                self.apply_sizes_and_sort();
                 self.error = None;
             }
             Err(e) => {
@@ -145,7 +151,55 @@ impl PaneState {
     }
 
     fn filter(&mut self) {
-        self.visible = self.all.iter().filter(|e| self.show_hidden || !e.hidden).cloned().collect();
+        let needle = self.filter_text.to_lowercase();
+        for entry in &mut self.all {
+            if let Some(size) = self.folder_sizes.get(&entry.path) {
+                entry.size = *size;
+            }
+        }
+        self.visible = self
+            .all
+            .iter()
+            .filter(|e| self.show_hidden || !e.hidden)
+            .filter(|e| needle.is_empty() || e.name.to_lowercase().contains(&needle))
+            .cloned()
+            .collect();
+    }
+
+    fn apply_sizes_and_sort(&mut self) {
+        for entry in &mut self.all {
+            if let Some(size) = self.folder_sizes.get(&entry.path) {
+                entry.size = *size;
+            }
+        }
+        fs::sort_entries(&mut self.all, self.sort);
+    }
+
+    pub fn filter_text(&self) -> &str {
+        &self.filter_text
+    }
+
+    /// Shows only names containing `text` ("" shows everything).
+    pub fn set_filter(&mut self, text: &str) {
+        self.filter_text = text.to_string();
+        self.filter();
+    }
+
+    /// How many items there are without the filter (hidden ones aside).
+    pub fn unfiltered_count(&self) -> usize {
+        self.all.iter().filter(|e| self.show_hidden || !e.hidden).count()
+    }
+
+    /// Records a folder's calculated size (shown, and used for sorting).
+    pub fn set_folder_size(&mut self, path: &Path, size: u64) {
+        self.folder_sizes.insert(path.to_path_buf(), size);
+        self.filter();
+        fs::sort_entries(&mut self.all, self.sort);
+        self.filter();
+    }
+
+    pub fn folder_size(&self, path: &Path) -> Option<u64> {
+        self.folder_sizes.get(path).copied()
     }
 
     pub fn set_show_hidden(&mut self, show: bool) {
@@ -179,6 +233,8 @@ impl PaneState {
         self.forward.clear();
         self.all.clear();
         self.visible.clear();
+        self.filter_text.clear();
+        self.folder_sizes.clear();
         self.load();
     }
 
@@ -223,6 +279,8 @@ impl PaneState {
     fn swap_place(&mut self, fs: FsRef, path: PathBuf) -> Place {
         let changed_fs = !vfs::same(&fs, &self.fs);
         let previous = (std::mem::replace(&mut self.fs, fs), std::mem::replace(&mut self.location, path));
+        self.filter_text.clear();
+        self.folder_sizes.clear();
         if changed_fs || !self.fs.is_local() {
             self.all.clear();
             self.visible.clear();
@@ -337,6 +395,35 @@ mod tests {
         assert!(pane.is_local() && !pane.loading);
         pane.go_back();
         assert!(!pane.is_local() && pane.loading);
+    }
+
+    #[test]
+    fn filter_and_folder_sizes() {
+        let dir = folder();
+        std::fs::write(dir.path().join("Banana.txt"), "").unwrap();
+        std::fs::create_dir(dir.path().join("aaa")).unwrap();
+        let root = dir.path().to_path_buf();
+        let mut pane = PaneState::new(vfs::local(), root.clone(), Sort::default(), false);
+        pane.set_filter("an");
+        let names: Vec<_> = pane.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["Banana.txt"], "case-insensitive, hidden items stay hidden");
+        assert_eq!(pane.unfiltered_count(), 4);
+        pane.set_filter("");
+        // A calculated folder size shows and sorts.
+        pane.set_sort(Sort { key: crate::fs::SortKey::Size, ascending: false });
+        pane.set_folder_size(&root.join("aaa"), 10);
+        pane.set_folder_size(&root.join("sub"), 9_999);
+        let order = |p: &PaneState| p.entries().iter().map(|e| e.name.clone()).take(2).collect::<Vec<_>>();
+        assert_eq!(order(&pane), ["sub", "aaa"], "largest folder first");
+        pane.reload();
+        assert_eq!(pane.folder_size(&root.join("sub")), Some(9_999), "kept across reloads");
+        assert_eq!(order(&pane), ["sub", "aaa"], "and still sorted by it");
+        pane.navigate(root.join("sub"));
+        pane.go_back();
+        assert_eq!(pane.folder_size(&root.join("sub")), None, "forgotten when leaving");
+        pane.set_filter("x");
+        pane.navigate(root.join("sub"));
+        assert_eq!(pane.filter_text(), "", "the filter is per folder visit");
     }
 
     #[test]

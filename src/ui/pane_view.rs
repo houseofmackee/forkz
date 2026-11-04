@@ -12,11 +12,11 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_clas
 use objc2_app_kit::{
     NSColor, NSControl, NSControlTextEditingDelegate, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags,
     NSImageView, NSLayoutConstraintOrientation, NSMenu, NSMenuDelegate, NSMenuItem, NSMenuItemValidation,
-    NSPasteboardTypeFileURL, NSPasteboardWriting, NSPathControl, NSResponder, NSScrollView, NSStackView,
-    NSTableCellView, NSTableColumn, NSTableColumnResizingOptions, NSTableView, NSTableViewColumnAutoresizingStyle,
-    NSTableViewDataSource, NSTableViewDelegate, NSTableViewDropOperation, NSTableViewStyle, NSTextAlignment,
-    NSTextField, NSUserInterfaceItemIdentification, NSUserInterfaceLayoutOrientation, NSView, NSWindowDelegate,
-    NSWorkspace,
+    NSPasteboardTypeFileURL, NSPasteboardWriting, NSPathControl, NSResponder, NSScrollView, NSSearchFieldDelegate,
+    NSStackView, NSTableCellView, NSTableColumn, NSTableColumnResizingOptions, NSTableView,
+    NSTableViewColumnAutoresizingStyle, NSTableViewDataSource, NSTableViewDelegate, NSTableViewDropOperation,
+    NSTableViewStyle, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView, NSUserInterfaceItemIdentification,
+    NSUserInterfaceLayoutOrientation, NSView, NSWindowDelegate, NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSEdgeInsets, NSIndexSet, NSInteger, NSMutableIndexSet, NSNotification, NSObject, NSObjectProtocol,
@@ -235,6 +235,8 @@ pub struct PaneIvars {
     context_row: Cell<Option<usize>>,
     /// The column chooser shown on the column titles.
     header_menu: OnceCell<Retained<NSMenu>>,
+    /// The filter field above the list.
+    filter: OnceCell<Retained<objc2_app_kit::NSSearchField>>,
     /// What to select once a remote listing arrives.
     pending_select: RefCell<Option<Vec<PathBuf>>>,
     /// The folders of the path bar's items when remote (they have no URLs).
@@ -364,7 +366,24 @@ define_class!(
         }
     }
 
-    unsafe impl NSControlTextEditingDelegate for PaneController {}
+    unsafe impl NSControlTextEditingDelegate for PaneController {
+        /// Typing in the filter field filters as you type.
+        #[unsafe(method(controlTextDidChange:))]
+        fn control_text_did_change(&self, _notification: &NSNotification) {
+            self.filter_changed();
+        }
+
+        /// In the filter field, Escape clears it, and Return, Down, and Tab
+        /// go back to the list.
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn filter_command(&self, _control: &NSControl, _view: &NSTextView, command: objc2::runtime::Sel) -> bool {
+            self.filter_key(command)
+        }
+    }
+
+    unsafe impl NSSearchFieldDelegate for PaneController {}
+
+    unsafe impl NSTextFieldDelegate for PaneController {}
 
     unsafe impl NSTableViewDelegate for PaneController {
         #[unsafe(method_id(tableView:viewForTableColumn:row:))]
@@ -458,6 +477,10 @@ impl PaneController {
                 Some(Trash),
                 None,
                 Some(Permissions),
+                Some(CompareFiles),
+                Some(CalculateSizes),
+                Some(CopySha256),
+                None,
                 Some(CopyFiles),
                 Some(CopyPath),
                 Some(RevealInFinder),
@@ -471,6 +494,7 @@ impl PaneController {
                 Some(RevealInFinder),
                 Some(AddToSidebar),
                 None,
+                Some(CalculateSizes),
                 Some(ToggleHidden),
                 Some(Refresh),
             ],
@@ -485,7 +509,12 @@ impl PaneController {
                 Some(Trash),
                 None,
                 Some(Permissions),
+                Some(CompareFiles),
+                Some(CalculateSizes),
+                Some(CopySha256),
+                None,
                 Some(CopyPath),
+                Some(AddToSidebar),
             ],
             (false, false) => &[
                 Some(NewFolder),
@@ -493,7 +522,9 @@ impl PaneController {
                 None,
                 Some(OpenInTerminal),
                 Some(CopyPath),
+                Some(AddToSidebar),
                 None,
+                Some(CalculateSizes),
                 Some(ToggleHidden),
                 Some(Refresh),
                 None,
@@ -584,7 +615,10 @@ impl PaneController {
                 }
                 entry.name.clone()
             }
-            "size" if entry.is_folder_like() => "--".into(),
+            "size" if entry.is_folder_like() => match state.folder_size(&entry.path) {
+                Some(size) => fs::format_size(size),
+                None => "--".into(),
+            },
             "size" => fs::format_size(entry.size),
             "modified" => format_date(entry.modified),
             "permissions" => fs::format_permissions(entry),
@@ -625,6 +659,7 @@ impl PaneController {
             context_row: Cell::new(None),
             pending_select: RefCell::new(None),
             header_menu: OnceCell::new(),
+            filter: OnceCell::new(),
             crumbs: RefCell::new(Vec::new()),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -724,10 +759,24 @@ impl PaneController {
         container.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
         container.setSpacing(4.0);
         container.setEdgeInsets(NSEdgeInsets { top: 4.0, left: 0.0, bottom: 4.0, right: 0.0 });
-        container.addArrangedSubview(&path_control);
+        // The filter field sits to the right of the path bar.
+        let filter = objc2_app_kit::NSSearchField::new(mtm);
+        filter.setPlaceholderString(Some(&ns("Filter")));
+        filter.widthAnchor().constraintEqualToConstant(150.0).setActive(true);
+        filter.setControlSize(objc2_app_kit::NSControlSize::Small);
+        filter.setFont(Some(&objc2_app_kit::NSFont::systemFontOfSize(objc2_app_kit::NSFont::smallSystemFontSize())));
+        unsafe { filter.setDelegate(Some(ProtocolObject::from_ref(self))) };
+        let path_row = NSStackView::stackViewWithViews(
+            &NSArray::from_slice(&[&*path_control as &NSView, &*filter as &NSView]),
+            mtm,
+        );
+        path_row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        path_row.setSpacing(8.0);
+        container.addArrangedSubview(&path_row);
         container.addArrangedSubview(&scroll);
         container.addArrangedSubview(&status);
-        for view in [&*path_control as &NSView, &scroll, &status] {
+        let _ = self.ivars().filter.set(filter);
+        for view in [&*path_row as &NSView, &scroll, &status] {
             view.leadingAnchor().constraintEqualToAnchor_constant(&container.leadingAnchor(), 6.0).setActive(true);
             view.trailingAnchor().constraintEqualToAnchor_constant(&container.trailingAnchor(), -6.0).setActive(true);
         }
@@ -745,6 +794,10 @@ impl PaneController {
 
     pub fn is_local(&self) -> bool {
         self.ivars().state.borrow().is_local()
+    }
+
+    pub fn show_hidden(&self) -> bool {
+        self.ivars().state.borrow().show_hidden()
     }
 
     /// Lists a remote folder in the background if the state is waiting for it.
@@ -913,7 +966,9 @@ impl PaneController {
                 let first = {
                     let state = self.ivars().state.borrow();
                     let offset = parent_offset(&state);
-                    if !state.entries().is_empty() {
+                    if offset > 0 && super::start_on_parent() {
+                        NSIndexSet::indexSetWithIndex(0)
+                    } else if !state.entries().is_empty() {
                         NSIndexSet::indexSetWithIndex(offset)
                     } else if offset > 0 {
                         NSIndexSet::indexSetWithIndex(0)
@@ -947,7 +1002,73 @@ impl PaneController {
             *self.ivars().pending_select.borrow_mut() = Some(wanted);
         }
         self.apply_columns();
+        self.sync_filter_field();
         self.update_path_bar();
+        self.update_status();
+    }
+
+    fn filter_changed(&self) {
+        let Some(field) = self.ivars().filter.get() else { return };
+        let text = field.stringValue().to_string();
+        let selected = self.selected_paths();
+        self.ivars().state.borrow_mut().set_filter(text.trim());
+        self.table().reloadData();
+        if selected.is_empty() {
+            self.refresh(Some(&[]));
+        } else {
+            self.select_paths(&selected);
+            if self.table().selectedRow() < 0 {
+                self.refresh(Some(&[]));
+            }
+        }
+        self.update_status();
+    }
+
+    fn filter_key(&self, command: objc2::runtime::Sel) -> bool {
+        if command == sel!(cancelOperation:) {
+            if let Some(field) = self.ivars().filter.get() {
+                field.setStringValue(&ns(""));
+            }
+            self.filter_changed();
+            self.focus();
+            true
+        } else if command == sel!(insertNewline:) || command == sel!(moveDown:) || command == sel!(insertTab:) {
+            self.focus();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Edit > Filter (Command-F): to the filter field.
+    pub fn focus_filter(&self) {
+        if let (Some(field), Some(window)) = (self.ivars().filter.get(), self.table().window()) {
+            window.makeFirstResponder(Some(field));
+        }
+    }
+
+    /// Empties the filter field (after going to another folder).
+    fn sync_filter_field(&self) {
+        if let Some(field) = self.ivars().filter.get() {
+            let text = self.ivars().state.borrow().filter_text().to_string();
+            if field.stringValue().to_string().trim() != text {
+                field.setStringValue(&ns(&text));
+            }
+        }
+    }
+
+    /// The folders shown in the list (to calculate all their sizes).
+    pub fn folder_paths(&self) -> Vec<PathBuf> {
+        let state = self.ivars().state.borrow();
+        state.entries().iter().filter(|e| e.kind == crate::fs::EntryKind::Folder).map(|e| e.path.clone()).collect()
+    }
+
+    /// A folder's calculated size arrived.
+    pub fn set_folder_size(&self, path: &Path, size: u64) {
+        let selected = self.selected_paths();
+        self.ivars().state.borrow_mut().set_folder_size(path, size);
+        self.table().reloadData();
+        self.select_paths(&selected);
         self.update_status();
     }
 
@@ -1046,6 +1167,9 @@ impl PaneController {
                     .map(|r| r - offset)
                     .collect();
                 let mut text = selection_summary(state.entries(), &rows);
+                if !state.filter_text().is_empty() {
+                    text.push_str(&format!(" (filtered from {})", state.unfiltered_count()));
+                }
                 if !state.is_local() {
                     text.push_str(&format!(", {}", state.fs().label()));
                 } else if let Some(free) = fs::available_space(state.location()) {
