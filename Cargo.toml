@@ -24,7 +24,7 @@ hmac = "0.12"
 httpdate = "1"
 libc = "0.2"
 native-tls = "0.2"
-md-5 = "0.10"
+md-5 = "0.11"
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 percent-encoding = "2"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
