@@ -7,6 +7,8 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-04
+
 ### Added
 
 - A Settings window (Command-comma) with General, Transfers, and SFTP: hidden files, starting on "..", the terminal and compare apps, automatic update checks, simultaneous transfers, keeping dates, what to do when a file exists on download or upload, the connection timeout, extra key files, and the trusted host keys file.
@@ -42,5 +44,6 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/houseofmackee/forkz/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/houseofmackee/forkz/releases/tag/v0.1.0
