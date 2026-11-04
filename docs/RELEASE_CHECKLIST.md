@@ -14,6 +14,7 @@ Work through this for every release, on an Apple silicon Mac.
 
 - [ ] Commit, then tag and push: `git tag vX.Y.Z && git push origin main vX.Y.Z`.
 - [ ] The Release workflow passes, and the release (published as the latest, regular release) has the DMG, zip, `SHA256SUMS.txt`, and `appcast.xml`.
+- [ ] If the workflow fails with "The job was not acquired by Runner of type hosted" (no free macOS runner on GitHub), publish from this Mac instead: `scripts/release_local.sh` with the tag checked out. It signs, notarizes, checks, publishes, and updates the cask like the workflow does.
 - [ ] `Casks/forkz.rb` in houseofmackee/homebrew-tap has the new version and the DMG's checksum.
 - [ ] https://github.com/houseofmackee/forkz/releases/latest/download/appcast.xml offers the new version.
 

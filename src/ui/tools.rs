@@ -64,18 +64,64 @@ pub fn open_terminal(key: &str, folder: &Path) -> io::Result<()> {
     }
 }
 
-/// Runs a shell script (an SSH session) in a terminal window. Terminal and
-/// iTerm open .command files; Ghostty and Kitty run it as their command;
-/// Warp cannot, so Terminal does.
-pub fn run_in_terminal(key: &str, script: &Path) -> io::Result<()> {
+/// Runs an SSH session (a shell command) in a new window of the chosen
+/// terminal: Terminal and iTerm open a .command file, Warp a tab config
+/// (its URL scheme cannot run commands), Ghostty and Kitty take it as
+/// their command.
+pub fn run_ssh(key: &str, command: &str) -> io::Result<()> {
     let (key, app) = terminal_app(key);
+    if key == "warp" {
+        return run_in_warp(&app, command);
+    }
+    let script = std::env::temp_dir().join(format!("forkz-ssh-{}.command", crate::sites::new_id()));
+    std::fs::write(&script, format!("#!/bin/sh\nrm -f \"$0\"\nexec {command}\n"))?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
     let script_text = script.to_string_lossy();
     match key.as_str() {
         "iterm" => open_app(&app, &[&script_text]),
         "ghostty" => open_app(&app, &["-n", "--args", "-e", "/bin/sh", &script_text]),
         "kitty" => open_app(&app, &["-n", "--args", "/bin/sh", &script_text]),
-        _ => open_app(Path::new("/System/Applications/Utilities/Terminal.app"), &[&script_text]),
+        _ => open_app(&app, &[&script_text]),
     }
+}
+
+/// The tab config forkz writes for Warp (in ~/.warp/tab_configs/, replaced
+/// each time) and opens with Warp's URL scheme.
+const WARP_TAB_CONFIG: &str = "forkz_ssh_session";
+
+#[derive(serde::Serialize)]
+struct WarpTabConfig {
+    name: String,
+    title: String,
+    panes: Vec<WarpPane>,
+}
+
+#[derive(serde::Serialize)]
+struct WarpPane {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    commands: Vec<String>,
+}
+
+/// The tab config's text: one terminal pane running the command.
+pub fn warp_tab_config(command: &str) -> String {
+    let config = WarpTabConfig {
+        name: "forkz SSH session".into(),
+        title: "forkz SSH".into(),
+        panes: vec![WarpPane { id: "main".into(), kind: "terminal".into(), commands: vec![command.to_string()] }],
+    };
+    toml::to_string(&config).unwrap_or_default()
+}
+
+fn run_in_warp(app: &Path, command: &str) -> io::Result<()> {
+    let folder = dirs::home_dir().ok_or_else(|| io::Error::other("no home folder"))?.join(".warp/tab_configs");
+    std::fs::create_dir_all(&folder)?;
+    std::fs::write(folder.join(format!("{WARP_TAB_CONFIG}.toml")), warp_tab_config(command))?;
+    let url = format!("warp://tab_config/{WARP_TAB_CONFIG}?new_window=true");
+    // To the chosen Warp app (in case another app also handles warp://).
+    open_app(app, &[&url])
 }
 
 /// Compares two local files in the chosen tool.
@@ -106,5 +152,21 @@ pub fn compare(key: &str, left: &Path, right: &Path) -> io::Result<()> {
             let (l, r) = (left.to_string_lossy(), right.to_string_lossy());
             open_app(&app, &[&l, &r])
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn warp_tab_config_runs_the_command() {
+        let command = "ssh -p 22 -t 'me@host' 'cd '\\''/srv/my site'\\'' && exec $SHELL -l'";
+        let text = warp_tab_config(command);
+        let parsed: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(parsed["name"].as_str(), Some("forkz SSH session"));
+        let pane = &parsed["panes"][0];
+        assert_eq!(pane["type"].as_str(), Some("terminal"));
+        assert_eq!(pane["commands"][0].as_str(), Some(command), "quotes survive the TOML");
     }
 }

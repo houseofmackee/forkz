@@ -1168,11 +1168,7 @@ fn ssh_in_terminal(fs: &FsRef, folder: &Path) -> std::io::Result<()> {
     let target = if site.user.is_empty() { site.host.clone() } else { format!("{}@{}", site.user, site.host) };
     let remote = format!("cd {} && exec $SHELL -l", quote(&folder.to_string_lossy()));
     command.push_str(&format!("-t {} {}", quote(&target), quote(&remote)));
-    let script = std::env::temp_dir().join(format!("forkz-ssh-{}.command", crate::sites::new_id()));
-    std::fs::write(&script, format!("#!/bin/sh\nrm -f \"$0\"\nexec {command}\n"))?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
-    tools::run_in_terminal(&app.settings.borrow().general.terminal, &script)
+    tools::run_ssh(&app.settings.borrow().general.terminal, &command)
 }
 
 fn new_folder(pane: &PaneController) {

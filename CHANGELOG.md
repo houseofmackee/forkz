@@ -7,6 +7,10 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+### Fixed
+
+- Open in Terminal on a server folder now uses the chosen terminal. With Warp it used Terminal instead; it now opens a Warp window running the SSH session (through a tab config forkz keeps in `~/.warp/tab_configs/forkz_ssh_session.toml`).
+
 ## [0.2.0] - 2026-11-04
 
 ### Added

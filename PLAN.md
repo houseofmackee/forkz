@@ -46,6 +46,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `pane`, `setting
 - [x] Import from FileZilla: sites, passwords, key files, folders, trusted host keys, settings
 - [x] Open remote files (download and open), Open in Terminal over SSH, `forkz sftp://...`
 - [ ] Remote editing: upload on save
+- [ ] Drag from a server pane to Finder (file promises)
 - [x] `~/.ssh/config` hosts (aliases, HostName, User, Port, IdentityFile, IdentitiesOnly, Include)
 - [x] ProxyJump and ProxyCommand
 - [x] Permissions column and dialog (chmod, recursive)
@@ -62,14 +63,19 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `pane`, `setting
 - [ ] Tabs in each pane; workspaces (saved tabs and locations)
 - [ ] Column and icon views; Group by
 - [ ] Preview pane (info, preview, activity, log)
-- [ ] Search (name, content, Spotlight locally, scanning remotely), filter, Quick Select
+- [x] Filter field on each list
+- [ ] Search (name, content, Spotlight locally, scanning remotely), Quick Select
 - [ ] Folder sync with preview, saved as "synclets"
 - [ ] Multi-rename with rules and presets
 - [ ] Archives browsed as folders (libarchive); compress and extract
 - [ ] App deleter (leftover files when trashing an app)
 - [ ] Git status in the list; add, commit, push, pull
-- [ ] Tags; Open in Terminal for iTerm, Warp, Ghostty, Kitty
+- [x] Open in Terminal for iTerm, Warp, Ghostty, Kitty (and SSH sessions in them)
+- [ ] Tags
 - [ ] Cloud drives (Google Drive, OneDrive, Dropbox) through OAuth
+- [x] Settings window
+- [x] Compare Files in an external tool (FileMerge, Kaleidoscope, Beyond Compare, BBEdit, VS Code)
+- [x] Folder sizes; server folder bookmarks
 - [ ] Shortcut editor; themes
 
 ## Phase 4: extras
@@ -78,7 +84,8 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `pane`, `setting
 - [ ] Terminal pane that follows the current folder
 - [ ] Command palette
 - [ ] Remote locations in Finder (File Provider)
-- [ ] Disk usage view, duplicate finder, checksums, hex viewer
+- [x] Checksums (SHA-256, MD5)
+- [ ] Disk usage view, duplicate finder, hex viewer
 - [ ] Scripting or plugins
 - [ ] Drop stack
 
@@ -87,3 +94,4 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `pane`, `setting
 - [x] Sparkle updates (forkz > Check for Updates; the key is `~/Developer/AppSigning/sparkle/forkz.key`)
 - [x] Release workflow: DMG and zip, notarization, signed appcast, GitHub release, and the Homebrew cask (`.github/workflows/release.yml`, `docs/RELEASE_CHECKLIST.md`)
 - [x] First release (v0.1.0)
+- [x] Local release fallback for when GitHub's macOS runners are busy (`scripts/release_local.sh`)
