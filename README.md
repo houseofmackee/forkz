@@ -15,7 +15,8 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - Quick Look, a hidden files toggle, and live updates when folders change
 - A filter field on each list, folder sizes, SHA-256 and MD5 checksums, Compare Files in your diff tool, and Open in Terminal with your terminal app
 - Rename Multiple Items with rules (replace, regular expressions, insert, remove, case, numbers, dates), a live preview, and presets
-- A preview pane with Info, a Quick Look preview, the session's transfers, and a log
+- A preview pane with Info, a Quick Look preview (or an archive's contents), the session's transfers, and a log
+- Archives (zip, tar, 7z, rar, iso, and more) browsed like folders, read-only: copy items out to extract them
 - A Settings window (Command-comma), with light and dark appearance, text size and row spacing, and your own keyboard shortcuts
 
 ## SFTP
@@ -80,6 +81,7 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 | Option-Command-S | Calculate folder sizes |
 | Control-Command-C | Compare files |
 | Shift-Command-P | Show or hide the preview pane |
+| Option-Command-1, Option-Command-2 | Hide or show the left pane, the right pane |
 | Command-comma | Settings |
 | Command-T, Command-W | New tab, close tab |
 | Control-Tab, Control-Shift-Tab | Next tab, previous tab |

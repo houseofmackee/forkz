@@ -30,6 +30,9 @@ pub struct Settings {
     pub shortcuts: std::collections::BTreeMap<String, String>,
     /// The preview pane on the right, and its tab.
     pub preview: PreviewSettings,
+    /// Toolbar items added since the toolbar was first saved, so they are
+    /// added to saved toolbars once (1: pane and preview buttons).
+    pub toolbar_version: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -216,6 +219,9 @@ pub struct PaneSettings {
     pub tabs: Vec<PathBuf>,
     /// Which of `tabs` was shown.
     pub active_tab: usize,
+    /// Hidden with Hide Left Pane or Hide Right Pane.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 impl Default for PaneSettings {
@@ -225,6 +231,7 @@ impl Default for PaneSettings {
             sort: Sort::default(),
             tabs: Vec::new(),
             active_tab: 0,
+            hidden: false,
         }
     }
 }
@@ -246,6 +253,7 @@ impl Default for Settings {
             appearance: AppearanceSettings::default(),
             shortcuts: Default::default(),
             preview: PreviewSettings::default(),
+            toolbar_version: 0,
         }
     }
 }

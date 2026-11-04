@@ -1,6 +1,7 @@
 //! File systems a pane can show: the Mac's own, or a remote server. Every
 //! call blocks, so remote ones run off the main thread.
 
+pub mod archive;
 pub mod ftp;
 pub mod http;
 pub mod known_hosts;
@@ -62,6 +63,17 @@ pub trait Vfs: Send + Sync {
     /// Whether files have Unix permissions that can be changed.
     fn supports_permissions(&self) -> bool {
         true
+    }
+
+    /// Nothing can be changed (archives).
+    fn read_only(&self) -> bool {
+        false
+    }
+
+    /// For a file system inside a file (an archive): where that file is,
+    /// so going up from the top leaves it.
+    fn outside(&self) -> Option<(FsRef, PathBuf)> {
+        None
     }
 
     /// Reads a file from `offset` on (to resume a transfer). By default,

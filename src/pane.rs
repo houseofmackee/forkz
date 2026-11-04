@@ -252,10 +252,23 @@ impl PaneState {
     /// Goes to the parent folder. Returns the folder it came from, to
     /// select it.
     pub fn go_up(&mut self) -> Option<PathBuf> {
+        // At the top of an archive: out to the folder it is in.
+        if self.location.parent().is_none()
+            && let Some((fs, file)) = self.fs.outside()
+        {
+            let folder = file.parent().map_or_else(|| fs.home(), Path::to_path_buf);
+            self.navigate_to(fs, folder);
+            return Some(file);
+        }
         let parent = self.location.parent()?.to_path_buf();
         let came_from = self.location.clone();
         self.navigate(parent);
         Some(came_from)
+    }
+
+    /// There is somewhere to go up to (".." is shown).
+    pub fn can_go_up(&self) -> bool {
+        self.location.parent().is_some() || self.fs.outside().is_some()
     }
 
     pub fn can_go_back(&self) -> bool {

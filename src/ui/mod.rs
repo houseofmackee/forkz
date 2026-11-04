@@ -282,6 +282,7 @@ pub fn command_title(command: Command, pane: usize) -> String {
     let there = app.panes[1 - pane].is_local();
     let title = match command {
         Command::Trash if !here => "Delete\u{2026}",
+        Command::CopyToOther if app.panes[pane].fs().read_only() => "Extract to Other Pane",
         Command::CopyToOther if here && !there => "Upload to Other Pane",
         Command::CopyToOther if !here && there => "Download to Other Pane",
         Command::PasteFiles if !here => "Upload Copied Items",
@@ -289,6 +290,9 @@ pub fn command_title(command: Command, pane: usize) -> String {
         Command::CopyPath if !here => "Copy Server Link",
         Command::CloseTab if app.panes[pane].tab_count() <= 1 => "Close Window",
         Command::TogglePreview if !app.preview.view().isHidden() => "Hide Preview Pane",
+        Command::Disconnect if app.panes[pane].fs().outside().is_some() => "Close Archive",
+        Command::ToggleLeftPane if app.panes[0].view().isHidden() => "Show Left Pane",
+        Command::ToggleRightPane if app.panes[1].view().isHidden() => "Show Right Pane",
         _ => command.title(),
     };
     title.to_string()
@@ -308,7 +312,14 @@ const TOOLBAR: &[Command] = &[
     Command::OpenInTerminal,
     Command::SwapPanes,
     Command::Refresh,
+    Command::ToggleLeftPane,
+    Command::ToggleRightPane,
+    Command::TogglePreview,
 ];
+
+/// Toolbar items added in later versions, by `toolbar_version`.
+const NEW_TOOLBAR_ITEMS: &[(u32, &[Command])] =
+    &[(1, &[Command::ToggleLeftPane, Command::ToggleRightPane, Command::TogglePreview])];
 
 fn toolbar_id(command: Command) -> String {
     format!("forkz.{command:?}")
@@ -334,6 +345,10 @@ fn toolbar_identifiers(default: bool) -> Retained<NSArray<NSString>> {
             id(Command::ToggleHidden),
             id(Command::OpenInTerminal),
             id(Command::SwapPanes),
+            space.clone(),
+            id(Command::ToggleLeftPane),
+            id(Command::ToggleRightPane),
+            id(Command::TogglePreview),
         ]
     } else {
         let mut ids: Vec<_> = TOOLBAR.iter().map(|c| id(*c)).collect();
@@ -352,6 +367,9 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     ns_app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let delegate: Retained<AppDelegate> = unsafe { msg_send![AppDelegate::alloc(mtm), init] };
     ns_app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    // No macOS window tabs (forkz has tabs in each pane): this also
+    // drops Show Tab Bar and Show All Tabs from the View menu.
+    NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
     let settings = Settings::load();
     ns_app.setMainMenu(Some(&main_menu(mtm, &delegate, &settings.shortcuts)));
     let panes = [
@@ -406,6 +424,25 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     crate::updates::start(mtm);
     app.window.makeKeyAndOrderFront(None);
     first_launch_layout(&app.window);
+    add_new_toolbar_items(&app);
+    // The split view restores its own idea of what is hidden: settings win.
+    let preview_visible = app.settings.borrow().preview.visible;
+    app.preview.view().setHidden(!preview_visible);
+    if let Some(split) = app.window.contentView().and_then(|v| v.downcast::<NSSplitView>().ok()) {
+        split.adjustSubviews();
+    }
+    for pane in &app.panes {
+        pane.view().setHidden(false);
+    }
+    let hidden = {
+        let s = app.settings.borrow();
+        [s.left.hidden, s.right.hidden && !s.left.hidden]
+    };
+    for (index, hide) in hidden.into_iter().enumerate() {
+        if hide {
+            set_pane_hidden(&app, index, true);
+        }
+    }
     // Now that the panes have their size, fit the columns to them.
     for pane in &app.panes {
         pane.fit_columns();
@@ -623,7 +660,9 @@ fn main_menu(
         command(&view, c);
     }
     separator(&view);
-    command(&view, Command::TogglePreview);
+    for c in [Command::ToggleLeftPane, Command::ToggleRightPane, Command::TogglePreview] {
+        command(&view, c);
+    }
     separator(&view);
     let columns = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Columns"));
     for (index, (_, title)) in crate::settings::COLUMNS.iter().enumerate() {
@@ -718,7 +757,16 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         Command::Open => has_selection || pane.parent_row_chosen(),
         Command::Back => pane.can_go_back(),
         Command::Forward => pane.can_go_forward(),
-        Command::Up => pane.location().parent().is_some(),
+        Command::Up => pane.can_go_up(),
+        // Archives cannot be changed: items in them can only be copied out.
+        Command::Rename | Command::MultiRename | Command::Duplicate | Command::Trash | Command::NewFolder
+            if pane.fs().read_only() =>
+        {
+            false
+        }
+        Command::MoveToOther if pane.fs().read_only() => false,
+        Command::CopyToOther | Command::MoveToOther if app.panes[1 - index].fs().read_only() => false,
+        Command::PasteFiles | Command::MoveFilesHere if pane.fs().read_only() => false,
         Command::Rename
         | Command::MultiRename
         | Command::Duplicate
@@ -745,9 +793,13 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
             here == 2 || (here == 1 && app.panes[1 - index].selected_paths().len() == 1)
         }
         Command::Disconnect => !local,
+        // One pane always stays.
+        Command::ToggleLeftPane => app.panes[0].view().isHidden() || !app.panes[1].view().isHidden(),
+        Command::ToggleRightPane => app.panes[1].view().isHidden() || !app.panes[0].view().isHidden(),
+        Command::SwitchPane => !app.panes[1 - index].view().isHidden(),
         // A shell needs SSH; FTP, WebDAV, and S3 have no permissions.
         Command::OpenInTerminal => local || pane.fs().key().starts_with("sftp://"),
-        Command::Permissions => pane.fs().supports_permissions(),
+        Command::Permissions => pane.fs().supports_permissions() && !pane.fs().read_only(),
         Command::PasteFiles | Command::MoveFilesHere => {
             !pane_view::paths_on_pasteboard(&NSPasteboard::generalPasteboard()).is_empty()
         }
@@ -768,6 +820,8 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::Rename => rename(&pane),
         Command::MultiRename => multi_rename(&pane),
         Command::TogglePreview => toggle_preview(),
+        Command::ToggleLeftPane => toggle_pane(0),
+        Command::ToggleRightPane => toggle_pane(1),
         Command::Duplicate => {
             start_job(transfer_job(JobKind::Copy, pane.fs(), targets(), pane.fs(), pane.location()));
         }
@@ -858,7 +912,8 @@ pub fn run_command(command: Command, pane: Option<usize>) {
             }
         }
         Command::GoToFolder => go_to_folder(&pane),
-        Command::SwitchPane => other.focus(),
+        Command::SwitchPane if !other.view().isHidden() => other.focus(),
+        Command::SwitchPane => {}
         Command::SwapPanes => {
             let (here_fs, here) = (pane.fs(), pane.location());
             pane.navigate_to(other.fs(), other.location());
@@ -870,6 +925,7 @@ pub fn run_command(command: Command, pane: Option<usize>) {
                 connect_from_form(form, index);
             }
         }
+        Command::Disconnect if pane.fs().outside().is_some() => close_archive(&pane),
         Command::Disconnect => disconnect(&pane.fs().key()),
         Command::ImportFileZilla => import_filezilla(),
         Command::Permissions => change_permissions(&pane),
@@ -1497,6 +1553,7 @@ fn job_finished(id: isize, job: Job, outcome: Outcome) {
         for path in &outcome.created {
             // A server file: saving the copy uploads it back.
             if !job.source_fs.is_local()
+                && !job.source_fs.read_only()
                 && let Some(remote) = job.sources.iter().find(|s| s.file_name() == path.file_name())
             {
                 remote_edit::track(job.source_fs.clone(), remote.clone(), path.clone());
@@ -1505,6 +1562,11 @@ fn job_finished(id: isize, job: Job, outcome: Outcome) {
         }
     }
     activity::report_problems(&outcome);
+}
+
+/// The pane commands go to by default.
+pub fn active_index() -> usize {
+    app().map_or(0, |a| a.active.get())
 }
 
 pub fn preview_pane() -> Option<Retained<preview::PreviewPane>> {
@@ -1530,7 +1592,60 @@ pub fn selection_changed(index: usize) {
     app.preview.set_selection(pane.fs(), pane.location(), entries, pane.item_count());
 }
 
-fn toggle_preview() {
+/// Hides a pane (the other fills the window) or shows it again.
+fn toggle_pane(index: usize) {
+    let Some(app) = app() else { return };
+    let hide = !app.panes[index].view().isHidden();
+    if hide && app.panes[1 - index].view().isHidden() {
+        return;
+    }
+    set_pane_hidden(&app, index, hide);
+    update_settings(|s| if index == 0 { s.left.hidden = hide } else { s.right.hidden = hide });
+}
+
+fn set_pane_hidden(app: &App, index: usize, hide: bool) {
+    let view = app.panes[index].view();
+    view.setHidden(hide);
+    if let Some(split) = unsafe { view.superview() }.and_then(|v| v.downcast::<NSSplitView>().ok()) {
+        split.adjustSubviews();
+        if !hide {
+            split.layoutSubtreeIfNeeded();
+            split.setPosition_ofDividerAtIndex((split.frame().size.width / 2.0).round(), 0);
+        }
+    }
+    if hide && app.active.get() == index {
+        set_active(1 - index);
+        app.panes[1 - index].focus();
+    } else if !hide {
+        set_active(index);
+        app.panes[index].focus();
+    }
+    for pane in &app.panes {
+        pane.fit_columns();
+    }
+}
+
+/// Toolbars saved by earlier versions get the buttons added since.
+fn add_new_toolbar_items(app: &App) {
+    let seen = app.settings.borrow().toolbar_version;
+    let Some(toolbar) = app.window.toolbar() else { return };
+    let mut latest = seen;
+    for (version, commands) in NEW_TOOLBAR_ITEMS.iter().filter(|(v, _)| *v > seen) {
+        let present: Vec<String> = toolbar.items().iter().map(|i| i.itemIdentifier().to_string()).collect();
+        for command in *commands {
+            if !present.contains(&toolbar_id(*command)) {
+                let at = toolbar.items().count() as isize;
+                toolbar.insertItemWithItemIdentifier_atIndex(&ns(&toolbar_id(*command)), at);
+            }
+        }
+        latest = latest.max(*version);
+    }
+    if latest != seen {
+        update_settings(|s| s.toolbar_version = latest);
+    }
+}
+
+pub fn toggle_preview() {
     let Some(app) = app() else { return };
     let view = app.preview.view();
     let show = view.isHidden();
@@ -1950,6 +2065,60 @@ fn open_target(target: &str) {
         site.remote_dir = path;
     }
     connect_site(site, app.active.get(), None, false);
+}
+
+/// Shows an archive's contents in a pane, like a folder (`select`: an item
+/// inside to open its folder at). Archives on servers or in other archives
+/// are fetched to a temporary copy first.
+pub fn open_archive(index: usize, fs: FsRef, path: PathBuf, select: Option<PathBuf>) {
+    let Some(app) = app() else { return };
+    let name = title_of(&path);
+    let note = app.activity.begin_note(&format!("Opening \u{201c}{name}\u{201d}\u{2026}"));
+    std::thread::spawn(move || {
+        let result = (|| {
+            let local = if fs.is_local() { path.clone() } else { fetch_archive(&fs, &path)? };
+            vfs::archive::ArchiveFs::open(&local, Some((fs.clone(), path.clone())))
+        })();
+        DispatchQueue::main().exec_async(move || {
+            let Some(app) = self::app() else { return };
+            app.activity.remove(note);
+            match result {
+                Ok(archive) => {
+                    let pane = &app.panes[index];
+                    let folder =
+                        select.as_ref().and_then(|s| s.parent()).map_or_else(|| PathBuf::from("/"), Path::to_path_buf);
+                    let select: Vec<PathBuf> = select.into_iter().collect();
+                    pane.navigate_selecting(archive, folder, &select);
+                    pane.focus();
+                }
+                Err(e) => dialogs::show_error(
+                    format!("\u{201c}{name}\u{201d} cannot be opened as an archive."),
+                    e.to_string(),
+                ),
+            }
+        });
+    });
+}
+
+/// A temporary copy of an archive that is not a file on this Mac. The
+/// copies go when forkz next starts (see `preview::clean_cache`).
+fn fetch_archive(fs: &FsRef, path: &Path) -> std::io::Result<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let folder = preview::cache_dir().join(format!("archive-{}", COUNT.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&folder)?;
+    let copy = folder.join(title_of(path));
+    let mut reader = fs.open_read(path)?;
+    std::io::copy(&mut reader, &mut std::fs::File::create(&copy)?)?;
+    Ok(copy)
+}
+
+/// Leaves an archive for the folder it is in, selecting it.
+fn close_archive(pane: &PaneController) {
+    let fs = pane.fs();
+    let Some((outer, file)) = fs.outside() else { return };
+    let folder = file.parent().map_or_else(|| outer.home(), Path::to_path_buf);
+    pane.navigate_selecting(outer, folder, &[file]);
 }
 
 /// Closes a connection; panes showing it go back to the Mac.

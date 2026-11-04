@@ -55,6 +55,8 @@ pub enum Command {
     OpenInNewTab,
     MultiRename,
     TogglePreview,
+    ToggleLeftPane,
+    ToggleRightPane,
 }
 
 impl Command {
@@ -106,6 +108,8 @@ impl Command {
         Command::OpenInNewTab,
         Command::MultiRename,
         Command::TogglePreview,
+        Command::ToggleLeftPane,
+        Command::ToggleRightPane,
     ];
 
     pub fn tag(self) -> isize {
@@ -184,6 +188,8 @@ impl Command {
             Command::OpenInNewTab => "Open in New Tab",
             Command::MultiRename => "Rename Multiple Items\u{2026}",
             Command::TogglePreview => "Show Preview Pane",
+            Command::ToggleLeftPane => "Hide Left Pane",
+            Command::ToggleRightPane => "Hide Right Pane",
         }
     }
 
@@ -244,6 +250,8 @@ impl Command {
             Command::OpenInNewTab => ("", cmd),
             Command::MultiRename => ("r", opt_cmd),
             Command::TogglePreview => ("p", shift_cmd),
+            Command::ToggleLeftPane => ("1", opt_cmd),
+            Command::ToggleRightPane => ("2", opt_cmd),
         }
     }
 
@@ -262,6 +270,9 @@ impl Command {
             Command::QuickLook => "eye.circle",
             Command::Refresh => "arrow.clockwise",
             Command::Connect => "network",
+            Command::ToggleLeftPane => "rectangle.lefthalf.inset.filled",
+            Command::ToggleRightPane => "rectangle.righthalf.inset.filled",
+            Command::TogglePreview => "sidebar.right",
             _ => "questionmark",
         }
     }
@@ -276,6 +287,9 @@ impl Command {
             Command::OpenInTerminal => "Terminal",
             Command::SwapPanes => "Swap",
             Command::Connect => "Connect",
+            Command::ToggleLeftPane => "Left Pane",
+            Command::ToggleRightPane => "Right Pane",
+            Command::TogglePreview => "Preview",
             other => other.title(),
         }
     }

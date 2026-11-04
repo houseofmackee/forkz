@@ -29,6 +29,19 @@ pub const TABS: [(&str, &str); 4] =
 /// Server files up to this size are fetched to preview them.
 const REMOTE_PREVIEW_LIMIT: u64 = 25 * 1024 * 1024;
 
+/// Archives on servers up to this size are fetched to list them.
+const REMOTE_ARCHIVE_LIMIT: u64 = 200 * 1024 * 1024;
+
+/// Rows shown for an archive's contents.
+const ARCHIVE_ROWS: usize = 5000;
+
+/// The archive shown in Preview: where it is, and what is in it.
+struct ArchiveShown {
+    fs: FsRef,
+    path: PathBuf,
+    entries: Vec<Entry>,
+}
+
 struct Views {
     root: Retained<NSStackView>,
     tabs: Retained<NSSegmentedControl>,
@@ -37,6 +50,9 @@ struct Views {
     preview: Retained<NSView>,
     quick_look: Option<Retained<QLPreviewView>>,
     preview_note: Retained<NSTextField>,
+    archive: Retained<NSStackView>,
+    archive_summary: Retained<NSTextField>,
+    archive_table: Retained<NSTableView>,
     activity: Retained<NSScrollView>,
     activity_table: Retained<NSTableView>,
     log: Retained<NSView>,
@@ -62,6 +78,7 @@ pub struct PreviewIvars {
     /// Counts previews, so a slow download for an old selection is dropped.
     generation: Cell<u64>,
     transfers: RefCell<Vec<LogEntry>>,
+    archive: RefCell<Option<ArchiveShown>>,
 }
 
 define_class!(
@@ -79,6 +96,30 @@ define_class!(
             if let Some((id, _)) = TABS.get(tab) {
                 super::update_settings(|s| s.preview.tab = (*id).to_string());
             }
+        }
+
+        /// Quick Look's text preview does not set the cursor when the
+        /// mouse comes in, so coming from the divider kept the resize
+        /// cursor: the arrow is set here.
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &objc2_app_kit::NSEvent) {
+            objc2_app_kit::NSCursor::arrowCursor().set();
+        }
+
+        #[unsafe(method(cursorUpdate:))]
+        fn cursor_update(&self, _event: &objc2_app_kit::NSEvent) {
+            objc2_app_kit::NSCursor::arrowCursor().set();
+        }
+
+        /// Double-clicking an item in an archive opens the archive there.
+        #[unsafe(method(archiveRowOpened:))]
+        fn archive_row_opened(&self, _sender: Option<&AnyObject>) {
+            self.open_archive_row();
+        }
+
+        #[unsafe(method(closePane:))]
+        fn close_pane(&self, _sender: Option<&AnyObject>) {
+            super::toggle_preview();
         }
 
         #[unsafe(method(clearLog:))]
@@ -100,8 +141,13 @@ define_class!(
 
     unsafe impl NSTableViewDataSource for PreviewPane {
         #[unsafe(method(numberOfRowsInTableView:))]
-        fn number_of_rows(&self, _table: &NSTableView) -> NSInteger {
-            self.ivars().transfers.borrow().len() as NSInteger
+        fn number_of_rows(&self, table: &NSTableView) -> NSInteger {
+            let rows = if self.is_archive_table(table) {
+                self.ivars().archive.borrow().as_ref().map_or(0, |a| a.entries.len().min(ARCHIVE_ROWS))
+            } else {
+                self.ivars().transfers.borrow().len()
+            };
+            rows as NSInteger
         }
     }
 
@@ -109,11 +155,11 @@ define_class!(
         #[unsafe(method_id(tableView:viewForTableColumn:row:))]
         fn view_for_row(
             &self,
-            _table: &NSTableView,
-            _column: Option<&NSTableColumn>,
+            table: &NSTableView,
+            column: Option<&NSTableColumn>,
             row: NSInteger,
         ) -> Option<Retained<NSView>> {
-            self.transfer_cell(row)
+            if self.is_archive_table(table) { self.archive_cell(column, row) } else { self.transfer_cell(row) }
         }
     }
 );
@@ -162,6 +208,7 @@ impl PreviewPane {
             shown: RefCell::new(String::new()),
             generation: Cell::new(0),
             transfers: RefCell::new(Vec::new()),
+            archive: RefCell::new(None),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.build(mtm);
@@ -214,6 +261,61 @@ impl PreviewPane {
             unsafe { quick_look.setShouldCloseWithWindow(false) };
             fill(&preview, quick_look);
         }
+        {
+            use objc2_app_kit::{NSTrackingArea, NSTrackingAreaOptions as O};
+            let area = unsafe {
+                NSTrackingArea::initWithRect_options_owner_userInfo(
+                    <NSTrackingArea as objc2::AnyThread>::alloc(),
+                    NSRect::ZERO,
+                    O::MouseEnteredAndExited | O::CursorUpdate | O::ActiveInKeyWindow | O::InVisibleRect,
+                    Some(self),
+                    None,
+                )
+            };
+            preview.addTrackingArea(&area);
+        }
+        // An archive's contents, in place of Quick Look.
+        let archive_summary = secondary("", mtm);
+        archive_summary.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        let archive_table = NSTableView::initWithFrame(NSTableView::alloc(mtm), NSRect::ZERO);
+        for (id, title, width) in [("path", "Name", 150.0), ("size", "Size", 64.0)] {
+            let column = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), &ns(id));
+            column.setTitle(&ns(title));
+            column.setWidth(width);
+            archive_table.addTableColumn(&column);
+        }
+        archive_table.setColumnAutoresizingStyle(
+            objc2_app_kit::NSTableViewColumnAutoresizingStyle::FirstColumnOnlyAutoresizingStyle,
+        );
+        archive_table.setStyle(objc2_app_kit::NSTableViewStyle::Plain);
+        archive_table.setUsesAlternatingRowBackgroundColors(true);
+        unsafe {
+            archive_table.setDataSource(Some(ProtocolObject::from_ref(self)));
+            archive_table.setDelegate(Some(ProtocolObject::from_ref(self)));
+            archive_table.setTarget(Some(self));
+            archive_table.setDoubleAction(Some(sel!(archiveRowOpened:)));
+        }
+        let archive_scroll = NSScrollView::new(mtm);
+        archive_scroll.setDocumentView(Some(&archive_table));
+        archive_scroll.setHasVerticalScroller(true);
+        let archive = NSStackView::stackViewWithViews(
+            &NSArray::from_retained_slice(&[view(&*archive_summary), view(&*archive_scroll)]),
+            mtm,
+        );
+        archive.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+        archive.setAlignment(NSLayoutAttribute::Leading);
+        archive.setSpacing(6.0);
+        archive.setEdgeInsets(NSEdgeInsets { top: 4.0, left: 8.0, bottom: 0.0, right: 0.0 });
+        archive_scroll.leadingAnchor().constraintEqualToAnchor(&archive.leadingAnchor()).setActive(true);
+        archive_scroll.trailingAnchor().constraintEqualToAnchor(&archive.trailingAnchor()).setActive(true);
+        archive_scroll
+            .setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
+        archive_summary
+            .widthAnchor()
+            .constraintLessThanOrEqualToAnchor_constant(&archive.widthAnchor(), -16.0)
+            .setActive(true);
+        fill(&preview, &archive);
+        archive.setHidden(true);
         let preview_note = secondary("", mtm);
         preview_note.setAlignment(objc2_app_kit::NSTextAlignment::Center);
         preview_note.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
@@ -275,14 +377,40 @@ impl PreviewPane {
         log_scroll
             .setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
 
+        // The header: the tabs in the middle, a close button on the right.
+        let close =
+            unsafe { NSButton::buttonWithTitle_target_action(&ns(""), Some(self), Some(sel!(closePane:)), mtm) };
+        if let Some(image) = super::util::symbol("xmark", "Close") {
+            close.setImage(Some(&image));
+        }
+        close.setBordered(false);
+        close.setToolTip(Some(&ns("Hide the preview pane")));
+        close.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+        let header = NSView::new(mtm);
+        for control in [view(&*tabs), view(&*close)] {
+            control.setTranslatesAutoresizingMaskIntoConstraints(false);
+            header.addSubview(&control);
+            control.centerYAnchor().constraintEqualToAnchor(&header.centerYAnchor()).setActive(true);
+        }
+        tabs.centerXAnchor().constraintEqualToAnchor(&header.centerXAnchor()).setActive(true);
+        tabs.topAnchor().constraintEqualToAnchor(&header.topAnchor()).setActive(true);
+        tabs.bottomAnchor().constraintEqualToAnchor(&header.bottomAnchor()).setActive(true);
+        close.trailingAnchor().constraintEqualToAnchor_constant(&header.trailingAnchor(), -8.0).setActive(true);
+        close
+            .leadingAnchor()
+            .constraintGreaterThanOrEqualToAnchor_constant(&tabs.trailingAnchor(), 4.0)
+            .setActive(true);
+
         let root =
-            NSStackView::stackViewWithViews(&NSArray::from_retained_slice(&[view(&*tabs), view(&*content)]), mtm);
+            NSStackView::stackViewWithViews(&NSArray::from_retained_slice(&[view(&*header), view(&*content)]), mtm);
         root.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
         root.setAlignment(NSLayoutAttribute::CenterX);
         root.setSpacing(8.0);
         root.setEdgeInsets(NSEdgeInsets { top: 8.0, left: 0.0, bottom: 0.0, right: 0.0 });
-        content.leadingAnchor().constraintEqualToAnchor(&root.leadingAnchor()).setActive(true);
-        content.trailingAnchor().constraintEqualToAnchor(&root.trailingAnchor()).setActive(true);
+        for v in [view(&*content), header.clone()] {
+            v.leadingAnchor().constraintEqualToAnchor(&root.leadingAnchor()).setActive(true);
+            v.trailingAnchor().constraintEqualToAnchor(&root.trailingAnchor()).setActive(true);
+        }
         root.widthAnchor().constraintGreaterThanOrEqualToConstant(220.0).setActive(true);
 
         let _ = self.ivars().views.set(Views {
@@ -293,6 +421,9 @@ impl PreviewPane {
             preview,
             quick_look,
             preview_note,
+            archive,
+            archive_summary,
+            archive_table,
             activity,
             activity_table,
             log: Retained::into_super(log),
@@ -450,6 +581,108 @@ impl PreviewPane {
         }
         views.preview_note.setStringValue(&ns(note));
         views.preview_note.setHidden(path.is_some());
+        views.archive.setHidden(true);
+        *self.ivars().archive.borrow_mut() = None;
+    }
+
+    fn is_archive_table(&self, table: &NSTableView) -> bool {
+        // Asked while the views are still being made: not yet.
+        self.ivars().views.get().is_some_and(|v| std::ptr::eq(table, &*v.archive_table))
+    }
+
+    /// Lists an archive (on this Mac, or fetched) in the background.
+    fn preview_archive(&self, fs: FsRef, entry: Entry, generation: u64) {
+        if !fs.is_local() && entry.size > REMOTE_ARCHIVE_LIMIT {
+            let size = fs::format_size(entry.size);
+            self.set_preview(
+                None,
+                &format!("{size} is too big to list from the server. Open the archive to browse it."),
+            );
+            return;
+        }
+        self.set_preview(None, "Reading the archive\u{2026}");
+        std::thread::spawn(move || {
+            let result = (|| {
+                let local = if fs.is_local() { entry.path.clone() } else { fetch(&fs, &entry, generation)? };
+                let archive = crate::vfs::archive::ArchiveFs::open(&local, None)?;
+                Ok::<_, std::io::Error>((archive.summary(), archive.all_entries()))
+            })();
+            DispatchQueue::main().exec_async(move || {
+                let Some(pane) = super::preview_pane() else { return };
+                if pane.ivars().generation.get() != generation {
+                    return;
+                }
+                match result {
+                    Ok((summary, entries)) => pane.show_archive(fs, entry.path, summary, entries),
+                    Err(e) => pane.set_preview(None, &format!("This archive cannot be read: {e}")),
+                }
+            });
+        });
+    }
+
+    fn show_archive(&self, fs: FsRef, path: PathBuf, summary: (usize, usize, u64), entries: Vec<Entry>) {
+        self.set_preview(None, "");
+        let views = self.views();
+        views.preview_note.setHidden(true);
+        let (files, folders, size) = summary;
+        let plural = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+        let mut text = format!(
+            "{}, {}, {} unpacked",
+            plural(files, "file", "files"),
+            plural(folders, "folder", "folders"),
+            fs::format_size(size)
+        );
+        if entries.len() > ARCHIVE_ROWS {
+            text.push_str(&format!(" (the first {ARCHIVE_ROWS} shown)"));
+        }
+        views.archive_summary.setStringValue(&ns(&text));
+        views.archive_summary.setToolTip(Some(&ns("Double-click an item to open the archive there.")));
+        *self.ivars().archive.borrow_mut() = Some(ArchiveShown { fs, path, entries });
+        views.archive.setHidden(false);
+        views.archive_table.reloadData();
+        // The name column takes what the size column leaves.
+        views.archive.layoutSubtreeIfNeeded();
+        views.archive_table.sizeToFit();
+        views.archive_table.scrollRowToVisible(0);
+    }
+
+    fn archive_cell(&self, column: Option<&NSTableColumn>, row: NSInteger) -> Option<Retained<NSView>> {
+        let archive = self.ivars().archive.borrow();
+        let entry = archive.as_ref()?.entries.get(usize::try_from(row).ok()?)?;
+        let size_column = column?.identifier().to_string() == "size";
+        let text = match (size_column, entry.is_folder_like()) {
+            (true, true) => "--".to_string(),
+            (true, false) => fs::format_size(entry.size),
+            (false, folder) => {
+                let path = entry.path.to_string_lossy();
+                let path = path.trim_start_matches('/');
+                if folder { format!("{path}/") } else { path.to_string() }
+            }
+        };
+        let field = NSTextField::labelWithString(&ns(&text), self.mtm());
+        field.setFont(Some(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize())));
+        if size_column {
+            field.setAlignment(objc2_app_kit::NSTextAlignment::Right);
+            field.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        } else {
+            field.setLineBreakMode(NSLineBreakMode::ByTruncatingHead);
+            field.setToolTip(Some(&ns(&text)));
+        }
+        Some(Retained::into_super(Retained::into_super(field)))
+    }
+
+    fn open_archive_row(&self) {
+        let row = self.views().archive_table.clickedRow();
+        let opened = {
+            let archive = self.ivars().archive.borrow();
+            archive.as_ref().and_then(|a| {
+                let entry = a.entries.get(usize::try_from(row).ok()?)?;
+                Some((a.fs.clone(), a.path.clone(), entry.path.clone()))
+            })
+        };
+        if let Some((fs, path, inner)) = opened {
+            super::open_archive(super::active_index(), fs, path, Some(inner));
+        }
     }
 
     fn show_preview(&self) {
@@ -465,12 +698,23 @@ impl PreviewPane {
             self.set_preview(None, "Select a file to preview it.");
             return;
         };
+        if !entry.is_folder_like() && crate::vfs::archive::is_archive_name(&entry.name) {
+            self.preview_archive(selection.fs.clone(), entry, generation);
+            return;
+        }
         if selection.fs.is_local() {
             self.set_preview(Some(&entry.path), "");
             return;
         }
         if entry.is_folder_like() {
-            self.set_preview(None, "Folders on servers have no preview.");
+            self.set_preview(
+                None,
+                if selection.fs.read_only() {
+                    "Folders in archives have no preview."
+                } else {
+                    "Folders on servers have no preview."
+                },
+            );
             return;
         }
         if entry.size > REMOTE_PREVIEW_LIMIT {

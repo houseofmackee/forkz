@@ -7,6 +7,22 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-04
+
+### Added
+
+- Hide Left Pane and Hide Right Pane (Option-Command-1 and Option-Command-2, in the View menu and the toolbar): the other pane fills the window. Hidden panes stay hidden at the next launch.
+- Toolbar buttons for the left pane, the right pane, and the preview pane. Toolbars saved by earlier versions get them once.
+- A close button in the preview pane.
+- Archives open like folders: zip, tar (plain, gzip, bzip2, xz, zstd), 7z, rar, iso, cpio, xar, and more, through the libarchive built into macOS. Copy items out to extract them ("Extract to Other Pane", drag and drop, or drag to Finder), preview files inside, and open archives within archives. Archives on servers are fetched first. ".." or Close Archive (Command-E) leaves the archive. Archives are read-only.
+- The preview pane lists an archive's contents with a summary; double-click an item to open the archive there.
+
+### Fixed
+
+- The preview pane no longer reappears at launch after it was hidden.
+- Moving the mouse from the divider into a text file preview no longer leaves the resize pointer showing.
+- The View menu no longer shows Show Tab Bar and Show All Tabs (macOS window tabs, which forkz does not use: it has tabs in each pane).
+
 ## [0.3.0] - 2026-11-04
 
 ### Added
@@ -73,7 +89,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/houseofmackee/forkz/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/houseofmackee/forkz/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/houseofmackee/forkz/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/houseofmackee/forkz/compare/v0.1.0...v0.2.0

@@ -8,7 +8,7 @@ A native dual-pane file manager and file transfer client for macOS on Apple sili
 | --- | --- | --- |
 | `fs` | Listing folders, sorting (folders first, natural order), sizes, free space | No |
 | `fs::ops` | Copy, move, trash, and delete jobs between any two file systems: conflict resolution, progress, cancel, retry. Runs on a worker thread and talks to the UI through the `Observer` trait | Foundation only (Trash) |
-| `vfs` | The `Vfs` trait; `LocalFs`; `vfs::sftp` (connecting, auth, browsing, streaming); `vfs::ftp` (FTP and FTPS); `vfs::webdav`; `vfs::s3` (Signature Version 4); `vfs::http` (what WebDAV and S3 share); `vfs::known_hosts` (host keys and trusted certificates) | No |
+| `vfs` | The `Vfs` trait; `LocalFs`; `vfs::archive` (archives as read-only folders, through libarchive); `vfs::sftp` (connecting, auth, browsing, streaming); `vfs::ftp` (FTP and FTPS); `vfs::webdav`; `vfs::s3` (Signature Version 4); `vfs::http` (what WebDAV and S3 share); `vfs::known_hosts` (host keys and trusted certificates) | No |
 | `sites` | Saved sites (`sites.toml`), Keychain passwords, `sites::filezilla` import | Security framework |
 | `pane` | One pane's state: location, entries, hidden items, history | No |
 | `rename` | Multi-rename rules, the preview with its problems, and renaming with swaps | No |
@@ -72,7 +72,8 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `pane`, `rename`
 - [ ] Search (name, content, Spotlight locally, scanning remotely), Quick Select
 - [ ] Folder sync with preview, saved as "synclets"
 - [x] Multi-rename with rules and presets
-- [ ] Archives browsed as folders (libarchive); compress and extract
+- [x] Archives browsed as folders (libarchive), extracting by copying out
+- [ ] Compressing, and changing archives
 - [ ] App deleter (leftover files when trashing an app)
 - [ ] Git status in the list; add, commit, push, pull
 - [x] Open in Terminal for iTerm, Warp, Ghostty, Kitty (and SSH sessions in them)

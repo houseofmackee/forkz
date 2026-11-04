@@ -1142,6 +1142,10 @@ impl PaneController {
         self.ivars().state.borrow().location().to_path_buf()
     }
 
+    pub fn can_go_up(&self) -> bool {
+        self.ivars().state.borrow().can_go_up()
+    }
+
     pub fn can_go_back(&self) -> bool {
         self.ivars().state.borrow().can_go_back()
     }
@@ -1563,6 +1567,13 @@ impl PaneController {
             self.navigate(folder.clone());
             return;
         }
+        // An archive opens like a folder.
+        if let [one] = paths.as_slice()
+            && vfs::archive::is_archive_name(&crate::pane::title_of(one))
+        {
+            super::open_archive(self.index(), self.fs(), one.clone(), None);
+            return;
+        }
         if !self.is_local() {
             // Download to a temporary folder, then open.
             let files: Vec<PathBuf> = paths.into_iter().filter(|p| Some(p) != folder.as_ref()).collect();
@@ -1594,6 +1605,9 @@ impl PaneController {
     fn drop_operation(&self, info: &ProtocolObject<dyn NSDraggingInfo>, target: &Path) -> NSDragOperation {
         let Some((source_fs, sources)) = self.drag_sources(info) else { return NSDragOperation::None };
         let target_fs = self.fs();
+        if target_fs.read_only() {
+            return NSDragOperation::None;
+        }
         let same_fs = vfs::same(&source_fs, &target_fs);
         if sources.is_empty() || (same_fs && sources.iter().any(|s| s == target)) {
             return NSDragOperation::None;
@@ -1603,6 +1617,14 @@ impl PaneController {
             return NSDragOperation::None;
         }
         let mask = info.draggingSourceOperationMask();
+        // Nothing can be moved out of an archive, only copied.
+        if source_fs.read_only() {
+            return if mask.intersects(NSDragOperation::Copy | NSDragOperation::Generic | NSDragOperation::Move) {
+                NSDragOperation::Copy
+            } else {
+                NSDragOperation::None
+            };
+        }
         let same_volume = same_fs && (!target_fs.is_local() || fs::device_of(&sources[0]) == fs::device_of(target));
         if mask == NSDragOperation::Copy {
             NSDragOperation::Copy
@@ -1621,7 +1643,7 @@ impl PaneController {
 /// 1 when the list starts with "..", the enclosing folder (every folder
 /// but the top one), else 0. Table rows are entry indexes plus this.
 fn parent_offset(state: &PaneState) -> usize {
-    usize::from(state.location().parent().is_some())
+    usize::from(state.can_go_up())
 }
 
 fn is_parent_row(state: &PaneState, row: usize) -> bool {
