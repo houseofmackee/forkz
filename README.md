@@ -70,8 +70,16 @@ FTP sites and passwords protected by a FileZilla master password are listed as n
 cargo run                # run from source
 cargo test               # unit tests
 scripts/test_sftp.sh     # live SFTP tests against a throwaway local sshd
-scripts/bundle.sh        # dist/forkz.app, signed (Developer ID if available)
+scripts/bundle.sh        # dist/forkz.app with Sparkle, signed (Developer ID if available)
 scripts/make_icon.sh     # macos/AppIcon.svg to AppIcon.icns (needs librsvg)
+```
+
+## Releasing
+
+Pushing a version tag (`git tag v0.1.0 && git push origin v0.1.0`) runs the Release workflow: it builds forkz, signs it with the Developer ID, notarizes it, and publishes a pre-release with the DMG, zip, checksums, and a signed `appcast.xml`, then updates the Homebrew cask. Marking the release as regular makes Sparkle offer it. The steps are in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
+
+```sh
+scripts/dist.sh          # the release files in dist/ (FORKZ_SPARKLE_KEY signs the appcast)
 ```
 
 ## License

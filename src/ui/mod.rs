@@ -82,6 +82,16 @@ define_class!(
             }
         }
 
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            crate::updates::check(self.mtm());
+        }
+
+        #[unsafe(method(toggleAutomaticUpdates:))]
+        fn toggle_automatic_updates(&self, _sender: Option<&AnyObject>) {
+            crate::updates::set_checks_automatically(!crate::updates::checks_automatically());
+        }
+
         /// View > Columns: for the active pane's kind (Mac or server).
         #[unsafe(method(toggleColumn:))]
         fn toggle_column_menu(&self, sender: &NSMenuItem) {
@@ -208,6 +218,14 @@ fn set_transfer_limit(limit: usize) {
 }
 
 fn validate_menu_item(item: &NSMenuItem) -> bool {
+    if item.action() == Some(sel!(checkForUpdates:)) {
+        return crate::updates::available();
+    }
+    if item.action() == Some(sel!(toggleAutomaticUpdates:)) {
+        let on = crate::updates::checks_automatically();
+        item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+        return crate::updates::available();
+    }
     if item.action() == Some(sel!(toggleColumn:)) {
         let Some(app) = app() else { return false };
         let local = app.panes[app.active.get()].is_local();
@@ -369,6 +387,7 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
 
     start_watching();
     reload_sidebar();
+    crate::updates::start(mtm);
     app.window.makeKeyAndOrderFront(None);
     first_launch_layout(&app.window);
     // Now that the panes have their size, fit the columns to them.
@@ -509,6 +528,13 @@ fn main_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSMenu> 
 
     let app_menu = submenu("forkz");
     standard(&app_menu, "About forkz", sel!(orderFrontStandardAboutPanel:), "");
+    for (title, action) in [
+        ("Check for Updates\u{2026}", sel!(checkForUpdates:)),
+        ("Check for Updates Automatically", sel!(toggleAutomaticUpdates:)),
+    ] {
+        let item = standard(&app_menu, title, action, "");
+        unsafe { item.setTarget(Some(delegate)) };
+    }
     separator(&app_menu);
     standard(&app_menu, "Hide forkz", sel!(hide:), "h");
     let others = standard(&app_menu, "Hide Others", sel!(hideOtherApplications:), "h");

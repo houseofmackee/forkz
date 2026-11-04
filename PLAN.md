@@ -84,5 +84,6 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `pane`, `setting
 
 ## Release
 
-- [ ] Sparkle updates (the key is in `~/Developer/AppSigning/sparkle/forkz.key`; `SUPublicEDKey` is already in `macos/Info.plist`)
-- [ ] Release workflow, DMG, notarization, and the Homebrew cask, as in PixlSnapz
+- [x] Sparkle updates (forkz > Check for Updates; the key is `~/Developer/AppSigning/sparkle/forkz.key`)
+- [x] Release workflow: DMG and zip, notarization, signed appcast, GitHub release, and the Homebrew cask (`.github/workflows/release.yml`, `docs/RELEASE_CHECKLIST.md`)
+- [ ] First release (v0.1.0)

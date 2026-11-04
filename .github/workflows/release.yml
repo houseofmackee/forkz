@@ -1,0 +1,214 @@
+name: Release
+
+# Builds, signs, notarizes and publishes a release when a version tag is pushed:
+#   git tag v0.1.0 && git push origin v0.1.0
+# Every release is published as a pre-release; mark it as a regular release
+# on GitHub once the manual checks in docs/RELEASE_CHECKLIST.md are done.
+#
+# Needs these repository secrets:
+#   DEVELOPER_ID_P12_BASE64    the Developer ID Application certificate and key
+#   DEVELOPER_ID_P12_PASSWORD  its password
+#   NOTARY_API_KEY_BASE64      an App Store Connect API key (.p8, Developer role)
+#   SPARKLE_PRIVATE_KEY        the EdDSA key that signs updates and appcast.xml
+#                              (forkz's own: ~/Developer/AppSigning/sparkle/forkz.key)
+#   TAP_DEPLOY_KEY             a write deploy key of houseofmackee/homebrew-tap,
+#                              so the Homebrew cask follows each release
+#                              (optional: without it the step only warns)
+# and these variables: APPLE_TEAM_ID, NOTARY_KEY_ID, NOTARY_ISSUER_ID.
+# Every release must be signed by the same team: Sparkle and the Keychain
+# trust updates by that signature.
+#
+# The app's update feed is the latest regular release's appcast.xml, so
+# Sparkle offers a version only once it is marked as a regular release.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Check the tag matches the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: Check the changelog has notes for this version
+        run: scripts/release_notes.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Import the signing certificate
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          if [ -z "$P12_BASE64" ] || [ -z "$P12_PASSWORD" ]; then
+            echo "::error::DEVELOPER_ID_P12_BASE64 and DEVELOPER_ID_P12_PASSWORD must be set"
+            exit 1
+          fi
+          keychain="$RUNNER_TEMP/release.keychain-db"
+          keychain_password=$(openssl rand -hex 24)
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/release.p12"
+          security import "$RUNNER_TEMP/release.p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/release.p12"
+          # Apple's Developer ID G2 intermediate, so the identity is valid.
+          curl -sSfL -o "$RUNNER_TEMP/DeveloperIDG2CA.cer" https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+          fingerprint=$(openssl x509 -inform der -in "$RUNNER_TEMP/DeveloperIDG2CA.cer" -noout -fingerprint -sha256 | cut -d= -f2)
+          if [ "$fingerprint" != "F1:6C:D3:C5:4C:7F:83:CE:A4:BF:1A:3E:6A:08:19:C8:AA:A8:E4:A1:52:8F:D1:44:71:5F:35:06:43:D2:DF:3A" ]; then
+            echo "::error::unexpected Developer ID G2 intermediate certificate"
+            exit 1
+          fi
+          security add-certificates -k "$keychain" "$RUNNER_TEMP/DeveloperIDG2CA.cer"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$keychain"
+
+      - name: Write the notary key
+        env:
+          KEY_BASE64: ${{ secrets.NOTARY_API_KEY_BASE64 }}
+        run: |
+          if [ -z "$KEY_BASE64" ]; then
+            echo "::error::NOTARY_API_KEY_BASE64 must be set"
+            exit 1
+          fi
+          echo "$KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+
+      - name: Write the update signing key
+        env:
+          SPARKLE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_KEY" ]; then
+            echo "::error::SPARKLE_PRIVATE_KEY must be set"
+            exit 1
+          fi
+          printf '%s\n' "$SPARKLE_KEY" > "$RUNNER_TEMP/sparkle_key"
+          chmod 600 "$RUNNER_TEMP/sparkle_key"
+
+      - name: Build, notarize and package
+        env:
+          FORKZ_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          FORKZ_NOTARY_KEY: ${{ runner.temp }}/notary.p8
+          FORKZ_NOTARY_KEY_ID: ${{ vars.NOTARY_KEY_ID }}
+          FORKZ_NOTARY_ISSUER: ${{ vars.NOTARY_ISSUER_ID }}
+          FORKZ_SPARKLE_KEY: ${{ runner.temp }}/sparkle_key
+        run: |
+          if [ -z "$FORKZ_TEAM_ID" ] || [ -z "$FORKZ_NOTARY_KEY_ID" ] || [ -z "$FORKZ_NOTARY_ISSUER" ]; then
+            echo "::error::the APPLE_TEAM_ID, NOTARY_KEY_ID and NOTARY_ISSUER_ID variables must be set"
+            exit 1
+          fi
+          scripts/dist.sh
+          # Fail rather than publish anything Gatekeeper would block.
+          version="${GITHUB_REF_NAME#v}"
+          . scripts/lib.sh
+          validate_ticket "dist/forkz-$version-arm64.dmg"
+          spctl --assess --type open --context context:primary-signature "dist/forkz-$version-arm64.dmg"
+          validate_ticket dist/forkz.app
+          spctl --assess --type execute dist/forkz.app
+          test -s dist/appcast.xml
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            echo "## What's new"
+            echo
+            scripts/release_notes.sh "$version" | sed 's/^###/####/'
+            echo
+          } > "$notes"
+          cat >> "$notes" <<NOTES
+          ## Installing
+
+          Download \`forkz-$version-arm64.dmg\` (or the zip), open it, and drag forkz into Applications. It is signed with a Developer ID and notarized by Apple, so it opens like any other app.
+
+          Requires macOS 14 or later on Apple silicon. Checksums are in \`SHA256SUMS.txt\`.
+
+          forkz updates itself (forkz > Check for Updates…), or install it with Homebrew: \`brew install --cask houseofmackee/tap/forkz\`.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" --prerelease --generate-notes --notes-file "$notes" \
+            --title "forkz $version" \
+            dist/forkz-$version-arm64.dmg dist/forkz-$version-arm64.zip dist/SHA256SUMS.txt dist/appcast.xml
+
+      - name: Update the Homebrew cask
+        env:
+          TAP_DEPLOY_KEY: ${{ secrets.TAP_DEPLOY_KEY }}
+        run: |
+          if [ -z "$TAP_DEPLOY_KEY" ]; then
+            echo "::warning::TAP_DEPLOY_KEY is not set; houseofmackee/homebrew-tap was not updated"
+            exit 0
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          sha=$(awk '/\.dmg$/ {print $1}' dist/SHA256SUMS.txt)
+          key="$RUNNER_TEMP/tap_key"
+          printf '%s\n' "$TAP_DEPLOY_KEY" > "$key"
+          chmod 600 "$key"
+          # GitHub's published host key (docs.github.com, "GitHub's SSH key fingerprints").
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$RUNNER_TEMP/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$RUNNER_TEMP/known_hosts"
+          git clone -q git@github.com:houseofmackee/homebrew-tap.git "$RUNNER_TEMP/tap"
+          cd "$RUNNER_TEMP/tap"
+          # The whole cask, so the first release creates it.
+          mkdir -p Casks
+          cat > Casks/forkz.rb <<CASK
+          cask "forkz" do
+            version "$version"
+            sha256 "$sha"
+
+            url "https://github.com/houseofmackee/forkz/releases/download/v#{version}/forkz-#{version}-arm64.dmg"
+            name "forkz"
+            desc "Dual-pane file manager with SFTP"
+            homepage "https://github.com/houseofmackee/forkz"
+
+            livecheck do
+              url "https://github.com/houseofmackee/forkz.git"
+              strategy :git
+            end
+
+            auto_updates true
+            depends_on arch: :arm64
+            depends_on macos: :sonoma
+
+            app "forkz.app"
+            binary "#{appdir}/forkz.app/Contents/MacOS/forkz"
+
+            uninstall quit: "io.github.houseofmackee.forkz"
+
+            zap trash: [
+              "~/Library/Application Support/forkz",
+              "~/Library/Caches/io.github.houseofmackee.forkz",
+              "~/Library/HTTPStorages/io.github.houseofmackee.forkz",
+              "~/Library/Preferences/io.github.houseofmackee.forkz.plist",
+            ]
+          end
+          CASK
+          git add Casks/forkz.rb
+          if git diff --cached --quiet; then
+            echo "the cask is already at $version"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "forkz $version"
+          git push -q origin HEAD
+
+      - name: Remove the temporary keychain and key
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/release.keychain-db" || true
+          rm -f "$RUNNER_TEMP/notary.p8" "$RUNNER_TEMP/sparkle_key" "$RUNNER_TEMP/tap_key" "$RUNNER_TEMP/known_hosts"
