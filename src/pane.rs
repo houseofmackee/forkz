@@ -107,6 +107,11 @@ impl PaneState {
         &self.visible
     }
 
+    /// Every item in the folder, hidden and filtered out ones too.
+    pub fn all_entries(&self) -> &[Entry] {
+        &self.all
+    }
+
     pub fn entry(&self, row: usize) -> Option<&Entry> {
         self.visible.get(row)
     }

@@ -607,6 +607,22 @@ impl Vfs for SftpFs {
         Ok(Box::new(file))
     }
 
+    fn open_read_from(&self, path: &Path, offset: u64) -> io::Result<Box<dyn Read + Send>> {
+        use std::io::Seek;
+        let mut file = self.with(|sftp| sftp.open(path))?;
+        file.seek(io::SeekFrom::Start(offset))?;
+        Ok(Box::new(file))
+    }
+
+    fn open_write_from(&self, path: &Path, offset: u64) -> io::Result<Box<dyn Write + Send>> {
+        use std::io::Seek;
+        // Writing without truncating, from the offset on.
+        let file = self.with(|sftp| sftp.open_mode(path, ssh2::OpenFlags::WRITE, 0o644, ssh2::OpenType::File));
+        let mut file = file?;
+        file.seek(io::SeekFrom::Start(offset))?;
+        Ok(Box::new(file))
+    }
+
     fn set_attributes(&self, path: &Path, modified: Option<SystemTime>, permissions: Option<u32>) -> io::Result<()> {
         let mtime = modified.and_then(|m| m.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs());
         if mtime.is_none() && permissions.is_none() {

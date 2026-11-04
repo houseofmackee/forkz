@@ -22,6 +22,57 @@ pub struct Settings {
     pub general: GeneralSettings,
     /// Server folders added to the sidebar.
     pub remote_favorites: Vec<RemoteFavorite>,
+    /// Saved multi-rename rules.
+    pub rename_presets: Vec<crate::rename::Preset>,
+    pub appearance: AppearanceSettings,
+    /// Keyboard shortcuts changed from the defaults: command id to a
+    /// shortcut ("cmd+shift+r"), or "" for none.
+    pub shortcuts: std::collections::BTreeMap<String, String>,
+    /// The preview pane on the right, and its tab.
+    pub preview: PreviewSettings,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct AppearanceSettings {
+    /// "system", "light", or "dark".
+    pub theme: String,
+    /// The file list's text size in points.
+    pub text_size: f64,
+    /// "compact", "normal", or "roomy".
+    pub row_spacing: String,
+    pub alternating_rows: bool,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        AppearanceSettings {
+            theme: "system".into(),
+            text_size: 13.0,
+            row_spacing: "normal".into(),
+            alternating_rows: true,
+        }
+    }
+}
+
+pub const THEMES: &[(&str, &str)] = &[("system", "Same as macOS"), ("light", "Light"), ("dark", "Dark")];
+pub const ROW_SPACINGS: &[(&str, &str, f64)] =
+    &[("compact", "Compact", 18.0), ("normal", "Normal", 22.0), ("roomy", "Roomy", 28.0)];
+pub const TEXT_SIZES: &[f64] = &[11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0];
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PreviewSettings {
+    pub visible: bool,
+    /// "info", "preview", "activity", or "log".
+    pub tab: String,
+    pub width: f64,
+}
+
+impl Default for PreviewSettings {
+    fn default() -> Self {
+        PreviewSettings { visible: false, tab: "info".into(), width: 280.0 }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -124,11 +175,20 @@ pub struct TransferSettings {
     pub upload_conflict: Option<Resolution>,
     /// Uploads and downloads that run at once; more wait their turn.
     pub max_transfers: usize,
+    /// Ask before uploading an opened server file that was saved (instead
+    /// of uploading it right away).
+    pub ask_before_upload_on_save: bool,
 }
 
 impl Default for TransferSettings {
     fn default() -> Self {
-        TransferSettings { preserve_timestamps: true, download_conflict: None, upload_conflict: None, max_transfers: 2 }
+        TransferSettings {
+            preserve_timestamps: true,
+            download_conflict: None,
+            upload_conflict: None,
+            max_transfers: 2,
+            ask_before_upload_on_save: false,
+        }
     }
 }
 
@@ -151,11 +211,21 @@ impl Default for SftpSettings {
 pub struct PaneSettings {
     pub location: PathBuf,
     pub sort: Sort,
+    /// Every tab's folder (on the Mac), in order; empty for one tab.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tabs: Vec<PathBuf>,
+    /// Which of `tabs` was shown.
+    pub active_tab: usize,
 }
 
 impl Default for PaneSettings {
     fn default() -> Self {
-        PaneSettings { location: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")), sort: Sort::default() }
+        PaneSettings {
+            location: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+            sort: Sort::default(),
+            tabs: Vec::new(),
+            active_tab: 0,
+        }
     }
 }
 
@@ -165,13 +235,17 @@ impl Default for Settings {
         Settings {
             show_hidden: false,
             left: PaneSettings::default(),
-            right: PaneSettings { location: dirs::download_dir().unwrap_or(home), sort: Sort::default() },
+            right: PaneSettings { location: dirs::download_dir().unwrap_or(home), ..PaneSettings::default() },
             favorites: Vec::new(),
             transfers: TransferSettings::default(),
             sftp: SftpSettings::default(),
             columns: ColumnSettings::default(),
             general: GeneralSettings::default(),
             remote_favorites: Vec::new(),
+            rename_presets: Vec::new(),
+            appearance: AppearanceSettings::default(),
+            shortcuts: Default::default(),
+            preview: PreviewSettings::default(),
         }
     }
 }

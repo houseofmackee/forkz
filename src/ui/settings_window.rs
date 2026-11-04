@@ -1,22 +1,29 @@
-//! The Settings window (Command-comma): General, Transfers, and SFTP.
-//! Every change applies right away and is saved.
+//! The Settings window (Command-comma): General, Appearance, Transfers,
+//! SFTP, and Shortcuts. Every change applies right away and is saved.
 
 use std::cell::{OnceCell, RefCell};
 use std::path::PathBuf;
+use std::ptr::NonNull;
+use std::rc::Rc;
 
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSBackingStoreType, NSButton, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate,
-    NSGridCellPlacement, NSGridView, NSModalResponseOK, NSOpenPanel, NSPopUpButton, NSTabView, NSTabViewItem,
-    NSTextField, NSTextFieldDelegate, NSView, NSWindow, NSWindowStyleMask,
+    NSBackingStoreType, NSButton, NSControlStateValueOff, NSControlStateValueOn, NSControlTextEditingDelegate, NSEvent,
+    NSEventMask, NSEventModifierFlags, NSFont, NSGridCellPlacement, NSGridView, NSModalResponseOK, NSOpenPanel,
+    NSPopUpButton, NSScrollView, NSStackView, NSTabView, NSTabViewItem, NSTableColumn, NSTableView,
+    NSTableViewDataSource, NSTableViewDelegate, NSTextField, NSTextFieldDelegate, NSView, NSWindow, NSWindowStyleMask,
 };
-use objc2_foundation::{NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSArray, NSEdgeInsets, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+};
 
+use super::commands::{self, Command};
 use super::tools;
 use super::util::{file_url, mtm, ns, url_path};
 use crate::fs::ops::Resolution;
+use crate::settings::{ROW_SPACINGS, TEXT_SIZES, THEMES};
 
 /// The choices for "when a file exists", in popup order.
 const CONFLICT_CHOICES: [(&str, Option<Resolution>); 5] = [
@@ -41,8 +48,14 @@ struct Controls {
     keep_dates: Retained<NSButton>,
     download: Retained<NSPopUpButton>,
     upload: Retained<NSPopUpButton>,
+    ask_upload: Retained<NSButton>,
     timeout: Retained<NSTextField>,
     key_files: Retained<NSTextField>,
+    theme: Retained<NSPopUpButton>,
+    text_size: Retained<NSPopUpButton>,
+    row_spacing: Retained<NSPopUpButton>,
+    alternating: Retained<NSButton>,
+    shortcuts: Retained<NSTableView>,
 }
 
 pub struct WindowIvars {
@@ -72,6 +85,21 @@ define_class!(
         fn show_known_hosts(&self, _sender: Option<&AnyObject>) {
             reveal_known_hosts();
         }
+
+        #[unsafe(method(changeShortcut:))]
+        fn change_shortcut_action(&self, _sender: Option<&AnyObject>) {
+            self.change_shortcut();
+        }
+
+        #[unsafe(method(resetShortcut:))]
+        fn reset_shortcut_action(&self, _sender: Option<&AnyObject>) {
+            self.reset_shortcut(false);
+        }
+
+        #[unsafe(method(resetAllShortcuts:))]
+        fn reset_all_shortcuts_action(&self, _sender: Option<&AnyObject>) {
+            self.reset_shortcut(true);
+        }
     }
 
     unsafe impl NSObjectProtocol for SettingsWindow {}
@@ -85,6 +113,25 @@ define_class!(
     }
 
     unsafe impl NSTextFieldDelegate for SettingsWindow {}
+
+    unsafe impl NSTableViewDataSource for SettingsWindow {
+        #[unsafe(method(numberOfRowsInTableView:))]
+        fn number_of_rows(&self, _table: &NSTableView) -> NSInteger {
+            Command::ALL.len() as NSInteger
+        }
+    }
+
+    unsafe impl NSTableViewDelegate for SettingsWindow {
+        #[unsafe(method_id(tableView:viewForTableColumn:row:))]
+        fn view_for_row(
+            &self,
+            _table: &NSTableView,
+            column: Option<&NSTableColumn>,
+            row: NSInteger,
+        ) -> Option<Retained<NSView>> {
+            self.shortcut_cell(column, row)
+        }
+    }
 );
 
 thread_local! {
@@ -188,6 +235,7 @@ impl SettingsWindow {
             keep_dates: checkbox("Keep modification dates", self, mtm),
             download: popup(&conflict_titles, self, mtm),
             upload: popup(&conflict_titles, self, mtm),
+            ask_upload: checkbox("Ask before uploading a saved server file", self, mtm),
             timeout: NSTextField::initWithFrame(
                 NSTextField::alloc(mtm),
                 NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(60.0, 22.0)),
@@ -196,6 +244,21 @@ impl SettingsWindow {
                 NSTextField::alloc(mtm),
                 NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(300.0, 60.0)),
             ),
+            theme: popup(&THEMES.iter().map(|t| t.1).collect::<Vec<_>>(), self, mtm),
+            text_size: popup(
+                &TEXT_SIZES
+                    .iter()
+                    .map(|s| format!("{s} pt"))
+                    .collect::<Vec<_>>()
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                self,
+                mtm,
+            ),
+            row_spacing: popup(&ROW_SPACINGS.iter().map(|r| r.1).collect::<Vec<_>>(), self, mtm),
+            alternating: checkbox("Alternating row colors", self, mtm),
+            shortcuts: NSTableView::initWithFrame(NSTableView::alloc(mtm), NSRect::ZERO),
         };
         controls.compare.setEnabled(!compare_tools.is_empty());
         controls.timeout.widthAnchor().constraintEqualToConstant(60.0).setActive(true);
@@ -248,6 +311,11 @@ impl SettingsWindow {
                 (label("Dates:", mtm), view(&*controls.keep_dates)),
                 (label("When a downloaded file exists:", mtm), view(&*controls.download)),
                 (label("When an uploaded file exists:", mtm), view(&*controls.upload)),
+                (label("Opened server files:", mtm), view(&*controls.ask_upload)),
+                (
+                    empty(mtm),
+                    note("Saving a server file you opened uploads it back, unless you choose to be asked.", mtm),
+                ),
             ],
             mtm,
         );
@@ -262,8 +330,26 @@ impl SettingsWindow {
             mtm,
         );
 
+        let appearance = grid(
+            vec![
+                (label("Appearance:", mtm), view(&*controls.theme)),
+                (label("Text size:", mtm), view(&*controls.text_size)),
+                (label("Row spacing:", mtm), view(&*controls.row_spacing)),
+                (empty(mtm), view(&*controls.alternating)),
+                (empty(mtm), note("For the file lists. The appearance applies to all of forkz.", mtm)),
+            ],
+            mtm,
+        );
+        let shortcuts = self.shortcuts_tab(&controls.shortcuts, mtm);
+
         let tabs = NSTabView::new(mtm);
-        for (title, content) in [("General", general), ("Transfers", transfers), ("SFTP", sftp)] {
+        for (title, content) in [
+            ("General", general),
+            ("Appearance", appearance),
+            ("Transfers", transfers),
+            ("SFTP", sftp),
+            ("Shortcuts", shortcuts),
+        ] {
             let item = NSTabViewItem::new();
             item.setLabel(&ns(title));
             item.setView(Some(&content));
@@ -273,7 +359,7 @@ impl SettingsWindow {
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
-                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(560.0, 330.0)),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 460.0)),
                 NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
                 NSBackingStoreType::Buffered,
                 false,
@@ -307,9 +393,17 @@ impl SettingsWindow {
         let conflict = |r: Option<Resolution>| CONFLICT_CHOICES.iter().position(|c| c.1 == r).unwrap_or(0) as isize;
         c.download.selectItemAtIndex(conflict(settings.transfers.download_conflict));
         c.upload.selectItemAtIndex(conflict(settings.transfers.upload_conflict));
+        set(&c.ask_upload, settings.transfers.ask_before_upload_on_save);
         c.timeout.setStringValue(&ns(&settings.sftp.timeout_seconds.to_string()));
         let keys: Vec<String> = settings.sftp.key_files.iter().map(|k| k.display().to_string()).collect();
         c.key_files.setStringValue(&ns(&keys.join("\n")));
+        let a = &settings.appearance;
+        c.theme.selectItemAtIndex(THEMES.iter().position(|t| t.0 == a.theme).unwrap_or(0) as isize);
+        let size = TEXT_SIZES.iter().position(|s| (*s - a.text_size).abs() < 0.1).unwrap_or(2);
+        c.text_size.selectItemAtIndex(size as isize);
+        c.row_spacing.selectItemAtIndex(ROW_SPACINGS.iter().position(|r| r.0 == a.row_spacing).unwrap_or(1) as isize);
+        set(&c.alternating, a.alternating_rows);
+        c.shortcuts.reloadData();
     }
 
     /// Reads the controls into the settings, saves, and applies them.
@@ -343,10 +437,21 @@ impl SettingsWindow {
             s.transfers.preserve_timestamps = on(&c.keep_dates);
             s.transfers.download_conflict = CONFLICT_CHOICES.get(index(&c.download)).and_then(|c| c.1);
             s.transfers.upload_conflict = CONFLICT_CHOICES.get(index(&c.upload)).and_then(|c| c.1);
+            s.transfers.ask_before_upload_on_save = on(&c.ask_upload);
             if let Some(timeout) = timeout {
                 s.sftp.timeout_seconds = timeout;
             }
             s.sftp.key_files = key_files;
+            if let Some(theme) = THEMES.get(index(&c.theme)) {
+                s.appearance.theme = theme.0.to_string();
+            }
+            if let Some(size) = TEXT_SIZES.get(index(&c.text_size)) {
+                s.appearance.text_size = *size;
+            }
+            if let Some(spacing) = ROW_SPACINGS.get(index(&c.row_spacing)) {
+                s.appearance.row_spacing = spacing.0.to_string();
+            }
+            s.appearance.alternating_rows = on(&c.alternating);
         });
         if crate::updates::available() && auto_updates != crate::updates::checks_automatically() {
             crate::updates::set_checks_automatically(auto_updates);
@@ -379,6 +484,237 @@ impl SettingsWindow {
             c.key_files.setStringValue(&ns(&text));
             self.save();
         }
+    }
+}
+
+impl SettingsWindow {
+    fn shortcuts_tab(&self, table: &NSTableView, mtm: MainThreadMarker) -> Retained<NSView> {
+        for (id, title, width) in [("command", "Command", 330.0), ("shortcut", "Shortcut", 150.0)] {
+            let column = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), &ns(id));
+            column.setTitle(&ns(title));
+            column.setWidth(width);
+            table.addTableColumn(&column);
+        }
+        table.setUsesAlternatingRowBackgroundColors(true);
+        unsafe {
+            table.setDataSource(Some(ProtocolObject::from_ref(self)));
+            table.setDelegate(Some(ProtocolObject::from_ref(self)));
+            table.setTarget(Some(self));
+            table.setDoubleAction(Some(sel!(changeShortcut:)));
+        }
+        let scroll = NSScrollView::new(mtm);
+        scroll.setDocumentView(Some(table));
+        scroll.setHasVerticalScroller(true);
+        let button = |title: &str, action| unsafe {
+            NSButton::buttonWithTitle_target_action(&ns(title), Some(self), Some(action), mtm)
+        };
+        let buttons = NSStackView::stackViewWithViews(
+            &NSArray::from_retained_slice(&[
+                view(&*button("Change Shortcut\u{2026}", sel!(changeShortcut:))),
+                view(&*button("Use Default", sel!(resetShortcut:))),
+                view(&*button("Reset All", sel!(resetAllShortcuts:))),
+            ]),
+            mtm,
+        );
+        let stack = NSStackView::stackViewWithViews(
+            &NSArray::from_retained_slice(&[
+                view(&*scroll),
+                view(&*buttons),
+                note("Double-click a command to change its shortcut. Changed shortcuts are in bold.", mtm),
+            ]),
+            mtm,
+        );
+        stack.setOrientation(objc2_app_kit::NSUserInterfaceLayoutOrientation::Vertical);
+        stack.setAlignment(objc2_app_kit::NSLayoutAttribute::Leading);
+        stack.setEdgeInsets(NSEdgeInsets { top: 16.0, left: 16.0, bottom: 16.0, right: 16.0 });
+        scroll.leadingAnchor().constraintEqualToAnchor_constant(&stack.leadingAnchor(), 16.0).setActive(true);
+        scroll.trailingAnchor().constraintEqualToAnchor_constant(&stack.trailingAnchor(), -16.0).setActive(true);
+        scroll.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
+        scroll.heightAnchor().constraintGreaterThanOrEqualToConstant(200.0).setActive(true);
+        // The tab sizes its view by its frame: the stack fills a container.
+        let container = NSView::new(mtm);
+        stack.setTranslatesAutoresizingMaskIntoConstraints(false);
+        container.addSubview(&stack);
+        stack.topAnchor().constraintEqualToAnchor(&container.topAnchor()).setActive(true);
+        stack.bottomAnchor().constraintEqualToAnchor(&container.bottomAnchor()).setActive(true);
+        stack.leadingAnchor().constraintEqualToAnchor(&container.leadingAnchor()).setActive(true);
+        stack.trailingAnchor().constraintEqualToAnchor(&container.trailingAnchor()).setActive(true);
+        container
+    }
+
+    fn shortcut_cell(&self, column: Option<&NSTableColumn>, row: NSInteger) -> Option<Retained<NSView>> {
+        let command = *Command::ALL.get(usize::try_from(row).ok()?)?;
+        let overrides = super::current_settings().map(|s| s.shortcuts).unwrap_or_default();
+        let changed = overrides.contains_key(&command.id());
+        let field = if column?.identifier().to_string() == "shortcut" {
+            let (key, modifiers) = command.effective_shortcut(&overrides);
+            let text = commands::display(&key, modifiers);
+            let field = NSTextField::labelWithString(&ns(if text.is_empty() { "None" } else { &text }), self.mtm());
+            if text.is_empty() {
+                field.setTextColor(Some(&objc2_app_kit::NSColor::tertiaryLabelColor()));
+            }
+            field
+        } else {
+            NSTextField::labelWithString(&ns(command.title()), self.mtm())
+        };
+        if changed {
+            field.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
+        }
+        Some(Retained::into_super(Retained::into_super(field)))
+    }
+
+    fn selected_command(&self) -> Option<Command> {
+        let c = self.ivars().controls.get()?;
+        let row = usize::try_from(c.shortcuts.selectedRow()).ok()?;
+        Command::ALL.get(row).copied()
+    }
+
+    fn change_shortcut(&self) {
+        let Some(command) = self.selected_command() else { return };
+        let Some((key, modifiers)) = record_shortcut(command.title()) else { return };
+        let overrides = super::current_settings().map(|s| s.shortcuts).unwrap_or_default();
+        if commands::RESERVED.iter().any(|(k, m)| *k == key && *m == modifiers) {
+            super::dialogs::show_info(
+                format!("{} is taken by the app menu or Edit menu.", commands::display(&key, modifiers)),
+                "Choose another shortcut.".into(),
+            );
+            return;
+        }
+        let taken = commands::command_using(&key, modifiers, &overrides, command);
+        if let Some(other) = taken {
+            let message = format!(
+                "{} is used by \u{201c}{}\u{201d}.",
+                commands::display(&key, modifiers),
+                other.title().trim_end_matches('\u{2026}')
+            );
+            let detail =
+                format!("Use it for \u{201c}{}\u{201d} instead?", command.title().trim_end_matches('\u{2026}'));
+            if !super::dialogs::confirm(&message, &detail, "Use It", false) {
+                return;
+            }
+        }
+        let spec = if key.is_empty() { String::new() } else { commands::spec(&key, modifiers) };
+        super::update_settings(|s| {
+            // Only a menu shortcut is taken away (a list key just loses to
+            // the menu).
+            if let Some(other) = taken
+                && other.effective_shortcut(&s.shortcuts).0 == key
+            {
+                s.shortcuts.insert(other.id(), String::new());
+            }
+            let (default_key, default_modifiers) = command.shortcut();
+            let default =
+                if default_key.is_empty() { String::new() } else { commands::spec(default_key, default_modifiers) };
+            if spec == default {
+                s.shortcuts.remove(&command.id());
+            } else {
+                s.shortcuts.insert(command.id(), spec.clone());
+            }
+        });
+        if let Some(c) = self.ivars().controls.get() {
+            c.shortcuts.reloadData();
+        }
+    }
+
+    fn reset_shortcut(&self, all: bool) {
+        if all {
+            if !super::dialogs::confirm("Use the default shortcuts for every command?", "", "Reset All", false) {
+                return;
+            }
+            super::update_settings(|s| s.shortcuts.clear());
+        } else if let Some(command) = self.selected_command() {
+            super::update_settings(|s| {
+                s.shortcuts.remove(&command.id());
+            });
+        }
+        if let Some(c) = self.ivars().controls.get() {
+            c.shortcuts.reloadData();
+        }
+    }
+}
+
+/// Asks for a new shortcut by recording the keys pressed. None if
+/// cancelled; an empty key to remove the shortcut.
+fn record_shortcut(title: &str) -> Option<(String, NSEventModifierFlags)> {
+    let mtm = mtm();
+    let alert = objc2_app_kit::NSAlert::new(mtm);
+    alert.setMessageText(&ns(&format!("New shortcut for \u{201c}{}\u{201d}", title.trim_end_matches('\u{2026}'))));
+    alert.setInformativeText(&ns("Press the keys now. Shortcuts need Command, Control, or Option, or a function key."));
+    alert.addButtonWithTitle(&ns("Cancel"));
+    alert.addButtonWithTitle(&ns("Remove Shortcut"));
+    let shown = NSTextField::labelWithString(&ns("\u{2026}"), mtm);
+    shown.setFont(Some(&NSFont::systemFontOfSize_weight(22.0, unsafe { objc2_app_kit::NSFontWeightMedium })));
+    shown.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(260.0, 32.0)));
+    alert.setAccessoryView(Some(&shown));
+    let captured: Rc<RefCell<Option<(String, NSEventModifierFlags)>>> = Rc::new(RefCell::new(None));
+    const RECORDED: isize = 4242;
+    let block = {
+        let captured = captured.clone();
+        let shown = shown.clone();
+        block2::RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
+            let event = unsafe { event.as_ref() };
+            let modifiers = commands::shortcut_modifiers(event.modifierFlags());
+            let code = event.keyCode();
+            let named = match code {
+                51 => Some("\u{8}"),
+                117 => Some("\u{f728}"),
+                36 | 76 => Some("\r"),
+                48 => Some("\t"),
+                49 => Some(" "),
+                53 => Some("\u{1b}"),
+                123 => Some("\u{f702}"),
+                124 => Some("\u{f703}"),
+                125 => Some("\u{f701}"),
+                126 => Some("\u{f700}"),
+                115 => Some("\u{f729}"),
+                119 => Some("\u{f72b}"),
+                116 => Some("\u{f72c}"),
+                121 => Some("\u{f72d}"),
+                _ => None,
+            };
+            // Function keys by key code (F1 to F20).
+            const FUNCTION_CODES: [u16; 20] =
+                [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90];
+            let function = FUNCTION_CODES
+                .iter()
+                .position(|c| *c == code)
+                .and_then(|n| char::from_u32(0xf704 + n as u32))
+                .map(String::from);
+            let key = match named.map(str::to_string).or(function) {
+                Some(key) => key,
+                None => {
+                    let plain = event.charactersByApplyingModifiers(NSEventModifierFlags(0)).map(|s| s.to_string());
+                    plain
+                        .or_else(|| event.charactersIgnoringModifiers().map(|s| s.to_string()))
+                        .unwrap_or_default()
+                        .to_lowercase()
+                }
+            };
+            let app = objc2_app_kit::NSApplication::sharedApplication(unsafe { MainThreadMarker::new_unchecked() });
+            if key == "\u{1b}" && modifiers.0 == 0 {
+                app.stopModalWithCode(objc2_app_kit::NSAlertFirstButtonReturn);
+                return std::ptr::null_mut();
+            }
+            let strong = NSEventModifierFlags::Command | NSEventModifierFlags::Control | NSEventModifierFlags::Option;
+            if !key.is_empty() && (modifiers.intersects(strong) || commands::is_function_key(&key)) {
+                shown.setStringValue(&ns(&commands::display(&key, modifiers)));
+                *captured.borrow_mut() = Some((key, modifiers));
+                app.stopModalWithCode(RECORDED);
+            } else {
+                shown.setStringValue(&ns("Add \u{2318}, \u{2303}, or \u{2325}"));
+            }
+            std::ptr::null_mut()
+        })
+    };
+    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::KeyDown, &block) };
+    let response = alert.runModal();
+    if let Some(monitor) = monitor {
+        unsafe { NSEvent::removeMonitor(&monitor) };
+    }
+    match response {
+        RECORDED => captured.borrow_mut().take(),
+        r if r == objc2_app_kit::NSAlertSecondButtonReturn => Some((String::new(), NSEventModifierFlags::Command)),
+        _ => None,
     }
 }
 

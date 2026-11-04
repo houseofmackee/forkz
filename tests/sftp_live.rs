@@ -159,6 +159,28 @@ fn host_keys_passphrases_and_transfers() {
     assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
     assert_eq!(std::fs::read(back.join("project/assets/img/big.bin")).unwrap(), big);
 
+    // Resume: an upload that stopped part way continues from its partial
+    // file on the server, and a download from its partial file here.
+    let resume_src = local.path().join("resume.bin");
+    let resume_data: Vec<u8> = (0..1_500_000u32).map(|i| (i % 241) as u8).collect();
+    std::fs::write(&resume_src, &resume_data).unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(600);
+    std::fs::File::options().write(true).open(&resume_src).unwrap().set_modified(old).unwrap();
+    std::fs::write(base.join(".resume.bin.forkz-partial"), &resume_data[..500_000]).unwrap();
+    let up = Job::between(JobKind::Copy, vfs::local(), vec![resume_src.clone()], remote.clone(), base.clone());
+    let outcome = ops::run(&up, &mut Quiet, CancelToken::default());
+    assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+    assert_eq!(std::fs::read(base.join("resume.bin")).unwrap(), resume_data);
+    let down_folder = local.path().join("down");
+    std::fs::create_dir(&down_folder).unwrap();
+    std::fs::write(down_folder.join(".resume.bin.forkz-partial"), &resume_data[..700_000]).unwrap();
+    let down =
+        Job::between(JobKind::Copy, remote.clone(), vec![base.join("resume.bin")], vfs::local(), down_folder.clone());
+    let outcome = ops::run(&down, &mut Quiet, CancelToken::default());
+    assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+    assert_eq!(std::fs::read(down_folder.join("resume.bin")).unwrap(), resume_data);
+    std::fs::remove_file(base.join("resume.bin")).unwrap();
+
     let renamed = ops::rename(&remote, &base.join("project"), "site").unwrap();
     assert!(remote.stat(&renamed).unwrap().is_folder_like());
     let folder = ops::new_folder(&remote, &base).unwrap();

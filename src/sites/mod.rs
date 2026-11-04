@@ -37,6 +37,93 @@ fn proxy_tokens(command: &str, host: &str, port: u16, user: &str, alias: &str) -
     out
 }
 
+/// How a site is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Protocol {
+    #[default]
+    Sftp,
+    /// FTP, encrypted (AUTH TLS) when the server offers it.
+    Ftp,
+    /// FTP with TLS required (explicit FTPS).
+    Ftps,
+    /// Plain FTP: nothing is encrypted.
+    FtpPlain,
+    Webdav,
+    /// WebDAV over HTTPS.
+    Webdavs,
+    S3,
+    /// S3 over plain HTTP (local MinIO and test servers).
+    S3Http,
+}
+
+impl Protocol {
+    pub const ALL: [Protocol; 8] = [
+        Protocol::Sftp,
+        Protocol::Ftp,
+        Protocol::Ftps,
+        Protocol::FtpPlain,
+        Protocol::Webdavs,
+        Protocol::Webdav,
+        Protocol::S3,
+        Protocol::S3Http,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Protocol::Sftp => "SFTP",
+            Protocol::Ftp => "FTP (TLS if available)",
+            Protocol::Ftps => "FTPS (TLS required)",
+            Protocol::FtpPlain => "FTP (unencrypted)",
+            Protocol::Webdav => "WebDAV (HTTP, unencrypted)",
+            Protocol::Webdavs => "WebDAV (HTTPS)",
+            Protocol::S3 => "Amazon S3 or compatible",
+            Protocol::S3Http => "S3 (HTTP, unencrypted)",
+        }
+    }
+
+    /// The scheme in addresses ("ftp://user@host").
+    pub fn scheme(self) -> &'static str {
+        match self {
+            Protocol::Sftp => "sftp",
+            Protocol::Ftp | Protocol::FtpPlain => "ftp",
+            Protocol::Ftps => "ftps",
+            Protocol::Webdav => "dav",
+            Protocol::Webdavs => "davs",
+            Protocol::S3 | Protocol::S3Http => "s3",
+        }
+    }
+
+    pub fn from_scheme(scheme: &str) -> Option<Protocol> {
+        Some(match scheme.to_ascii_lowercase().as_str() {
+            "sftp" | "ssh" => Protocol::Sftp,
+            "ftp" => Protocol::Ftp,
+            "ftps" | "ftpes" => Protocol::Ftps,
+            "dav" | "webdav" | "http" => Protocol::Webdav,
+            "davs" | "webdavs" | "https" => Protocol::Webdavs,
+            "s3" => Protocol::S3,
+            _ => return None,
+        })
+    }
+
+    pub fn default_port(self) -> u16 {
+        match self {
+            Protocol::Sftp => 22,
+            Protocol::Ftp | Protocol::Ftps | Protocol::FtpPlain => 21,
+            Protocol::Webdav | Protocol::S3Http => 80,
+            Protocol::Webdavs | Protocol::S3 => 443,
+        }
+    }
+
+    pub fn is_sftp(self) -> bool {
+        self == Protocol::Sftp
+    }
+}
+
+fn is_sftp(protocol: &Protocol) -> bool {
+    protocol.is_sftp()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Site {
     pub id: String,
@@ -44,6 +131,8 @@ pub struct Site {
     /// Group in the sidebar ("" for none), like FileZilla's folders.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub folder: String,
+    #[serde(default, skip_serializing_if = "is_sftp")]
+    pub protocol: Protocol,
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
@@ -59,6 +148,9 @@ pub struct Site {
     /// A local folder to show in the other pane when connecting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_dir: Option<PathBuf>,
+    /// The S3 region (from the server name if None, else us-east-1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -71,6 +163,7 @@ impl Site {
             id: new_id(),
             name: host.to_string(),
             folder: String::new(),
+            protocol: Protocol::Sftp,
             host: host.to_string(),
             port,
             user: user.to_string(),
@@ -78,13 +171,44 @@ impl Site {
             key_file: None,
             remote_dir: None,
             local_dir: None,
+            region: None,
         }
     }
 
-    /// "user@host" (with ":port" if not 22).
+    /// "user@host" (with ":port" if not the protocol's usual one, and
+    /// "ftp://" and so on for protocols other than SFTP).
     pub fn address(&self) -> String {
-        let port = if self.port == 22 { String::new() } else { format!(":{}", self.port) };
-        if self.user.is_empty() { format!("{}{port}", self.host) } else { format!("{}@{}{port}", self.user, self.host) }
+        let port = if self.port == self.protocol.default_port() { String::new() } else { format!(":{}", self.port) };
+        let scheme = if self.protocol.is_sftp() { String::new() } else { format!("{}://", self.protocol.scheme()) };
+        if self.user.is_empty() {
+            format!("{scheme}{}{port}", self.host)
+        } else {
+            format!("{scheme}{}@{}{port}", self.user, self.host)
+        }
+    }
+
+    /// The S3 region: the site's, or the one in an AWS server name
+    /// ("s3.eu-west-1.amazonaws.com", "bucket.s3-us-west-2.amazonaws.com"),
+    /// or us-east-1.
+    pub fn s3_region(&self) -> String {
+        if let Some(region) = self.region.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+            return region.to_string();
+        }
+        let host = self.host.to_ascii_lowercase();
+        if let Some(rest) = host.strip_suffix(".amazonaws.com") {
+            let parts: Vec<&str> = rest.split('.').collect();
+            for (i, part) in parts.iter().enumerate() {
+                if let Some(region) = part.strip_prefix("s3-").filter(|r| !r.is_empty()) {
+                    return region.to_string();
+                }
+                if *part == "s3"
+                    && let Some(next) = parts.get(i + 1)
+                {
+                    return next.to_string();
+                }
+            }
+        }
+        "us-east-1".to_string()
     }
 
     /// How to connect, with what `~/.ssh/config` says about the host: its
@@ -127,7 +251,10 @@ impl Site {
 
     /// Same server and account (to avoid importing duplicates).
     pub fn same_account(&self, other: &Site) -> bool {
-        self.host.eq_ignore_ascii_case(&other.host) && self.port == other.port && self.user == other.user
+        self.protocol == other.protocol
+            && self.host.eq_ignore_ascii_case(&other.host)
+            && self.port == other.port
+            && self.user == other.user
     }
 }
 
@@ -230,6 +357,30 @@ pub mod keychain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocols_regions_and_addresses() {
+        let mut site = Site::new("s3.eu-west-1.amazonaws.com", 443, "AKIA");
+        site.protocol = Protocol::S3;
+        assert_eq!(site.s3_region(), "eu-west-1");
+        assert_eq!(site.address(), "s3://AKIA@s3.eu-west-1.amazonaws.com");
+        site.host = "photos.s3-us-west-2.amazonaws.com".into();
+        assert_eq!(site.s3_region(), "us-west-2");
+        site.host = "minio.local".into();
+        assert_eq!(site.s3_region(), "us-east-1");
+        site.region = Some("auto".into());
+        assert_eq!(site.s3_region(), "auto");
+        let mut ftp = Site::new("ftp.example.com", 2121, "me");
+        ftp.protocol = Protocol::Ftps;
+        assert_eq!(ftp.address(), "ftps://me@ftp.example.com:2121");
+        // Old sites files have no protocol: SFTP. SFTP is not written out.
+        let text = toml::to_string(&SiteStore { sites: vec![Site::new("h", 22, "u")] }).unwrap();
+        assert!(!text.contains("protocol"));
+        let back: SiteStore = toml::from_str(&text).unwrap();
+        assert_eq!(back.sites[0].protocol, Protocol::Sftp);
+        let text = toml::to_string(&SiteStore { sites: vec![ftp] }).unwrap();
+        assert!(text.contains("protocol = \"ftps\""));
+    }
 
     #[test]
     fn store_round_trip_sorted() {

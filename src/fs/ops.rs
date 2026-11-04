@@ -217,7 +217,10 @@ struct Runner<'a> {
 pub fn run(job: &Job, observer: &mut dyn Observer, cancel: CancelToken) -> Outcome {
     let connect = |fs: &FsRef| if fs.is_local() { Ok(fs.clone()) } else { fs.connect_another() };
     let ends = connect(&job.source_fs).and_then(|src| {
-        let dst = if vfs::same(&job.source_fs, &job.dest_fs) { src.clone() } else { connect(&job.dest_fs)? };
+        // Copies within one server read and write at once, which an FTP
+        // connection cannot do: they get a second connection.
+        let shared = vfs::same(&job.source_fs, &job.dest_fs) && (job.kind != JobKind::Copy || src.is_local());
+        let dst = if shared { src.clone() } else { connect(&job.dest_fs)? };
         Ok((src, dst))
     });
     let (src, dst) = match ends {
@@ -562,15 +565,17 @@ impl Runner<'_> {
         let source = entry.path.clone();
         let done = self.attempt(&source, |runner| {
             runner.progress.done_bytes = start;
-            let result = if runner.both_local {
-                runner.copy_local(&source, &temporary, target, start, size)
+            if runner.both_local {
+                let result = runner.copy_local(&source, &temporary, target, start, size);
+                if result.is_err() {
+                    let _ = runner.dst.remove_file(&temporary);
+                }
+                result
             } else {
+                // A streamed copy keeps its partial file when it fails or is
+                // stopped: the next attempt resumes it.
                 runner.copy_stream(entry, &temporary, target, start, size)
-            };
-            if result.is_err() {
-                let _ = runner.dst.remove_file(&temporary);
             }
-            result
         })?;
         self.progress.done_bytes = start + size;
         self.progress.done_items += 1;
@@ -595,10 +600,22 @@ impl Runner<'_> {
     /// Streams a file between file systems (upload, download, or server to
     /// server), keeping its modification date.
     fn copy_stream(&mut self, entry: &Entry, temporary: &Path, target: &Path, start: u64, size: u64) -> io::Result<()> {
-        let mut reader = self.src.open_read(&entry.path)?;
-        let mut writer = self.dst.open_write(temporary)?;
+        let (mut reader, mut writer, mut copied) = match self.resumable(entry, temporary) {
+            Some(offset) => {
+                match (self.src.open_read_from(&entry.path, offset), self.dst.open_write_from(temporary, offset)) {
+                    (Ok(reader), Ok(writer)) => {
+                        tracing::info!("resuming {} at {offset} of {size} bytes", entry.name);
+                        (reader, writer, offset)
+                    }
+                    // Cannot resume here: start over.
+                    _ => (self.src.open_read(&entry.path)?, self.dst.open_write_sized(temporary, Some(entry.size))?, 0),
+                }
+            }
+            None => (self.src.open_read(&entry.path)?, self.dst.open_write_sized(temporary, Some(entry.size))?, 0),
+        };
+        self.progress.done_bytes = start + copied.min(size);
+        self.observer.progress(&self.progress);
         let mut buffer = vec![0u8; 256 * 1024];
-        let mut copied = 0u64;
         loop {
             if self.cancel.is_cancelled() {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled"));
@@ -625,6 +642,20 @@ impl Runner<'_> {
             self.dst.remove_file(target)?;
         }
         self.dst.rename(temporary, target)
+    }
+}
+
+impl Runner<'_> {
+    /// How much of a partial file from an earlier attempt can be kept: it is
+    /// smaller than the source, and was written after the source last
+    /// changed (so it holds the start of this version of the file).
+    fn resumable(&self, entry: &Entry, temporary: &Path) -> Option<u64> {
+        let partial = self.dst.stat(temporary).ok().filter(|p| p.kind == EntryKind::File)?;
+        let fresh = match (partial.modified, entry.modified) {
+            (Some(partial), Some(source)) => partial >= source,
+            _ => false,
+        };
+        (fresh && partial.size > 0 && partial.size < entry.size).then_some(partial.size)
     }
 }
 
@@ -1061,5 +1092,86 @@ mod tests {
         assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
         assert!(!root.join("src").exists());
         assert_eq!(observer.last.done_items, observer.last.total_items);
+    }
+
+    /// Records the smallest progress seen, to see where a copy started.
+    struct Watching {
+        first: Option<u64>,
+    }
+
+    impl Observer for Watching {
+        fn progress(&mut self, progress: &Progress) {
+            if progress.done_bytes > 0 && self.first.is_none() {
+                self.first = Some(progress.done_bytes);
+            }
+        }
+        fn conflict(&mut self, _conflict: &Conflict) -> Answer {
+            Answer { resolution: Resolution::Replace, apply_to_all: true }
+        }
+        fn error(&mut self, _path: &Path, _error: &io::Error) -> ErrorAnswer {
+            ErrorAnswer::Stop
+        }
+    }
+
+    #[test]
+    fn resumes_a_fresh_partial_file_and_restarts_a_stale_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("dst")).unwrap();
+        let data: Vec<u8> = (0..1_000_000u32).map(|i| (i % 253) as u8).collect();
+        std::fs::write(root.join("src/big.bin"), &data).unwrap();
+        let old = SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(root.join("src/big.bin")).unwrap().set_modified(old).unwrap();
+        let partial = root.join("dst/.big.bin.forkz-partial");
+
+        // The first 300 000 bytes arrived before the transfer stopped.
+        std::fs::write(&partial, &data[..300_000]).unwrap();
+        let mut watching = Watching { first: None };
+        let outcome = run(&upload(JobKind::Copy, root, &["big.bin"]), &mut watching, CancelToken::default());
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        assert_eq!(std::fs::read(root.join("dst/big.bin")).unwrap(), data);
+        assert_eq!(watching.first, Some(300_000), "progress starts where the partial file ends");
+        assert!(!partial.exists());
+
+        // A partial file older than the source holds another version: start over.
+        std::fs::remove_file(root.join("dst/big.bin")).unwrap();
+        std::fs::write(&partial, vec![9u8; 300_000]).unwrap();
+        let older = old - std::time::Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&partial).unwrap().set_modified(older).unwrap();
+        let mut watching = Watching { first: None };
+        run(&upload(JobKind::Copy, root, &["big.bin"]), &mut watching, CancelToken::default());
+        assert_eq!(std::fs::read(root.join("dst/big.bin")).unwrap(), data);
+        assert!(watching.first.unwrap() < 300_000, "started from the beginning");
+    }
+
+    #[test]
+    fn a_stopped_streamed_copy_keeps_its_partial_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("dst")).unwrap();
+        std::fs::write(root.join("src/big.bin"), vec![1u8; 2_000_000]).unwrap();
+        // Stops the job once some bytes are copied.
+        struct StopEarly(CancelToken);
+        impl Observer for StopEarly {
+            fn progress(&mut self, progress: &Progress) {
+                if progress.done_bytes > 0 {
+                    self.0.cancel();
+                }
+            }
+            fn conflict(&mut self, _conflict: &Conflict) -> Answer {
+                Answer { resolution: Resolution::Replace, apply_to_all: true }
+            }
+            fn error(&mut self, _path: &Path, _error: &io::Error) -> ErrorAnswer {
+                ErrorAnswer::Stop
+            }
+        }
+        let cancel = CancelToken::default();
+        let outcome = run(&upload(JobKind::Copy, root, &["big.bin"]), &mut StopEarly(cancel.clone()), cancel);
+        assert!(outcome.cancelled);
+        let partial = std::fs::metadata(root.join("dst/.big.bin.forkz-partial")).unwrap();
+        assert!(partial.len() > 0 && partial.len() < 2_000_000);
+        assert!(!root.join("dst/big.bin").exists());
     }
 }

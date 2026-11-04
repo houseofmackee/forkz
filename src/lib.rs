@@ -2,6 +2,7 @@
 
 pub mod fs;
 pub mod pane;
+pub mod rename;
 pub mod settings;
 pub mod sites;
 pub mod ui;

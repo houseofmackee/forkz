@@ -10,10 +10,10 @@ use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSColor, NSControl, NSControlTextEditingDelegate, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags,
-    NSImageView, NSLayoutConstraintOrientation, NSMenu, NSMenuDelegate, NSMenuItem, NSMenuItemValidation,
-    NSPasteboardTypeFileURL, NSPasteboardWriting, NSPathControl, NSResponder, NSScrollView, NSSearchFieldDelegate,
-    NSStackView, NSTableCellView, NSTableColumn, NSTableColumnResizingOptions, NSTableView,
+    NSButton, NSColor, NSControl, NSControlTextEditingDelegate, NSDragOperation, NSDraggingInfo, NSEvent,
+    NSEventModifierFlags, NSImageView, NSLayoutConstraintOrientation, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSMenuItemValidation, NSPasteboardTypeFileURL, NSPasteboardWriting, NSPathControl, NSResponder, NSScrollView,
+    NSSearchFieldDelegate, NSStackView, NSTableCellView, NSTableColumn, NSTableColumnResizingOptions, NSTableView,
     NSTableViewColumnAutoresizingStyle, NSTableViewDataSource, NSTableViewDelegate, NSTableViewDropOperation,
     NSTableViewStyle, NSTextAlignment, NSTextField, NSTextFieldDelegate, NSTextView, NSUserInterfaceItemIdentification,
     NSUserInterfaceLayoutOrientation, NSView, NSWindowDelegate, NSWorkspace,
@@ -32,7 +32,33 @@ use crate::pane::{PaneState, selection_summary};
 use crate::vfs::{self, FsRef};
 use dispatch2::DispatchQueue;
 
-const ROW_HEIGHT: f64 = 22.0;
+/// How the file lists look: text size, row height, and a version that
+/// changes with them (cells are reused per version).
+#[derive(Debug, Clone, Copy)]
+struct Look {
+    text: f64,
+    row: f64,
+    version: u32,
+}
+
+thread_local! {
+    static LOOK: Cell<Look> = const { Cell::new(Look { text: 13.0, row: 22.0, version: 0 }) };
+}
+
+fn look() -> Look {
+    LOOK.with(Cell::get)
+}
+
+/// Sets the text size and row height of the file lists (applied by
+/// `PaneController::apply_appearance`).
+pub fn set_look(text: f64, row: f64) {
+    LOOK.with(|l| {
+        let old = l.get();
+        if old.text != text || old.row != row {
+            l.set(Look { text, row, version: old.version + 1 });
+        }
+    });
+}
 
 pub struct TableIvars {
     controller: OnceCell<Weak<PaneController>>,
@@ -51,7 +77,10 @@ define_class!(
             let Some(controller) = self.controller() else { return };
             let flags = event.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask;
             let plain = (flags & !(NSEventModifierFlags::Function | NSEventModifierFlags::NumericPad)).is_empty();
+            let shift = flags.contains(NSEventModifierFlags::Shift);
             let command = match event.keyCode() {
+                30 if flags.contains(NSEventModifierFlags::Command) && shift => Some(Command::NextTab), // Shift-Command-]
+                33 if flags.contains(NSEventModifierFlags::Command) && shift => Some(Command::PreviousTab), // Shift-Command-[
                 48 if plain => Some(Command::SwitchPane),                  // Tab
                 36 | 76 if plain => Some(Command::Rename),                 // Return, Enter
                 49 if plain => Some(Command::QuickLook),                   // Space
@@ -241,6 +270,14 @@ pub struct PaneIvars {
     pending_select: RefCell<Option<Vec<PathBuf>>>,
     /// The folders of the path bar's items when remote (they have no URLs).
     crumbs: RefCell<Vec<PathBuf>>,
+    /// Every tab's state, in order; the active tab's slot is empty (its
+    /// state is in `state`).
+    tabs: RefCell<Vec<Option<PaneState>>>,
+    /// Each tab's selection while it is not shown.
+    tab_selections: RefCell<Vec<Vec<PathBuf>>>,
+    active_tab: Cell<usize>,
+    /// The tab buttons, above the path bar (hidden with one tab).
+    tab_bar: OnceCell<Retained<NSStackView>>,
 }
 
 /// The pasteboard type of items dragged from a remote pane (between panes
@@ -273,6 +310,23 @@ define_class!(
         #[unsafe(method(pathClicked:))]
         fn path_clicked(&self, sender: &NSPathControl) {
             self.path_item_clicked(sender);
+        }
+
+        #[unsafe(method(selectTab:))]
+        fn select_tab_action(&self, sender: &NSButton) {
+            self.select_tab(sender.tag() as usize);
+            self.focus();
+        }
+
+        #[unsafe(method(newTabButton:))]
+        fn new_tab_button(&self, _sender: Option<&AnyObject>) {
+            self.new_tab(self.fs(), self.location());
+            self.focus();
+        }
+
+        #[unsafe(method(closeTabFromMenu:))]
+        fn close_tab_from_menu(&self, sender: &NSMenuItem) {
+            self.close_tab(sender.tag() as usize);
         }
 
         #[unsafe(method(toggleColumn:))]
@@ -467,6 +521,7 @@ impl PaneController {
         let commands: &[Option<Command>] = match (self.is_local(), has_items) {
             (true, true) => &[
                 Some(Open),
+                Some(OpenInNewTab),
                 Some(QuickLook),
                 None,
                 Some(CopyToOther),
@@ -487,6 +542,7 @@ impl PaneController {
                 Some(AddToSidebar),
             ],
             (true, false) => &[
+                Some(NewTab),
                 Some(NewFolder),
                 Some(PasteFiles),
                 None,
@@ -500,6 +556,7 @@ impl PaneController {
             ],
             (false, true) => &[
                 Some(Open),
+                Some(OpenInNewTab),
                 None,
                 Some(CopyToOther),
                 Some(MoveToOther),
@@ -517,6 +574,7 @@ impl PaneController {
                 Some(AddToSidebar),
             ],
             (false, false) => &[
+                Some(NewTab),
                 Some(NewFolder),
                 Some(PasteFiles),
                 None,
@@ -538,14 +596,13 @@ impl PaneController {
 
     fn writer_for_row(&self, row: NSInteger) -> Option<Retained<ProtocolObject<dyn NSPasteboardWriting>>> {
         let state = self.ivars().state.borrow();
-        let path = entry_at(&state, usize::try_from(row).ok()?)?.path.clone();
+        let entry = entry_at(&state, usize::try_from(row).ok()?)?;
         if state.is_local() {
-            return Some(ProtocolObject::from_retained(file_url(&path)));
+            return Some(ProtocolObject::from_retained(file_url(&entry.path)));
         }
-        // Remote items: a marker; the paths are in DRAG.
-        let item = objc2_app_kit::NSPasteboardItem::new();
-        item.setString_forType(&ns(&path.to_string_lossy()), &ns(ITEMS_TYPE));
-        Some(ProtocolObject::from_retained(item))
+        // Server items: file promises, downloaded where they are dropped.
+        // Panes take the paths from DRAG instead.
+        Some(ProtocolObject::from_retained(super::promises::provider(state.fs().clone(), entry)))
     }
 
     /// Where dragged items come from: another pane (any file system) or
@@ -553,7 +610,10 @@ impl PaneController {
     fn drag_sources(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> Option<(FsRef, Vec<PathBuf>)> {
         let pasteboard = info.draggingPasteboard();
         let types = pasteboard.types().map(|t| t.iter().map(|t| t.to_string()).collect::<Vec<_>>()).unwrap_or_default();
-        if types.iter().any(|t| t == ITEMS_TYPE) {
+        // From a pane of this app: what DRAG says (server items are file
+        // promises on the pasteboard, which panes do not need).
+        let from_pane = info.draggingSource().is_some_and(|source| source.downcast_ref::<FileTable>().is_some());
+        if from_pane || types.iter().any(|t| t == ITEMS_TYPE) {
             return DRAG.with(|d| d.borrow().clone());
         }
         let paths = paths_on_pasteboard(&pasteboard);
@@ -661,6 +721,10 @@ impl PaneController {
             header_menu: OnceCell::new(),
             filter: OnceCell::new(),
             crumbs: RefCell::new(Vec::new()),
+            tabs: RefCell::new(vec![None]),
+            tab_selections: RefCell::new(vec![Vec::new()]),
+            active_tab: Cell::new(0),
+            tab_bar: OnceCell::new(),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.build();
@@ -701,7 +765,7 @@ impl PaneController {
         table.setAllowsMultipleSelection(true);
         table.setUsesAlternatingRowBackgroundColors(true);
         table.setStyle(NSTableViewStyle::FullWidth);
-        table.setRowHeight(ROW_HEIGHT);
+        table.setRowHeight(look().row);
         table.setIntercellSpacing(NSSize::new(6.0, 0.0));
         table.setAutosaveName(Some(&ns(&format!("ForkzPane{}", self.index()))));
         table.setAutosaveTableColumns(true);
@@ -720,7 +784,9 @@ impl PaneController {
             false,
         );
         let items_type = ns(ITEMS_TYPE);
-        table.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }, &*items_type]));
+        let mut types: Vec<Retained<NSString>> = vec![unsafe { NSPasteboardTypeFileURL }.retain(), items_type.clone()];
+        types.extend(objc2_app_kit::NSFilePromiseReceiver::readableDraggedTypes().iter());
+        table.registerForDraggedTypes(&NSArray::from_retained_slice(&types));
         let sort = self.ivars().state.borrow().sort;
         let descriptor = NSSortDescriptor::sortDescriptorWithKey_ascending(Some(&ns(sort.key.id())), sort.ascending);
         table.setSortDescriptors(&NSArray::from_slice(&[&*descriptor]));
@@ -772,11 +838,18 @@ impl PaneController {
         );
         path_row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         path_row.setSpacing(8.0);
+        let tab_bar = NSStackView::new(mtm);
+        tab_bar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        tab_bar.setSpacing(2.0);
+        tab_bar.setDistribution(objc2_app_kit::NSStackViewDistribution::FillEqually);
+        tab_bar.setHidden(true);
+        container.addArrangedSubview(&tab_bar);
         container.addArrangedSubview(&path_row);
         container.addArrangedSubview(&scroll);
         container.addArrangedSubview(&status);
         let _ = self.ivars().filter.set(filter);
-        for view in [&*path_row as &NSView, &scroll, &status] {
+        let _ = self.ivars().tab_bar.set(tab_bar.clone());
+        for view in [&*tab_bar as &NSView, &*path_row as &NSView, &scroll, &status] {
             view.leadingAnchor().constraintEqualToAnchor_constant(&container.leadingAnchor(), 6.0).setActive(true);
             view.trailingAnchor().constraintEqualToAnchor_constant(&container.trailingAnchor(), -6.0).setActive(true);
         }
@@ -798,6 +871,186 @@ impl PaneController {
 
     pub fn show_hidden(&self) -> bool {
         self.ivars().state.borrow().show_hidden()
+    }
+
+    pub fn tab_count(&self) -> usize {
+        self.ivars().tabs.borrow().len()
+    }
+
+    pub fn active_tab(&self) -> usize {
+        self.ivars().active_tab.get()
+    }
+
+    /// Every tab's file system and folder, in order.
+    pub fn tab_locations(&self) -> Vec<(FsRef, PathBuf)> {
+        let active = self.active_tab();
+        let tabs = self.ivars().tabs.borrow();
+        tabs.iter()
+            .enumerate()
+            .map(|(i, tab)| match tab {
+                Some(state) if i != active => (state.fs().clone(), state.location().to_path_buf()),
+                _ => (self.fs(), self.location()),
+            })
+            .collect()
+    }
+
+    /// A new tab after the current one, showing `path`, and switches to it.
+    pub fn new_tab(&self, fs: FsRef, path: PathBuf) {
+        let (sort, show_hidden) = {
+            let state = self.ivars().state.borrow();
+            (state.sort, state.show_hidden())
+        };
+        let index = self.active_tab() + 1;
+        self.ivars().tabs.borrow_mut().insert(index, Some(PaneState::new(fs, path, sort, show_hidden)));
+        self.ivars().tab_selections.borrow_mut().insert(index, Vec::new());
+        // The slot of the current tab moves only if it is after `index`.
+        self.select_tab(index);
+    }
+
+    /// Adds a tab at the end without showing it (restoring tabs at launch).
+    pub fn add_background_tab(&self, state: PaneState) {
+        self.ivars().tabs.borrow_mut().push(Some(state));
+        self.ivars().tab_selections.borrow_mut().push(Vec::new());
+        self.rebuild_tab_bar();
+    }
+
+    /// Shows tab `index`: the current tab's state goes back into its slot.
+    pub fn select_tab(&self, index: usize) {
+        let active = self.active_tab();
+        if index == active || index >= self.tab_count() {
+            return;
+        }
+        let selection = self.selected_paths();
+        self.ivars().tab_selections.borrow_mut()[active] = selection;
+        let Some(incoming) = self.ivars().tabs.borrow_mut()[index].take() else { return };
+        let outgoing = std::mem::replace(&mut *self.ivars().state.borrow_mut(), incoming);
+        self.ivars().tabs.borrow_mut()[active] = Some(outgoing);
+        self.ivars().active_tab.set(index);
+        // Up to date, with the hidden-files setting it may have missed.
+        let show_hidden = super::current_settings().is_none_or(|s| s.show_hidden);
+        {
+            let mut state = self.ivars().state.borrow_mut();
+            if state.show_hidden() != show_hidden {
+                state.set_show_hidden(show_hidden);
+            }
+            state.load();
+        }
+        let selection = self.ivars().tab_selections.borrow()[index].clone();
+        self.refresh(Some(&selection));
+        self.start_loading();
+        super::location_changed(self.index());
+    }
+
+    /// The next (1) or previous (-1) tab, wrapping around.
+    pub fn cycle_tab(&self, step: isize) {
+        let count = self.tab_count() as isize;
+        if count > 1 {
+            self.select_tab((self.active_tab() as isize + step).rem_euclid(count) as usize);
+        }
+    }
+
+    /// Closes a tab (not the last one). Returns false if it was the last.
+    pub fn close_tab(&self, index: usize) -> bool {
+        let count = self.tab_count();
+        if count <= 1 || index >= count {
+            return false;
+        }
+        if index == self.active_tab() {
+            self.select_tab(if index + 1 < count { index + 1 } else { index - 1 });
+        }
+        self.ivars().tabs.borrow_mut().remove(index);
+        self.ivars().tab_selections.borrow_mut().remove(index);
+        if self.active_tab() > index {
+            self.ivars().active_tab.set(self.active_tab() - 1);
+        }
+        self.rebuild_tab_bar();
+        super::location_changed(self.index());
+        true
+    }
+
+    /// The tab buttons: one per tab (the active one pressed) and a "+".
+    fn rebuild_tab_bar(&self) {
+        let Some(bar) = self.ivars().tab_bar.get() else { return };
+        let mtm = self.mtm();
+        for view in bar.arrangedSubviews().iter() {
+            view.removeFromSuperview();
+        }
+        let count = self.tab_count();
+        bar.setHidden(count <= 1);
+        if count <= 1 {
+            return;
+        }
+        let active = self.active_tab();
+        let titles: Vec<(String, bool)> = {
+            let tabs = self.ivars().tabs.borrow();
+            let state = self.ivars().state.borrow();
+            tabs.iter()
+                .enumerate()
+                .map(|(i, tab)| {
+                    let state = if i == active { &*state } else { tab.as_ref().unwrap_or(&*state) };
+                    (state.title(), state.is_local())
+                })
+                .collect()
+        };
+        for (index, (title, local)) in titles.into_iter().enumerate() {
+            let button = unsafe {
+                NSButton::buttonWithTitle_target_action(&ns(&title), Some(self), Some(sel!(selectTab:)), mtm)
+            };
+            button.setButtonType(objc2_app_kit::NSButtonType::PushOnPushOff);
+            button.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
+            button.setControlSize(objc2_app_kit::NSControlSize::Small);
+            button
+                .setFont(Some(&objc2_app_kit::NSFont::systemFontOfSize(objc2_app_kit::NSFont::smallSystemFontSize())));
+            button.setTag(index as isize);
+            button.setState(if index == active {
+                objc2_app_kit::NSControlStateValueOn
+            } else {
+                objc2_app_kit::NSControlStateValueOff
+            });
+            if let Some(cell) = button.cell() {
+                cell.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingMiddle);
+            }
+            if !local && let Some(image) = super::util::symbol("server.rack", &title) {
+                button.setImage(Some(&image));
+                button.setImagePosition(objc2_app_kit::NSCellImagePosition::ImageLeading);
+            }
+            button.setToolTip(Some(&ns(&title)));
+            let menu = NSMenu::new(mtm);
+            let close = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &ns("Close Tab"),
+                    Some(sel!(closeTabFromMenu:)),
+                    &ns(""),
+                )
+            };
+            close.setTag(index as isize);
+            unsafe { close.setTarget(Some(self)) };
+            menu.addItem(&close);
+            unsafe { button.setMenu(Some(&menu)) };
+            button
+                .setContentCompressionResistancePriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+            bar.addArrangedSubview(&button);
+        }
+        let add =
+            unsafe { NSButton::buttonWithTitle_target_action(&ns(""), Some(self), Some(sel!(newTabButton:)), mtm) };
+        if let Some(image) = super::util::symbol("plus", "New Tab") {
+            add.setImage(Some(&image));
+        }
+        add.setBezelStyle(objc2_app_kit::NSBezelStyle::Push);
+        add.setControlSize(objc2_app_kit::NSControlSize::Small);
+        add.setToolTip(Some(&ns("New Tab")));
+        add.widthAnchor().constraintEqualToConstant(28.0).setActive(true);
+        bar.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
+        bar.addArrangedSubview(&add);
+        // Tabs share the width equally; the "+" keeps its own.
+        let buttons = bar.arrangedSubviews();
+        let first = buttons.firstObject();
+        if let Some(first) = first {
+            for other in buttons.iter().skip(1).take(buttons.count().saturating_sub(2)) {
+                other.widthAnchor().constraintEqualToAnchor(&first.widthAnchor()).setActive(true);
+            }
+        }
     }
 
     /// Lists a remote folder in the background if the state is waiting for it.
@@ -1002,6 +1255,7 @@ impl PaneController {
             *self.ivars().pending_select.borrow_mut() = Some(wanted);
         }
         self.apply_columns();
+        self.rebuild_tab_bar();
         self.sync_filter_field();
         self.update_path_bar();
         self.update_status();
@@ -1145,6 +1399,11 @@ impl PaneController {
         table.setFrameSize(NSSize::new(available, height));
     }
 
+    /// The names of everything in the folder (hidden items too).
+    pub fn all_names(&self) -> Vec<String> {
+        self.ivars().state.borrow().all_entries().iter().map(|e| e.name.clone()).collect()
+    }
+
     /// The entries shown for these paths (from the listing, no file access).
     pub fn entries_for(&self, paths: &[PathBuf]) -> Vec<crate::fs::Entry> {
         let state = self.ivars().state.borrow();
@@ -1181,6 +1440,23 @@ impl PaneController {
         status.setStringValue(&ns(&text));
         let color = if self.ivars().active.get() { NSColor::labelColor() } else { NSColor::tertiaryLabelColor() };
         status.setTextColor(Some(&color));
+        drop(state);
+        super::selection_changed(self.index());
+    }
+
+    /// Applies the look set with `set_look`, and alternating row colors.
+    pub fn apply_appearance(&self, alternating: bool) {
+        let table = self.table();
+        table.setRowHeight(look().row);
+        table.setUsesAlternatingRowBackgroundColors(alternating);
+        let selected = self.selected_paths();
+        table.reloadData();
+        self.select_paths(&selected);
+    }
+
+    /// How many items the folder shows.
+    pub fn item_count(&self) -> usize {
+        self.ivars().state.borrow().entries().len()
     }
 
     /// Reads the folder again, keeping the selection.
@@ -1216,6 +1492,15 @@ impl PaneController {
 
     /// Leaves a server: back to the Mac, forgetting its history.
     pub fn leave(&self, key: &str) {
+        // Tabs not shown that are on that server go back to the Mac.
+        for state in self.ivars().tabs.borrow_mut().iter_mut().flatten() {
+            if state.fs().key() == key {
+                let local = vfs::local();
+                let home = local.home();
+                state.navigate_to(local, home);
+            }
+            state.forget(key);
+        }
         self.ivars().state.borrow_mut().forget(key);
         if self.fs().key() == key {
             let local = vfs::local();
@@ -1371,18 +1656,25 @@ fn index_set_rows(set: &NSIndexSet) -> Vec<usize> {
 
 /// A cell view for a column, reused when the table has one to spare.
 fn reusable_cell(table: &NSTableView, column_id: &str, mtm: MainThreadMarker) -> Retained<NSTableCellView> {
-    let identifier = ns(column_id);
+    let look = look();
+    let identifier = ns(&format!("{column_id}-{}", look.version));
     let existing: Option<Retained<NSView>> = unsafe { table.makeViewWithIdentifier_owner(&identifier, None) };
     if let Some(cell) = existing.and_then(|v| v.downcast::<NSTableCellView>().ok()) {
         return cell;
     }
-    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, ROW_HEIGHT));
+    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, look.row));
     let cell = NSTableCellView::initWithFrame(NSTableCellView::alloc(mtm), frame);
     cell.setIdentifier(Some(&identifier));
-    let text_x = if column_id == "name" { 24.0 } else { 2.0 };
+    let icon = if look.row >= 26.0 { 20.0 } else { 16.0 };
+    let text_x = if column_id == "name" { icon + 8.0 } else { 2.0 };
     let field = NSTextField::labelWithString(&ns(""), mtm);
+    field.setFont(Some(&objc2_app_kit::NSFont::systemFontOfSize(look.text)));
     field.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingMiddle);
-    field.setFrame(NSRect::new(NSPoint::new(text_x, 3.0), NSSize::new(200.0 - text_x - 2.0, 16.0)));
+    let text_height = (look.text * 1.25).ceil() + 1.0;
+    field.setFrame(NSRect::new(
+        NSPoint::new(text_x, ((look.row - text_height) / 2.0).floor()),
+        NSSize::new(200.0 - text_x - 2.0, text_height),
+    ));
     field.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
     if column_id == "size" {
         field.setAlignment(NSTextAlignment::Right);
@@ -1391,7 +1683,7 @@ fn reusable_cell(table: &NSTableView, column_id: &str, mtm: MainThreadMarker) ->
         field.setTextColor(Some(&NSColor::secondaryLabelColor()));
     }
     if column_id == "permissions" {
-        let size = objc2_app_kit::NSFont::smallSystemFontSize();
+        let size = look.text - 2.0;
         field.setFont(Some(&objc2_app_kit::NSFont::monospacedSystemFontOfSize_weight(size, unsafe {
             objc2_app_kit::NSFontWeightRegular
         })));
@@ -1401,7 +1693,7 @@ fn reusable_cell(table: &NSTableView, column_id: &str, mtm: MainThreadMarker) ->
     if column_id == "name" {
         let image = NSImageView::initWithFrame(
             NSImageView::alloc(mtm),
-            NSRect::new(NSPoint::new(3.0, 3.0), NSSize::new(16.0, 16.0)),
+            NSRect::new(NSPoint::new(3.0, ((look.row - icon) / 2.0).floor()), NSSize::new(icon, icon)),
         );
         cell.addSubview(&image);
         unsafe { cell.setImageView(Some(&image)) };

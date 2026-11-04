@@ -166,18 +166,21 @@ pub fn ask_host_key(
     present(move || {
         use crate::vfs::known_hosts::Status;
         let address = if port == 22 { host.clone() } else { format!("{host}:{port}") };
+        // "ssh-ed25519 key fingerprint", or "TLS certificate fingerprint".
+        let what = if key_type.contains("certificate") { key_type.clone() } else { format!("{key_type} key") };
+        let sent = if key_type.contains("certificate") { "certificate" } else { "host key" };
         let (message, detail) = if status == Status::Changed {
             (
                 format!("The identity of \u{201c}{address}\u{201d} has changed!"),
                 format!(
-                    "The server sent a different host key than the one trusted before. This can happen after a server is reinstalled, but it can also mean someone is intercepting the connection.\n\nNew {key_type} key fingerprint:\n{fingerprint}\n\nOnly continue if you know why the key changed."
+                    "The server sent a different {sent} than the one trusted before. This can happen after a server is reinstalled, but it can also mean someone is intercepting the connection.\n\nNew {what} fingerprint:\n{fingerprint}\n\nOnly continue if you know why it changed."
                 ),
             )
         } else {
             (
                 format!("Do you trust \u{201c}{address}\u{201d}?"),
                 format!(
-                    "forkz has not connected to this server before. Check that the fingerprint matches the one your server shows.\n\n{key_type} key fingerprint:\n{fingerprint}"
+                    "forkz has not connected to this server before. Check that the fingerprint matches the one your server shows.\n\n{what} fingerprint:\n{fingerprint}"
                 ),
             )
         };

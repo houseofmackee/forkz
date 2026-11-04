@@ -1,9 +1,13 @@
 //! File systems a pane can show: the Mac's own, or a remote server. Every
 //! call blocks, so remote ones run off the main thread.
 
+pub mod ftp;
+pub mod http;
 pub mod known_hosts;
+pub mod s3;
 pub mod sftp;
 pub mod ssh_config;
+pub mod webdav;
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -48,6 +52,31 @@ pub trait Vfs: Send + Sync {
 
     /// Creates or truncates a file.
     fn open_write(&self, path: &Path) -> io::Result<Box<dyn Write + Send>>;
+
+    /// Creates or truncates a file whose final size is known (HTTP uploads
+    /// send it ahead). By default the same as `open_write`.
+    fn open_write_sized(&self, path: &Path, _size: Option<u64>) -> io::Result<Box<dyn Write + Send>> {
+        self.open_write(path)
+    }
+
+    /// Whether files have Unix permissions that can be changed.
+    fn supports_permissions(&self) -> bool {
+        true
+    }
+
+    /// Reads a file from `offset` on (to resume a transfer). By default,
+    /// reads and drops the first bytes.
+    fn open_read_from(&self, path: &Path, offset: u64) -> io::Result<Box<dyn Read + Send>> {
+        let mut reader = self.open_read(path)?;
+        io::copy(&mut (&mut reader).take(offset), &mut io::sink())?;
+        Ok(reader)
+    }
+
+    /// Writes into an existing file from `offset` on (to resume a
+    /// transfer). Unsupported unless a file system says otherwise.
+    fn open_write_from(&self, _path: &Path, _offset: u64) -> io::Result<Box<dyn Write + Send>> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "cannot resume on this file system"))
+    }
 
     /// Sets the modification date (and permissions if given), best effort.
     fn set_attributes(&self, path: &Path, modified: Option<SystemTime>, permissions: Option<u32>) -> io::Result<()>;
@@ -130,6 +159,21 @@ impl Vfs for LocalFs {
         Ok(Box::new(std::fs::File::create(path)?))
     }
 
+    fn open_read_from(&self, path: &Path, offset: u64) -> io::Result<Box<dyn Read + Send>> {
+        use std::io::Seek;
+        let mut file = std::fs::File::open(path)?;
+        file.seek(io::SeekFrom::Start(offset))?;
+        Ok(Box::new(file))
+    }
+
+    fn open_write_from(&self, path: &Path, offset: u64) -> io::Result<Box<dyn Write + Send>> {
+        use std::io::Seek;
+        let mut file = std::fs::File::options().write(true).open(path)?;
+        file.set_len(offset)?;
+        file.seek(io::SeekFrom::Start(offset))?;
+        Ok(Box::new(file))
+    }
+
     fn set_attributes(&self, path: &Path, modified: Option<SystemTime>, permissions: Option<u32>) -> io::Result<()> {
         if let Some(mode) = permissions {
             use std::os::unix::fs::PermissionsExt;
@@ -194,6 +238,12 @@ impl Vfs for FakeRemote {
     }
     fn open_write(&self, path: &Path) -> io::Result<Box<dyn Write + Send>> {
         LocalFs.open_write(path)
+    }
+    fn open_read_from(&self, path: &Path, offset: u64) -> io::Result<Box<dyn Read + Send>> {
+        LocalFs.open_read_from(path, offset)
+    }
+    fn open_write_from(&self, path: &Path, offset: u64) -> io::Result<Box<dyn Write + Send>> {
+        LocalFs.open_write_from(path, offset)
     }
     fn set_attributes(&self, path: &Path, modified: Option<SystemTime>, permissions: Option<u32>) -> io::Result<()> {
         LocalFs.set_attributes(path, modified, permissions)

@@ -4,8 +4,13 @@
 mod activity;
 pub mod commands;
 mod dialogs;
+mod multi_rename;
+mod oplog;
 mod pane_view;
 mod permissions;
+mod preview;
+mod promises;
+mod remote_edit;
 mod settings_window;
 mod sidebar;
 mod site_form;
@@ -50,6 +55,7 @@ struct App {
     active: Cell<usize>,
     sidebar: Retained<Sidebar>,
     activity: Retained<Activity>,
+    preview: Retained<preview::PreviewPane>,
     _delegate: Retained<AppDelegate>,
     settings: RefCell<Settings>,
     watcher: RefCell<Option<notify::RecommendedWatcher>>,
@@ -280,7 +286,9 @@ pub fn command_title(command: Command, pane: usize) -> String {
         Command::CopyToOther if !here && there => "Download to Other Pane",
         Command::PasteFiles if !here => "Upload Copied Items",
         Command::OpenInTerminal if !here => "Open SSH Session in Terminal",
-        Command::CopyPath if !here => "Copy sftp:// Link",
+        Command::CopyPath if !here => "Copy Server Link",
+        Command::CloseTab if app.panes[pane].tab_count() <= 1 => "Close Window",
+        Command::TogglePreview if !app.preview.view().isHidden() => "Hide Preview Pane",
         _ => command.title(),
     };
     title.to_string()
@@ -344,9 +352,8 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     ns_app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let delegate: Retained<AppDelegate> = unsafe { msg_send![AppDelegate::alloc(mtm), init] };
     ns_app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
-    ns_app.setMainMenu(Some(&main_menu(mtm, &delegate)));
-
     let settings = Settings::load();
+    ns_app.setMainMenu(Some(&main_menu(mtm, &delegate, &settings.shortcuts)));
     let panes = [
         PaneController::new(
             mtm,
@@ -361,7 +368,11 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     ];
     let sidebar = Sidebar::new(mtm);
     let activity = Activity::new(mtm);
-    let window = build_window(mtm, &delegate, &panes, &sidebar, &activity);
+    preview::clean_cache();
+    let preview = preview::PreviewPane::new(mtm);
+    preview.view().setHidden(!settings.preview.visible);
+    preview.select_tab_named(&settings.preview.tab);
+    let window = build_window(mtm, &delegate, &panes, &sidebar, &activity, &preview);
 
     unsafe {
         let center = NSWorkspace::sharedWorkspace().notificationCenter();
@@ -376,6 +387,7 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
         active: Cell::new(0),
         sidebar,
         activity,
+        preview,
         _delegate: delegate,
         settings: RefCell::new(settings),
         watcher: RefCell::new(None),
@@ -385,6 +397,8 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
         connections: RefCell::new(Vec::new()),
     });
     app.activity.set_limit(app.settings.borrow().transfers.max_transfers);
+    restore_tabs(&app);
+    apply_appearance(&app);
     APP.with(|a| a.set(app.clone())).map_err(|_| anyhow::anyhow!("the app is already running"))?;
 
     start_watching();
@@ -412,6 +426,7 @@ fn build_window(
     panes: &[Retained<PaneController>; 2],
     sidebar: &Sidebar,
     activity: &Activity,
+    preview: &preview::PreviewPane,
 ) -> Retained<NSWindow> {
     let style = NSWindowStyleMask::Titled
         | NSWindowStyleMask::Closable
@@ -463,11 +478,14 @@ fn build_window(
     let sidebar_view = sidebar.view();
     main_split.addSubview(&sidebar_view);
     main_split.addSubview(&right);
+    main_split.addSubview(&preview.view());
     sidebar_view.widthAnchor().constraintGreaterThanOrEqualToConstant(130.0).setActive(true);
     sidebar_view.widthAnchor().constraintLessThanOrEqualToConstant(320.0).setActive(true);
-    // Resizing the window resizes the panes, not the sidebar.
+    preview.view().widthAnchor().constraintLessThanOrEqualToConstant(520.0).setActive(true);
+    // Resizing the window resizes the panes, not the sidebar or preview.
     main_split.setHoldingPriority_forSubviewAtIndex(260.0, 0);
     main_split.setHoldingPriority_forSubviewAtIndex(250.0, 1);
+    main_split.setHoldingPriority_forSubviewAtIndex(259.0, 2);
     main_split.setAutosaveName(Some(&ns("ForkzMain")));
 
     window.setContentView(Some(&main_split));
@@ -495,7 +513,19 @@ fn first_launch_layout(window: &NSWindow) {
     panes_split.setPosition_ofDividerAtIndex((width / 2.0).round(), 0);
 }
 
-fn main_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSMenu> {
+/// Builds the menu bar again (after shortcuts change).
+pub fn rebuild_main_menu() {
+    let Some(app) = app() else { return };
+    let mtm = mtm();
+    let overrides = app.settings.borrow().shortcuts.clone();
+    NSApplication::sharedApplication(mtm).setMainMenu(Some(&main_menu(mtm, &app._delegate, &overrides)));
+}
+
+fn main_menu(
+    mtm: MainThreadMarker,
+    delegate: &AppDelegate,
+    overrides: &std::collections::BTreeMap<String, String>,
+) -> Retained<NSMenu> {
     let bar = NSMenu::new(mtm);
     let submenu = |title: &str| {
         let menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns(title));
@@ -512,13 +542,13 @@ fn main_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSMenu> 
         item
     };
     let command = |menu: &NSMenu, command: Command| {
-        let (key, modifiers) = command.shortcut();
+        let (key, modifiers) = command.effective_shortcut(overrides);
         let item = unsafe {
             NSMenuItem::initWithTitle_action_keyEquivalent(
                 NSMenuItem::alloc(mtm),
                 &ns(command.title()),
                 Some(sel!(command:)),
-                &ns(key),
+                &ns(&key),
             )
         };
         item.setKeyEquivalentModifierMask(modifiers);
@@ -550,6 +580,9 @@ fn main_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSMenu> 
     standard(&app_menu, "Quit forkz", sel!(terminate:), "q");
 
     let file = submenu("File");
+    command(&file, Command::NewTab);
+    command(&file, Command::OpenInNewTab);
+    separator(&file);
     command(&file, Command::Connect);
     command(&file, Command::Disconnect);
     command(&file, Command::ImportFileZilla);
@@ -558,7 +591,7 @@ fn main_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSMenu> 
         command(&file, c);
     }
     separator(&file);
-    for c in [Command::NewFolder, Command::Rename, Command::Duplicate] {
+    for c in [Command::NewFolder, Command::Rename, Command::MultiRename, Command::Duplicate] {
         command(&file, c);
     }
     separator(&file);
@@ -573,7 +606,7 @@ fn main_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSMenu> 
         command(&file, c);
     }
     separator(&file);
-    standard(&file, "Close Window", sel!(performClose:), "w");
+    command(&file, Command::CloseTab);
 
     let edit = submenu("Edit");
     standard(&edit, "Cut", sel!(cut:), "x");
@@ -589,6 +622,8 @@ fn main_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSMenu> 
     for c in [Command::ToggleHidden, Command::Refresh] {
         command(&view, c);
     }
+    separator(&view);
+    command(&view, Command::TogglePreview);
     separator(&view);
     let columns = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Columns"));
     for (index, (_, title)) in crate::settings::COLUMNS.iter().enumerate() {
@@ -658,6 +693,9 @@ fn main_menu(mtm: MainThreadMarker, delegate: &AppDelegate) -> Retained<NSMenu> 
     let window = submenu("Window");
     standard(&window, "Minimize", sel!(performMiniaturize:), "m");
     standard(&window, "Zoom", sel!(performZoom:), "");
+    separator(&window);
+    command(&window, Command::NextTab);
+    command(&window, Command::PreviousTab);
     NSApplication::sharedApplication(mtm).setWindowsMenu(Some(&window));
     bar
 }
@@ -681,9 +719,12 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         Command::Back => pane.can_go_back(),
         Command::Forward => pane.can_go_forward(),
         Command::Up => pane.location().parent().is_some(),
-        Command::Rename | Command::Duplicate | Command::Trash | Command::CopyToOther | Command::MoveToOther => {
-            has_selection
-        }
+        Command::Rename
+        | Command::MultiRename
+        | Command::Duplicate
+        | Command::Trash
+        | Command::CopyToOther
+        | Command::MoveToOther => has_selection,
         // These need files on the Mac.
         Command::CopyFiles | Command::QuickLook => has_selection && local,
         Command::RevealInFinder => local,
@@ -698,11 +739,15 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
             }
         }
         Command::CopySha256 | Command::CopyMd5 => has_selection,
+        Command::NextTab | Command::PreviousTab => pane.tab_count() > 1,
         Command::CompareFiles => {
             let here = pane.selected_paths().len();
             here == 2 || (here == 1 && app.panes[1 - index].selected_paths().len() == 1)
         }
         Command::Disconnect => !local,
+        // A shell needs SSH; FTP, WebDAV, and S3 have no permissions.
+        Command::OpenInTerminal => local || pane.fs().key().starts_with("sftp://"),
+        Command::Permissions => pane.fs().supports_permissions(),
         Command::PasteFiles | Command::MoveFilesHere => {
             !pane_view::paths_on_pasteboard(&NSPasteboard::generalPasteboard()).is_empty()
         }
@@ -721,6 +766,8 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::Open => pane.open_selection(),
         Command::NewFolder => new_folder(&pane),
         Command::Rename => rename(&pane),
+        Command::MultiRename => multi_rename(&pane),
+        Command::TogglePreview => toggle_preview(),
         Command::Duplicate => {
             start_job(transfer_job(JobKind::Copy, pane.fs(), targets(), pane.fs(), pane.location()));
         }
@@ -832,6 +879,46 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::CopyMd5 => copy_checksums(&pane, crate::fs::checksum::Algorithm::Md5),
         Command::Filter => pane.focus_filter(),
         Command::Settings => settings_window::show(),
+        Command::NewTab => pane.new_tab(pane.fs(), pane.location()),
+        Command::CloseTab => {
+            if !pane.close_tab(pane.active_tab()) {
+                app.window.performClose(None);
+            }
+        }
+        Command::NextTab => pane.cycle_tab(1),
+        Command::PreviousTab => pane.cycle_tab(-1),
+        Command::OpenInNewTab => {
+            let folders: Vec<PathBuf> =
+                pane.entries_for(&targets()).into_iter().filter(|e| e.is_folder_like()).map(|e| e.path).collect();
+            if folders.is_empty() {
+                pane.new_tab(pane.fs(), pane.location());
+            } else {
+                for folder in folders {
+                    pane.new_tab(pane.fs(), folder);
+                }
+            }
+        }
+    }
+}
+
+/// Reopens the tabs saved for each pane (the first tab is already shown).
+fn restore_tabs(app: &App) {
+    let (left, right, show_hidden) = {
+        let s = app.settings.borrow();
+        (s.left.clone(), s.right.clone(), s.show_hidden)
+    };
+    for (pane, saved) in app.panes.iter().zip([left, right]) {
+        if saved.tabs.len() < 2 {
+            continue;
+        }
+        // The pane opened on `location`; it becomes the first tab.
+        if pane.location() != saved.tabs[0] {
+            pane.navigate_to(vfs::local(), saved.tabs[0].clone());
+        }
+        for path in saved.tabs.iter().skip(1).filter(|p| p.is_dir()) {
+            pane.add_background_tab(PaneState::new(vfs::local(), path.clone(), saved.sort, show_hidden));
+        }
+        pane.select_tab(saved.active_tab.min(pane.tab_count() - 1));
     }
 }
 
@@ -843,11 +930,17 @@ pub fn current_settings() -> Option<Settings> {
 /// Changes settings, saves them, and applies what changed.
 pub fn update_settings(change: impl FnOnce(&mut Settings)) {
     let Some(app) = app() else { return };
-    let (show_hidden, limit) = {
+    let (show_hidden, limit, appearance_changed, shortcuts_changed) = {
         let mut settings = app.settings.borrow_mut();
+        let (appearance, shortcuts) = (settings.appearance.clone(), settings.shortcuts.clone());
         change(&mut settings);
         settings.save();
-        (settings.show_hidden, settings.transfers.max_transfers)
+        (
+            settings.show_hidden,
+            settings.transfers.max_transfers,
+            settings.appearance != appearance,
+            settings.shortcuts != shortcuts,
+        )
     };
     for pane in &app.panes {
         if pane.show_hidden() != show_hidden {
@@ -855,6 +948,33 @@ pub fn update_settings(change: impl FnOnce(&mut Settings)) {
         }
     }
     app.activity.set_limit(limit);
+    if appearance_changed {
+        apply_appearance(&app);
+    }
+    if shortcuts_changed {
+        rebuild_main_menu();
+    }
+}
+
+/// Theme, text size, row spacing, and alternating rows (from settings).
+fn apply_appearance(app: &App) {
+    use crate::settings::ROW_SPACINGS;
+    let appearance = app.settings.borrow().appearance.clone();
+    let text = appearance.text_size.clamp(10.0, 20.0);
+    let base = ROW_SPACINGS.iter().find(|r| r.0 == appearance.row_spacing).map_or(22.0, |r| r.2);
+    // Bigger text needs taller rows.
+    let row = (base + (text - 13.0) * 1.5).round().max(16.0);
+    pane_view::set_look(text, row);
+    for pane in &app.panes {
+        pane.apply_appearance(appearance.alternating_rows);
+    }
+    let name = match appearance.theme.as_str() {
+        "light" => Some(unsafe { objc2_app_kit::NSAppearanceNameAqua }),
+        "dark" => Some(unsafe { objc2_app_kit::NSAppearanceNameDarkAqua }),
+        _ => None,
+    };
+    let chosen = name.and_then(objc2_app_kit::NSAppearance::appearanceNamed);
+    NSApplication::sharedApplication(mtm()).setAppearance(chosen.as_deref());
 }
 
 /// The saved site a connection was opened from.
@@ -1129,15 +1249,19 @@ pub fn open_remote(fs: FsRef, files: Vec<PathBuf>) {
     if files.is_empty() {
         return;
     }
-    let folder = std::env::temp_dir().join("forkz-open").join(fs.label().replace(['/', ':'], "_"));
-    if let Err(e) = std::fs::create_dir_all(&folder) {
-        dialogs::show_error("The file could not be downloaded.".into(), e.to_string());
-        return;
+    // Each file in a folder of its own: files with the same name from
+    // different folders stay apart, and each is watched for saves.
+    for file in files {
+        let folder = std::env::temp_dir().join("forkz-open").join(crate::sites::new_id());
+        if let Err(e) = std::fs::create_dir_all(&folder) {
+            dialogs::show_error("The file could not be downloaded.".into(), e.to_string());
+            return;
+        }
+        let mut job = Job::between(JobKind::Copy, fs.clone(), vec![file], vfs::local(), folder);
+        job.on_conflict = Some(Resolution::Replace);
+        job.open_when_done = true;
+        start_job(job);
     }
-    let mut job = Job::between(JobKind::Copy, fs, files, vfs::local(), folder);
-    job.on_conflict = Some(Resolution::Replace);
-    job.open_when_done = true;
-    start_job(job);
 }
 
 fn open_in_terminal(pane: &PaneController) {
@@ -1174,6 +1298,8 @@ fn ssh_in_terminal(fs: &FsRef, folder: &Path) -> std::io::Result<()> {
 fn new_folder(pane: &PaneController) {
     match ops::new_folder(&pane.fs(), &pane.location()) {
         Ok(path) => {
+            let place = if pane.is_local() { path.display().to_string() } else { pane.fs().display_path(&path) };
+            oplog::record(oplog::Kind::Change, "Created a folder", place);
             pane.reload_selecting(std::slice::from_ref(&path));
             // Name it right away, like Finder.
             rename_path(pane, &path);
@@ -1184,9 +1310,46 @@ fn new_folder(pane: &PaneController) {
 
 fn rename(pane: &PaneController) {
     let targets = pane.target_paths();
-    if let [path] = targets.as_slice() {
-        rename_path(pane, path);
+    match targets.as_slice() {
+        [path] => rename_path(pane, path),
+        [] => {}
+        _ => multi_rename(pane),
     }
+}
+
+/// Renames the selected items with rules (see `multi_rename`).
+fn multi_rename(pane: &PaneController) {
+    let paths = pane.target_paths();
+    if paths.is_empty() {
+        return;
+    }
+    let items: Vec<crate::rename::Item> = pane
+        .entries_for(&paths)
+        .into_iter()
+        .map(|e| crate::rename::Item {
+            folder: e.kind == crate::fs::EntryKind::Folder && !e.package,
+            name: e.name,
+            modified: e.modified,
+        })
+        .collect();
+    let Some(planned) = multi_rename::show(items, pane.all_names()) else { return };
+    let (fs, dir, index) = (pane.fs(), pane.location(), pane.index());
+    let changed = planned.iter().filter(|p| p.changes()).count();
+    std::thread::spawn(move || {
+        let (done, failed) = crate::rename::apply(&fs, &dir, &planned);
+        DispatchQueue::main().exec_async(move || {
+            let Some(app) = app() else { return };
+            app.panes[index].reload_selecting(&done);
+            let place = if fs.is_local() { dir.display().to_string() } else { fs.display_path(&dir) };
+            let detail = failed.iter().map(|(name, e)| format!("{name}: {e}")).collect::<Vec<_>>().join("\n");
+            let kind = if failed.is_empty() { oplog::Kind::Change } else { oplog::Kind::Problem };
+            oplog::record(kind, format!("Renamed {} of {changed} items in {place}", done.len()), detail);
+            if !failed.is_empty() {
+                let detail = failed.iter().map(|(name, e)| format!("{name}: {e}")).collect::<Vec<_>>().join("\n");
+                dialogs::show_error(format!("{} of {changed} items could not be renamed.", failed.len()), detail);
+            }
+        });
+    });
 }
 
 fn rename_path(pane: &PaneController, path: &Path) {
@@ -1209,10 +1372,23 @@ fn rename_path(pane: &PaneController, path: &Path) {
     };
     match ops::rename(&fs, path, new_name.trim()) {
         Ok(renamed) => {
+            let folder = if fs.is_local() {
+                renamed.parent().map(|p| p.display().to_string())
+            } else {
+                renamed.parent().map(|p| fs.display_path(p))
+            };
+            oplog::record(
+                oplog::Kind::Change,
+                format!("Renamed \u{201c}{name}\u{201d} to \u{201c}{}\u{201d}", title_of(&renamed)),
+                folder.unwrap_or_default(),
+            );
             pane.reload_selecting(&[renamed]);
             other_pane_reload(pane.index());
         }
-        Err(e) => dialogs::show_error(format!("\u{201c}{name}\u{201d} could not be renamed."), e.to_string()),
+        Err(e) => {
+            oplog::record(oplog::Kind::Problem, format!("Could not rename \u{201c}{name}\u{201d}"), e.to_string());
+            dialogs::show_error(format!("\u{201c}{name}\u{201d} could not be renamed."), e.to_string());
+        }
     }
 }
 
@@ -1264,10 +1440,46 @@ fn with_activity(f: impl FnOnce(&Activity)) {
     }
 }
 
+/// What a finished job did, for the log.
+fn log_job(job: &Job, outcome: &Outcome) {
+    let what = match job.sources.as_slice() {
+        [one] => format!("\u{201c}{}\u{201d}", title_of(one)),
+        many => format!("{} items", many.len()),
+    };
+    let place =
+        |fs: &FsRef, path: &Path| if fs.is_local() { path.display().to_string() } else { fs.display_path(path) };
+    let text = match (job.kind, job.source_fs.is_local(), job.dest_fs.is_local()) {
+        (JobKind::Copy, true, false) => format!("Uploaded {what} to {}", place(&job.dest_fs, &job.destination)),
+        (JobKind::Copy, false, true) => format!("Downloaded {what} to {}", job.destination.display()),
+        (JobKind::Copy, ..) => format!("Copied {what} to {}", place(&job.dest_fs, &job.destination)),
+        (JobKind::Move, ..) => format!("Moved {what} to {}", place(&job.dest_fs, &job.destination)),
+        (JobKind::Trash, ..) => format!("Moved {what} to the Trash"),
+        (JobKind::Delete, ..) => {
+            let from =
+                job.sources.first().and_then(|s| s.parent()).map(|p| place(&job.source_fs, p)).unwrap_or_default();
+            format!("Deleted {what} from {from}")
+        }
+    };
+    let text = if outcome.cancelled { format!("{text} (stopped)") } else { text };
+    let mut detail: Vec<String> = outcome.failed.iter().map(|(path, e)| format!("{}: {e}", title_of(path))).collect();
+    if outcome.skipped > 0 {
+        detail.push(format!("{} skipped", outcome.skipped));
+    }
+    let failed = !outcome.failed.is_empty();
+    let detail = detail.join("\n");
+    match job.kind {
+        JobKind::Copy | JobKind::Move => oplog::record_transfer(text, detail, failed),
+        _ if failed => oplog::record(oplog::Kind::Problem, text, detail),
+        _ => oplog::record(oplog::Kind::Change, text, detail),
+    }
+}
+
 fn job_finished(id: isize, job: Job, outcome: Outcome) {
     let Some(app) = app() else { return };
     app.activity.remove(id);
     app.activity.job_done(id);
+    promises::finished(&job, &outcome);
+    log_job(&job, &outcome);
     let shows =
         |pane: &PaneController, fs: &FsRef, folder: &Path| vfs::same(&pane.fs(), fs) && pane.location() == folder;
     for pane in &app.panes {
@@ -1283,10 +1495,67 @@ fn job_finished(id: isize, job: Job, outcome: Outcome) {
     if job.open_when_done && !outcome.cancelled {
         let workspace = NSWorkspace::sharedWorkspace();
         for path in &outcome.created {
+            // A server file: saving the copy uploads it back.
+            if !job.source_fs.is_local()
+                && let Some(remote) = job.sources.iter().find(|s| s.file_name() == path.file_name())
+            {
+                remote_edit::track(job.source_fs.clone(), remote.clone(), path.clone());
+            }
             workspace.openURL(&file_url(path));
         }
     }
     activity::report_problems(&outcome);
+}
+
+pub fn preview_pane() -> Option<Retained<preview::PreviewPane>> {
+    app().map(|a| a.preview.clone())
+}
+
+/// The operation log changed: the preview pane may show it.
+pub fn log_changed() {
+    if let Some(app) = app() {
+        app.preview.log_changed();
+    }
+}
+
+/// A pane's selection or folder changed: the preview pane follows the
+/// active pane.
+pub fn selection_changed(index: usize) {
+    let Some(app) = app() else { return };
+    if index != app.active.get() || app.preview.view().isHidden() {
+        return;
+    }
+    let pane = &app.panes[index];
+    let entries = pane.entries_for(&pane.selected_paths());
+    app.preview.set_selection(pane.fs(), pane.location(), entries, pane.item_count());
+}
+
+fn toggle_preview() {
+    let Some(app) = app() else { return };
+    let view = app.preview.view();
+    let show = view.isHidden();
+    view.setHidden(!show);
+    if let Some(split) = app.window.contentView().and_then(|v| v.downcast::<NSSplitView>().ok()) {
+        split.adjustSubviews();
+        if show {
+            split.layoutSubtreeIfNeeded();
+            let width = app.settings.borrow().preview.width.clamp(220.0, 520.0);
+            let total = split.frame().size.width;
+            split.setPosition_ofDividerAtIndex(total - width - split.dividerThickness(), 1);
+            split.layoutSubtreeIfNeeded();
+        }
+    }
+    // The panes changed width.
+    for pane in &app.panes {
+        pane.fit_columns();
+    }
+    if show {
+        selection_changed(app.active.get());
+    } else {
+        let width = view.frame().size.width;
+        update_settings(|s| s.preview.width = width);
+    }
+    update_settings(|s| s.preview.visible = show);
 }
 
 /// The pane that commands go to by default.
@@ -1295,6 +1564,7 @@ pub fn set_active(index: usize) {
     app.active.set(index);
     app.panes[index].set_active(true);
     app.panes[1 - index].set_active(false);
+    selection_changed(index);
     update_title(&app);
 }
 
@@ -1330,14 +1600,19 @@ fn current_place(app: &App) -> sidebar::Current {
 pub fn location_changed(index: usize) {
     let Some(app) = app() else { return };
     let pane = &app.panes[index];
-    if pane.is_local() {
+    {
+        // Folders on the Mac are remembered (server tabs are not).
+        let tabs: Vec<(FsRef, PathBuf)> = pane.tab_locations();
+        let active = pane.active_tab();
+        let local: Vec<PathBuf> = tabs.iter().filter(|(fs, _)| fs.is_local()).map(|(_, p)| p.clone()).collect();
+        let active_local = tabs[..active.min(tabs.len())].iter().filter(|(fs, _)| fs.is_local()).count();
         let mut settings = app.settings.borrow_mut();
-        let location = pane.location();
-        if index == 0 {
-            settings.left.location = location;
-        } else {
-            settings.right.location = location;
+        let saved = if index == 0 { &mut settings.left } else { &mut settings.right };
+        if pane.is_local() {
+            saved.location = pane.location();
         }
+        saved.tabs = if local.len() > 1 { local } else { Vec::new() };
+        saved.active_tab = if pane.is_local() { active_local } else { 0 };
         settings.save();
     }
     if index == app.active.get() {
@@ -1512,26 +1787,23 @@ fn connect_site(site: crate::sites::Site, pane_index: usize, password: Option<St
         let password =
             if saved_site { password.or_else(|| crate::sites::keychain::password(&site.id)) } else { password };
         let typed = password.is_some();
-        let ssh = vfs::ssh_config::SshConfig::load().resolve(&site.host);
-        let params = site.params(&ssh, password, timeout, extra_keys);
-        tracing::debug!("connecting with {params:?} (from ~/.ssh/config: {ssh:?})");
         let prompter = UiPrompter { offer_save: saved_site, save: std::sync::Mutex::new(false) };
-        let result = vfs::sftp::connect(params, &prompter);
+        let result = open_connection(&site, password, timeout, extra_keys, &prompter);
         let save_typed = *prompter.save.lock().unwrap_or_else(|e| e.into_inner());
         DispatchQueue::main().exec_async(move || {
             let Some(app) = self::app() else { return };
             app.activity.remove(activity_id);
             match result {
-                Ok(fs) => {
+                Ok((fs, secret)) => {
                     // Keep what worked if asked (the form's checkbox, or the
                     // password prompt's).
-                    if let Some(secret) = fs.secret()
+                    if let Some(secret) = secret
                         && ((save_password && typed) || save_typed)
                         && app.sites.borrow().get(&site.id).is_some()
                     {
-                        crate::sites::keychain::save_password(&site.id, secret);
+                        crate::sites::keychain::save_password(&site.id, &secret);
                     }
-                    let fs: FsRef = fs;
+                    oplog::record(oplog::Kind::Connection, format!("Connected to {}", site.address()), "");
                     app.connections.borrow_mut().push((site.id.clone(), fs.clone()));
                     show_site(&site, fs, pane_index);
                 }
@@ -1539,7 +1811,9 @@ fn connect_site(site: crate::sites::Site, pane_index: usize, password: Option<St
                     // The site stays clickable: show what the pane shows.
                     update_title(&app);
                     if e.kind() != std::io::ErrorKind::Interrupted {
-                        dialogs::show_error(format!("Could not connect to {}.", site.address()), e.to_string());
+                        let message = format!("Could not connect to {}", site.address());
+                        oplog::record(oplog::Kind::Problem, message.clone(), e.to_string());
+                        dialogs::show_error(format!("{message}."), e.to_string());
                     }
                 }
             }
@@ -1547,9 +1821,82 @@ fn connect_site(site: crate::sites::Site, pane_index: usize, password: Option<St
     });
 }
 
+/// Connects to a site with its protocol (off the main thread). Returns the
+/// file system and the password or key that worked.
+fn open_connection(
+    site: &crate::sites::Site,
+    password: Option<String>,
+    timeout: Duration,
+    extra_keys: Vec<PathBuf>,
+    prompter: &UiPrompter,
+) -> std::io::Result<(FsRef, Option<String>)> {
+    use crate::sites::Protocol;
+    let user = if site.user.is_empty() && !matches!(site.protocol, Protocol::S3 | Protocol::S3Http) {
+        std::env::var("USER").unwrap_or_default()
+    } else {
+        site.user.clone()
+    };
+    match site.protocol {
+        Protocol::Sftp => {
+            let ssh = vfs::ssh_config::SshConfig::load().resolve(&site.host);
+            let params = site.params(&ssh, password, timeout, extra_keys);
+            tracing::debug!("connecting with {params:?} (from ~/.ssh/config: {ssh:?})");
+            let fs = vfs::sftp::connect(params, prompter)?;
+            let secret = fs.secret().map(str::to_string);
+            Ok((fs, secret))
+        }
+        Protocol::Ftp | Protocol::Ftps | Protocol::FtpPlain => {
+            let security = match site.protocol {
+                Protocol::Ftps => vfs::ftp::Security::Tls,
+                Protocol::FtpPlain => vfs::ftp::Security::Plain,
+                _ => vfs::ftp::Security::TlsIfAvailable,
+            };
+            // FTP servers expect "anonymous" when there is no account.
+            let user = if site.user.is_empty() { "anonymous".to_string() } else { user };
+            let params =
+                vfs::ftp::FtpParams { host: site.host.clone(), port: site.port, user, password, security, timeout };
+            let fs = vfs::ftp::connect(params, prompter)?;
+            let secret = fs.secret().map(str::to_string);
+            Ok((fs, secret))
+        }
+        Protocol::Webdav | Protocol::Webdavs => {
+            let root = site.remote_dir.clone().unwrap_or_else(|| "/".to_string());
+            let params = vfs::webdav::DavParams {
+                host: site.host.clone(),
+                port: site.port,
+                secure: site.protocol == Protocol::Webdavs,
+                user: site.user.clone(),
+                password,
+                root,
+                timeout,
+            };
+            let fs = vfs::webdav::connect(params, prompter)?;
+            let secret = fs.secret().map(str::to_string);
+            Ok((fs, secret))
+        }
+        Protocol::S3 | Protocol::S3Http => {
+            let params = vfs::s3::S3Params {
+                host: site.host.clone(),
+                port: site.port,
+                secure: site.protocol == Protocol::S3,
+                access_key: site.user.clone(),
+                secret_key: password,
+                region: site.s3_region(),
+                timeout,
+            };
+            let fs = vfs::s3::connect(params, prompter)?;
+            let secret = fs.secret().map(str::to_string);
+            Ok((fs, secret))
+        }
+    }
+}
+
 fn show_site(site: &crate::sites::Site, fs: FsRef, pane_index: usize) {
     let Some(app) = app() else { return };
-    let folder = site.remote_dir.as_ref().map(PathBuf::from).unwrap_or_else(|| fs.home());
+    // For WebDAV the remote folder is the server's WebDAV root (see
+    // open_connection), so the site opens at the top of it.
+    let webdav = matches!(site.protocol, crate::sites::Protocol::Webdav | crate::sites::Protocol::Webdavs);
+    let folder = site.remote_dir.as_ref().filter(|_| !webdav).map(PathBuf::from).unwrap_or_else(|| fs.home());
     let pane = app.panes[pane_index].clone();
     pane.navigate_to(fs, folder);
     pane.focus();
@@ -1559,33 +1906,43 @@ fn show_site(site: &crate::sites::Site, fs: FsRef, pane_index: usize) {
     update_title(&app);
 }
 
-/// Opens a folder or an sftp:// address in the active pane.
+/// Opens a folder or a server address (sftp://, ftp://, ftps://, dav://,
+/// davs://, s3://) in the active pane.
 fn open_target(target: &str) {
     let Some(app) = app() else { return };
-    let Some(address) = target.strip_prefix("sftp://") else {
+    let protocol = target.split_once("://").and_then(|(scheme, _)| crate::sites::Protocol::from_scheme(scheme));
+    let (Some(protocol), Some((_, address))) = (protocol, target.split_once("://")) else {
         app.panes[app.active.get()].navigate_to(vfs::local(), PathBuf::from(target));
         return;
     };
     let (authority, path) = match address.find('/') {
-        Some(slash) => (&address[..slash], Some(address[slash..].to_string())),
+        Some(slash) => (&address[..slash], Some(vfs::http::decode(&address[slash..]))),
         None => (address, None),
     };
     let (user, host_port) = match authority.rsplit_once('@') {
-        Some((user, rest)) => (user.to_string(), rest),
+        Some((user, rest)) => (vfs::http::decode(user), rest),
         None => (String::new(), authority),
     };
+    let default_port = protocol.default_port();
     let (host, port) = match host_port.rsplit_once(':') {
-        Some((host, port)) if port.parse::<u16>().is_ok() => (host.to_string(), port.parse().unwrap_or(22)),
-        _ => (host_port.to_string(), 22),
+        Some((host, port)) if port.parse::<u16>().is_ok() => (host.to_string(), port.parse().unwrap_or(default_port)),
+        _ => (host_port.to_string(), default_port),
     };
-    let wanted = crate::sites::Site::new(&host, port, &user);
+    let mut wanted = crate::sites::Site::new(&host, port, &user);
+    wanted.protocol = protocol;
     // A saved site for the same account brings its login settings.
+    let same_family = |p: crate::sites::Protocol| p.scheme() == protocol.scheme() || p == protocol;
     let saved = app
         .sites
         .borrow()
         .sites
         .iter()
-        .find(|s| s.host.eq_ignore_ascii_case(&host) && s.port == port && (user.is_empty() || s.user == user))
+        .find(|s| {
+            same_family(s.protocol)
+                && s.host.eq_ignore_ascii_case(&host)
+                && s.port == port
+                && (user.is_empty() || s.user == user)
+        })
         .cloned();
     // Otherwise: keys from the agent or ~/.ssh, then a password prompt.
     let mut site = saved.unwrap_or(wanted);
@@ -1598,6 +1955,9 @@ fn open_target(target: &str) {
 /// Closes a connection; panes showing it go back to the Mac.
 fn disconnect(key: &str) {
     let Some(app) = app() else { return };
+    if let Some(fs) = app.connections.borrow().iter().find(|(_, fs)| fs.key() == key).map(|(_, fs)| fs.clone()) {
+        oplog::record(oplog::Kind::Connection, format!("Disconnected from {}", fs.label()), "");
+    }
     app.connections.borrow_mut().retain(|(_, fs)| fs.key() != key);
     for pane in &app.panes {
         pane.leave(key);

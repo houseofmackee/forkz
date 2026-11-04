@@ -1,6 +1,8 @@
 //! Every command the app has, used as the tag of menu items and toolbar
 //! buttons. One place for titles and shortcuts.
 
+use std::collections::BTreeMap;
+
 use objc2_app_kit::NSEventModifierFlags;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +48,13 @@ pub enum Command {
     CopyMd5,
     Filter,
     Settings,
+    NewTab,
+    CloseTab,
+    NextTab,
+    PreviousTab,
+    OpenInNewTab,
+    MultiRename,
+    TogglePreview,
 }
 
 impl Command {
@@ -90,10 +99,36 @@ impl Command {
         Command::CopyMd5,
         Command::Filter,
         Command::Settings,
+        Command::NewTab,
+        Command::CloseTab,
+        Command::NextTab,
+        Command::PreviousTab,
+        Command::OpenInNewTab,
+        Command::MultiRename,
+        Command::TogglePreview,
     ];
 
     pub fn tag(self) -> isize {
         self as isize
+    }
+
+    /// A stable name, used in settings ("MultiRename").
+    pub fn id(self) -> String {
+        format!("{self:?}")
+    }
+
+    pub fn from_id(id: &str) -> Option<Command> {
+        Command::ALL.iter().copied().find(|c| c.id() == id)
+    }
+
+    /// The shortcut in use: the user's (from settings) or the default.
+    pub fn effective_shortcut(self, overrides: &BTreeMap<String, String>) -> (String, NSEventModifierFlags) {
+        let (key, modifiers) = self.shortcut();
+        match overrides.get(&self.id()) {
+            Some(spec) if spec.is_empty() => (String::new(), NSEventModifierFlags::Command),
+            Some(spec) => parse_spec(spec).unwrap_or_else(|| (key.to_string(), modifiers)),
+            None => (key.to_string(), modifiers),
+        }
     }
 
     pub fn from_tag(tag: isize) -> Option<Command> {
@@ -142,6 +177,13 @@ impl Command {
             Command::CopyMd5 => "Copy MD5 Checksum",
             Command::Filter => "Filter\u{2026}",
             Command::Settings => "Settings\u{2026}",
+            Command::NewTab => "New Tab",
+            Command::CloseTab => "Close Tab",
+            Command::NextTab => "Show Next Tab",
+            Command::PreviousTab => "Show Previous Tab",
+            Command::OpenInNewTab => "Open in New Tab",
+            Command::MultiRename => "Rename Multiple Items\u{2026}",
+            Command::TogglePreview => "Show Preview Pane",
         }
     }
 
@@ -192,6 +234,16 @@ impl Command {
             Command::CopyMd5 => ("", cmd),
             Command::Filter => ("f", cmd),
             Command::Settings => (",", cmd),
+            Command::NewTab => ("t", cmd),
+            Command::CloseTab => ("w", cmd),
+            // Menu shortcuts, as AppKit takes Control-Tab for keyboard
+            // focus before views see it (Shift-Command-] and [ also work
+            // in the file list).
+            Command::NextTab => ("\t", NSEventModifierFlags::Control),
+            Command::PreviousTab => ("\t", NSEventModifierFlags::Control | NSEventModifierFlags::Shift),
+            Command::OpenInNewTab => ("", cmd),
+            Command::MultiRename => ("r", opt_cmd),
+            Command::TogglePreview => ("p", shift_cmd),
         }
     }
 
@@ -229,9 +281,206 @@ impl Command {
     }
 }
 
+/// Keys with names in shortcut specs: (name, key equivalent, symbol).
+const NAMED_KEYS: &[(&str, &str, &str)] = &[
+    ("delete", "\u{8}", "\u{232b}"),
+    ("forward-delete", "\u{f728}", "\u{2326}"),
+    ("return", "\r", "\u{21a9}"),
+    ("tab", "\t", "\u{21e5}"),
+    ("space", " ", "Space"),
+    ("escape", "\u{1b}", "\u{238b}"),
+    ("up", "\u{f700}", "\u{2191}"),
+    ("down", "\u{f701}", "\u{2193}"),
+    ("left", "\u{f702}", "\u{2190}"),
+    ("right", "\u{f703}", "\u{2192}"),
+    ("home", "\u{f729}", "\u{2196}"),
+    ("end", "\u{f72b}", "\u{2198}"),
+    ("page-up", "\u{f72c}", "\u{21de}"),
+    ("page-down", "\u{f72d}", "\u{21df}"),
+];
+
+const MODIFIER_NAMES: [(&str, NSEventModifierFlags, &str); 4] = [
+    ("ctrl", NSEventModifierFlags::Control, "\u{2303}"),
+    ("opt", NSEventModifierFlags::Option, "\u{2325}"),
+    ("shift", NSEventModifierFlags::Shift, "\u{21e7}"),
+    ("cmd", NSEventModifierFlags::Command, "\u{2318}"),
+];
+
+/// F1 to F20 are U+F704 to U+F717.
+fn function_key(key: &str) -> Option<u32> {
+    let c = key.chars().next()?;
+    (key.chars().count() == 1 && ('\u{f704}'..='\u{f717}').contains(&c)).then(|| c as u32 - 0xf704 + 1)
+}
+
+pub fn is_function_key(key: &str) -> bool {
+    function_key(key).is_some()
+}
+
+/// Only the modifiers that matter for shortcuts.
+pub fn shortcut_modifiers(flags: NSEventModifierFlags) -> NSEventModifierFlags {
+    MODIFIER_NAMES
+        .iter()
+        .fold(NSEventModifierFlags(0), |all, (_, flag, _)| if flags.contains(*flag) { all | *flag } else { all })
+}
+
+/// "cmd+shift+r", "ctrl+tab", "f5" (as settings keep them).
+pub fn spec(key: &str, modifiers: NSEventModifierFlags) -> String {
+    let mut parts: Vec<String> = MODIFIER_NAMES
+        .iter()
+        .filter(|(_, flag, _)| modifiers.contains(*flag))
+        .map(|(name, _, _)| name.to_string())
+        .collect();
+    let name = if let Some((name, _, _)) = NAMED_KEYS.iter().find(|(_, k, _)| *k == key) {
+        name.to_string()
+    } else if let Some(n) = function_key(key) {
+        format!("f{n}")
+    } else {
+        key.to_lowercase()
+    };
+    parts.push(name);
+    parts.join("+")
+}
+
+pub fn parse_spec(text: &str) -> Option<(String, NSEventModifierFlags)> {
+    let mut modifiers = NSEventModifierFlags(0);
+    // "cmd++" is Command-plus: the key is what follows the last
+    // separating "+".
+    let text = text.trim();
+    let (prefix, key) = match text.strip_suffix("++") {
+        Some(prefix) => (prefix, "+"),
+        None => match text.rsplit_once('+') {
+            Some((prefix, key)) => (prefix, key),
+            None => ("", text),
+        },
+    };
+    for part in prefix.split('+').filter(|p| !p.is_empty()) {
+        let (_, flag, _) = MODIFIER_NAMES.iter().find(|(name, _, _)| *name == part.to_lowercase())?;
+        modifiers |= *flag;
+    }
+    let key = key.to_lowercase();
+    let key = if let Some((_, k, _)) = NAMED_KEYS.iter().find(|(name, _, _)| *name == key) {
+        k.to_string()
+    } else if let Some(n) = key.strip_prefix('f').and_then(|n| n.parse::<u32>().ok()).filter(|n| (1..=20).contains(n)) {
+        char::from_u32(0xf704 + n - 1)?.to_string()
+    } else if key.chars().count() == 1 {
+        key
+    } else {
+        return None;
+    };
+    Some((key, modifiers))
+}
+
+/// "\u{21e7}\u{2318}R" as menus show it ("" for none).
+pub fn display(key: &str, modifiers: NSEventModifierFlags) -> String {
+    if key.is_empty() {
+        return String::new();
+    }
+    let mut text: String =
+        MODIFIER_NAMES.iter().filter(|(_, flag, _)| modifiers.contains(*flag)).map(|(_, _, symbol)| *symbol).collect();
+    if let Some((_, _, symbol)) = NAMED_KEYS.iter().find(|(_, k, _)| *k == key) {
+        text.push_str(symbol);
+    } else if let Some(n) = function_key(key) {
+        text.push_str(&format!("F{n}"));
+    } else {
+        text.push_str(&key.to_uppercase());
+    }
+    text
+}
+
+/// Shortcuts the app menu and Edit menu use (not for commands).
+pub const RESERVED: &[(&str, NSEventModifierFlags)] = &[
+    ("q", NSEventModifierFlags::Command),
+    ("h", NSEventModifierFlags::Command),
+    ("x", NSEventModifierFlags::Command),
+    ("a", NSEventModifierFlags::Command),
+    ("m", NSEventModifierFlags::Command),
+];
+
+/// Keys the file list handles itself (see `FileTable::keyDown`), for
+/// conflict checks. A menu shortcut on one of them takes it over.
+pub const LIST_KEYS: &[(&str, Command)] = &[
+    ("\u{f705}", Command::Rename),
+    ("\u{f708}", Command::CopyToOther),
+    ("\u{f709}", Command::MoveToOther),
+    ("\u{f70a}", Command::NewFolder),
+    ("\u{f70b}", Command::Trash),
+];
+
+/// The command that already uses this shortcut, if any (besides `except`):
+/// in the menus, or one of the file list's function keys.
+pub fn command_using(
+    key: &str,
+    modifiers: NSEventModifierFlags,
+    overrides: &BTreeMap<String, String>,
+    except: Command,
+) -> Option<Command> {
+    if key.is_empty() {
+        return None;
+    }
+    let in_menu = Command::ALL.iter().copied().filter(|c| *c != except).find(|c| {
+        let (k, m) = c.effective_shortcut(overrides);
+        k == key && shortcut_modifiers(m) == shortcut_modifiers(modifiers)
+    });
+    in_menu.or_else(|| {
+        let plain = shortcut_modifiers(modifiers).0 == 0;
+        LIST_KEYS.iter().find(|(k, c)| plain && *k == key && *c != except).map(|(_, c)| *c)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn specs_round_trip_and_display() {
+        let cmd = NSEventModifierFlags::Command;
+        let shift_cmd = cmd | NSEventModifierFlags::Shift;
+        assert_eq!(spec("r", shift_cmd), "shift+cmd+r");
+        assert_eq!(parse_spec("shift+cmd+r"), Some(("r".to_string(), shift_cmd)));
+        assert_eq!(parse_spec("CMD+Shift+R"), Some(("r".to_string(), shift_cmd)));
+        assert_eq!(parse_spec("cmd++"), Some(("+".to_string(), cmd)));
+        assert_eq!(spec("\u{8}", cmd), "cmd+delete");
+        assert_eq!(parse_spec("cmd+delete"), Some(("\u{8}".to_string(), cmd)));
+        assert_eq!(spec("\u{f708}", NSEventModifierFlags(0)), "f5");
+        assert_eq!(parse_spec("f5"), Some(("\u{f708}".to_string(), NSEventModifierFlags(0))));
+        assert_eq!(parse_spec("cmd+banana"), None);
+        assert_eq!(parse_spec("hyper+r"), None);
+        assert_eq!(display("r", shift_cmd), "\u{21e7}\u{2318}R");
+        assert_eq!(display("\t", NSEventModifierFlags::Control), "\u{2303}\u{21e5}");
+        assert_eq!(display("\u{f708}", NSEventModifierFlags(0)), "F5");
+        assert_eq!(display("", cmd), "");
+        for &command in Command::ALL {
+            let (key, modifiers) = command.shortcut();
+            if !key.is_empty() {
+                assert_eq!(parse_spec(&spec(key, modifiers)), Some((key.to_string(), modifiers)), "{command:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn overrides_and_conflicts() {
+        let mut overrides = BTreeMap::new();
+        let cmd = NSEventModifierFlags::Command;
+        assert_eq!(Command::Refresh.effective_shortcut(&overrides), ("r".to_string(), cmd));
+        assert_eq!(command_using("r", cmd, &overrides, Command::Open), Some(Command::Refresh));
+        overrides.insert("Refresh".to_string(), "f5".to_string());
+        overrides.insert("Duplicate".to_string(), String::new());
+        assert_eq!(Command::Refresh.effective_shortcut(&overrides).0, "\u{f708}");
+        assert_eq!(Command::Duplicate.effective_shortcut(&overrides).0, "");
+        assert_eq!(command_using("r", cmd, &overrides, Command::Open), None);
+        assert_eq!(command_using("d", cmd, &overrides, Command::Open), None);
+        assert_eq!(Command::from_id("MultiRename"), Some(Command::MultiRename));
+        // F5 copies in the file list.
+        let f5 = "\u{f708}";
+        assert_eq!(
+            command_using(f5, NSEventModifierFlags(0), &BTreeMap::new(), Command::Refresh),
+            Some(Command::CopyToOther)
+        );
+        assert_eq!(
+            command_using(f5, NSEventModifierFlags(0), &overrides, Command::CopyToOther),
+            Some(Command::Refresh)
+        );
+    }
 
     #[test]
     fn tags_round_trip_and_shortcuts_unique() {

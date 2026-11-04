@@ -1,6 +1,6 @@
 [package]
 name = "forkz"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "A native dual-pane file manager for macOS"
 license = "MIT OR Apache-2.0"
@@ -20,8 +20,13 @@ base64 = "0.23"
 block2 = "0.6"
 dirs = "7"
 dispatch2 = "0.3"
+hmac = "0.12"
+httpdate = "1"
 libc = "0.2"
+native-tls = "0.2"
 md-5 = "0.10"
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
+percent-encoding = "2"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["objc2-uniform-type-identifiers"] }
@@ -32,6 +37,8 @@ objc2-uniform-type-identifiers = "0.3"
 roxmltree = "0.21"
 security-framework = "3"
 sha2 = "0.10"
+suppaftp = { version = "12", features = ["native-tls"] }
+ureq = { version = "3", default-features = false, features = ["native-tls-no-default"] }
 serde = { version = "1", features = ["derive"] }
 # SFTP, through libssh2 with OpenSSL built in (no Homebrew dependency at run time).
 ssh2 = { version = "0.9", features = ["vendored-openssl"] }

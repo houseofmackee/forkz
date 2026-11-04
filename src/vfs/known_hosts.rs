@@ -97,6 +97,36 @@ fn check_plain(file: &Path, host: &str, port: u16, key: &[u8]) -> Status {
     if changed { Status::Changed } else { Status::Unknown }
 }
 
+/// The file of TLS certificates trusted in forkz (FTPS servers whose
+/// certificate macOS does not trust): "host:port FINGERPRINT" lines.
+fn certificates_file() -> Option<PathBuf> {
+    forkz_file().map(|f| f.with_file_name("trusted_certificates"))
+}
+
+/// The fingerprint of the certificate trusted for a server, if any.
+pub fn trusted_certificate(host: &str, port: u16) -> Option<String> {
+    let text = std::fs::read_to_string(certificates_file()?).ok()?;
+    let wanted = format!("{host}:{port}");
+    text.lines().find_map(|line| {
+        let (server, fingerprint) = line.split_once(' ')?;
+        (server == wanted).then(|| fingerprint.trim().to_string())
+    })
+}
+
+/// Trusts a certificate (by fingerprint) for a server, replacing another.
+pub fn trust_certificate(host: &str, port: u16, fingerprint: &str) -> io::Result<()> {
+    let file = certificates_file().ok_or_else(|| io::Error::other("no Application Support folder"))?;
+    let server = format!("{host}:{port}");
+    let existing = std::fs::read_to_string(&file).unwrap_or_default();
+    let mut lines: Vec<String> =
+        existing.lines().filter(|l| l.split_once(' ').is_none_or(|(s, _)| s != server)).map(str::to_string).collect();
+    lines.push(format!("{server} {fingerprint}"));
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(file, lines.join("\n") + "\n")
+}
+
 /// Trusts `key` for the host from now on, replacing any key of the same
 /// type trusted before.
 pub fn trust(host: &str, port: u16, key: &[u8]) -> io::Result<()> {

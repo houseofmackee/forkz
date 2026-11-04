@@ -10,7 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use roxmltree::{Document, Node};
 
-use super::Site;
+use super::{Protocol, Site};
 use crate::fs::ops::Resolution;
 use crate::vfs::sftp::AuthMethod;
 
@@ -92,24 +92,42 @@ fn text_of<'a>(node: Node<'a, '_>, tag: &str) -> Option<&'a str> {
 fn server(node: Node, folders: &[String], import: &mut Import) {
     let host = text_of(node, "Host").unwrap_or_default().trim().to_string();
     let name = text_of(node, "Name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or(&host).to_string();
-    // 0 FTP, 1 SFTP, 3 FTPS, 4 FTPES, 5 FTP (insecure), 6 S3, and more.
-    let protocol = text_of(node, "Protocol").and_then(|p| p.trim().parse::<u32>().ok()).unwrap_or(0);
-    if protocol != 1 {
-        import.notes.push(format!("\u{201c}{name}\u{201d} uses a protocol forkz does not support yet (only SFTP)."));
-        return;
-    }
+    // 0 FTP, 1 SFTP, 2 HTTP, 3 FTPS (implicit), 4 FTPES, 5 FTP (insecure),
+    // 6 S3, 8 WebDAV, and more in FileZilla Pro.
+    let number = text_of(node, "Protocol").and_then(|p| p.trim().parse::<u32>().ok()).unwrap_or(0);
+    let port = text_of(node, "Port").and_then(|p| p.trim().parse::<u16>().ok());
+    let protocol = match number {
+        0 => Protocol::Ftp,
+        1 => Protocol::Sftp,
+        4 => Protocol::Ftps,
+        5 => Protocol::FtpPlain,
+        6 => Protocol::S3,
+        8 if port == Some(80) => Protocol::Webdav,
+        8 => Protocol::Webdavs,
+        3 => {
+            import.notes.push(format!(
+                "\u{201c}{name}\u{201d} uses implicit FTPS (port 990), which forkz does not support; most servers also offer explicit FTPS on port 21."
+            ));
+            return;
+        }
+        _ => {
+            import.notes.push(format!("\u{201c}{name}\u{201d} uses a protocol forkz does not support yet."));
+            return;
+        }
+    };
     if host.is_empty() {
         return;
     }
-    let port = text_of(node, "Port").and_then(|p| p.trim().parse().ok()).unwrap_or(22);
+    let port = port.filter(|&p| p > 0).unwrap_or(protocol.default_port());
     let user = text_of(node, "User").unwrap_or_default().to_string();
     let mut site = Site::new(&host, port, &user);
+    site.protocol = protocol;
     site.name = name.clone();
     site.folder = folders.join("/");
     // 0 anonymous, 1 normal, 2 ask for password, 3 interactive, 4 account,
     // 5 key file, 6 profile.
     let logon = text_of(node, "Logontype").and_then(|l| l.trim().parse::<u32>().ok()).unwrap_or(1);
-    if logon == 5 {
+    if logon == 5 && protocol.is_sftp() {
         site.auth = AuthMethod::Key;
         site.key_file = text_of(node, "Keyfile").map(PathBuf::from);
     }
@@ -232,6 +250,8 @@ mod tests {
         <Pass encoding="crypt">AbCdEf</Pass><Logontype>1</Logontype><Name>Locked</Name>
       </Server>
       <Server><Host>ftp.example</Host><Protocol>0</Protocol><Name>Old FTP</Name></Server>
+      <Server><Host>tls.example</Host><Port>0</Port><Protocol>4</Protocol><User>u</User><Name>TLS</Name></Server>
+      <Server><Host>implicit.example</Host><Protocol>3</Protocol><Name>Implicit</Name></Server>
     </Folder>
   </Servers>
 </FileZilla3>"#;
@@ -240,7 +260,7 @@ mod tests {
     fn sites_with_folders_passwords_and_keys() {
         let mut import = Import::default();
         parse_sites(SITES, &mut import).unwrap();
-        assert_eq!(import.sites.len(), 3);
+        assert_eq!(import.sites.len(), 5);
         let (top, password) = &import.sites[0];
         assert_eq!(
             (top.name.as_str(), top.host.as_str(), top.port, top.user.as_str()),
@@ -260,6 +280,11 @@ mod tests {
         let (locked, password) = &import.sites[2];
         assert_eq!((locked.folder.as_str(), locked.port), ("Work", 22));
         assert_eq!(*password, None);
+        let (ftp, _) = &import.sites[3];
+        assert_eq!((ftp.protocol, ftp.port, ftp.folder.as_str()), (Protocol::Ftp, 21, "Work"));
+        let (tls, _) = &import.sites[4];
+        assert_eq!((tls.protocol, tls.port), (Protocol::Ftps, 21));
+        // The master password, and implicit FTPS.
         assert_eq!(import.notes.len(), 2, "{:?}", import.notes);
     }
 
