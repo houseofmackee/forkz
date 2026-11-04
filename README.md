@@ -2,6 +2,8 @@
 
 A fast, native dual-pane file manager for macOS on Apple silicon, written in Rust with AppKit.
 
+**[Download the latest release](https://github.com/houseofmackee/forkz/releases/latest)** (Apple silicon, macOS 14 or later): signed with a Developer ID, notarized by Apple, and it updates itself. Or install it with Homebrew: `brew install --cask houseofmackee/tap/forkz`.
+
 **Status:** early development. The local dual-pane file manager and SFTP work; FTP, S3, WebDAV, and cloud drives come later. See [PLAN.md](PLAN.md) for what is done and what is planned.
 
 ## What it does today

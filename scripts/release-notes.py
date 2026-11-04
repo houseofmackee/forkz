@@ -17,14 +17,16 @@ from pathlib import Path
 
 
 def section(changelog: str, version: str) -> str | None:
-    """The body under `## [version]`, up to the next `## ` heading."""
+    """The body under `## [version]`, up to the next `## ` heading or the
+    link definitions at the end of the file."""
     lines = changelog.splitlines()
     heading = f"## [{version}]"
     for start, line in enumerate(lines):
         if line.startswith(heading):
             body = []
             for line in lines[start + 1 :]:
-                if line.startswith("## "):
+                # The next version, or the link definitions at the end.
+                if line.startswith("## ") or re.match(r"^\[[^\]]*\]: ", line):
                     break
                 body.append(line)
             return "\n".join(body).strip()

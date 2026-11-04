@@ -7,6 +7,8 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-04
+
 ### Added
 
 - Updates through Sparkle: forkz > Check for Updates…, and an option to check automatically. Releases are built, signed, notarized, and published by a GitHub workflow when a version tag is pushed.
@@ -28,3 +30,6 @@ the GitHub release and Sparkle's update window show.
 - Conflict dialog: Replace, Replace if Older, Keep Both, Skip, Merge, Stop, and "Apply to all".
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
+
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/houseofmackee/forkz/releases/tag/v0.1.0

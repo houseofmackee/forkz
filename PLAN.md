@@ -86,4 +86,4 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `pane`, `setting
 
 - [x] Sparkle updates (forkz > Check for Updates; the key is `~/Developer/AppSigning/sparkle/forkz.key`)
 - [x] Release workflow: DMG and zip, notarization, signed appcast, GitHub release, and the Homebrew cask (`.github/workflows/release.yml`, `docs/RELEASE_CHECKLIST.md`)
-- [ ] First release (v0.1.0)
+- [x] First release (v0.1.0)
