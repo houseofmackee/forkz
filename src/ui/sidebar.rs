@@ -1,0 +1,423 @@
+//! The sidebar: standard places, the user's favorites, and mounted volumes.
+//! Clicking an item opens it in the active pane.
+
+use std::cell::{Cell, OnceCell, RefCell};
+use std::path::{Path, PathBuf};
+
+use objc2::rc::Retained;
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSControlTextEditingDelegate, NSDragOperation, NSDraggingInfo, NSFont, NSImageView, NSMenu, NSMenuDelegate,
+    NSMenuItem, NSPasteboardTypeFileURL, NSScrollView, NSTableCellView, NSTableColumn, NSTableView,
+    NSTableViewDataSource, NSTableViewDelegate, NSTableViewDropOperation, NSTableViewStyle, NSTextField, NSView,
+};
+use objc2_foundation::{
+    NSArray, NSIndexSet, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
+};
+
+use super::util::{icon_for_path, ns, symbol};
+use crate::pane::title_of;
+
+#[derive(Debug, Clone, PartialEq)]
+enum Row {
+    Header(&'static str),
+    Place { title: String, path: PathBuf, symbol: Option<&'static str>, favorite: bool },
+    Site { id: String, title: String, detail: String },
+}
+
+/// Actions in the Sites context menu (menu item tags).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteAction {
+    Connect = 1,
+    ConnectInOther,
+    Edit,
+    Delete,
+    New,
+    Import,
+}
+
+impl SiteAction {
+    fn from_tag(tag: isize) -> Option<SiteAction> {
+        [Self::Connect, Self::ConnectInOther, Self::Edit, Self::Delete, Self::New, Self::Import]
+            .into_iter()
+            .find(|a| *a as isize == tag)
+    }
+}
+
+pub struct SidebarIvars {
+    rows: RefCell<Vec<Row>>,
+    table: OnceCell<Retained<NSTableView>>,
+    scroll: OnceCell<Retained<NSScrollView>>,
+    /// Selection changed by code (to follow the active pane), not a click.
+    updating: Cell<bool>,
+    menu_row: Cell<Option<usize>>,
+}
+
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ForkzSidebar"]
+    #[ivars = SidebarIvars]
+    pub struct Sidebar;
+
+    impl Sidebar {
+        #[unsafe(method(siteAction:))]
+        fn site_action(&self, sender: &NSMenuItem) {
+            let row = self.ivars().menu_row.take();
+            let site = row.and_then(|r| match self.ivars().rows.borrow().get(r) {
+                Some(Row::Site { id, .. }) => Some(id.clone()),
+                _ => None,
+            });
+            if let Some(action) = SiteAction::from_tag(sender.tag()) {
+                super::site_action(action, site);
+            }
+        }
+
+        #[unsafe(method(removeFavorite:))]
+        fn remove_favorite(&self, _sender: Option<&AnyObject>) {
+            let Some(row) = self.ivars().menu_row.take() else { return };
+            if let Some(Row::Place { path, favorite: true, .. }) = self.ivars().rows.borrow().get(row).cloned() {
+                super::remove_favorite(&path);
+            }
+        }
+    }
+
+    unsafe impl NSObjectProtocol for Sidebar {}
+
+    unsafe impl NSTableViewDataSource for Sidebar {
+        #[unsafe(method(numberOfRowsInTableView:))]
+        fn number_of_rows(&self, _table: &NSTableView) -> NSInteger {
+            self.ivars().rows.borrow().len() as NSInteger
+        }
+
+        /// Folders dropped on the sidebar's empty area become favorites.
+        #[unsafe(method(tableView:validateDrop:proposedRow:proposedDropOperation:))]
+        fn validate_drop(
+            &self,
+            table: &NSTableView,
+            info: &ProtocolObject<dyn NSDraggingInfo>,
+            _row: NSInteger,
+            _operation: NSTableViewDropOperation,
+        ) -> NSDragOperation {
+            let paths = super::pane_view::paths_on_pasteboard(&info.draggingPasteboard());
+            if paths.iter().any(|p| p.is_dir()) {
+                table.setDropRow_dropOperation(-1, NSTableViewDropOperation::On);
+                NSDragOperation::Link
+            } else {
+                NSDragOperation::None
+            }
+        }
+
+        #[unsafe(method(tableView:acceptDrop:row:dropOperation:))]
+        fn accept_drop(
+            &self,
+            _table: &NSTableView,
+            info: &ProtocolObject<dyn NSDraggingInfo>,
+            _row: NSInteger,
+            _operation: NSTableViewDropOperation,
+        ) -> bool {
+            let paths = super::pane_view::paths_on_pasteboard(&info.draggingPasteboard());
+            for path in paths.into_iter().filter(|p| p.is_dir()) {
+                super::add_favorite(path);
+            }
+            true
+        }
+    }
+
+    unsafe impl NSControlTextEditingDelegate for Sidebar {}
+
+    unsafe impl NSTableViewDelegate for Sidebar {
+        #[unsafe(method_id(tableView:viewForTableColumn:row:))]
+        fn view_for_row(
+            &self,
+            _table: &NSTableView,
+            _column: Option<&NSTableColumn>,
+            row: NSInteger,
+        ) -> Option<Retained<NSView>> {
+            self.cell_for(row)
+        }
+
+        #[unsafe(method(tableView:isGroupRow:))]
+        fn is_group_row(&self, _table: &NSTableView, row: NSInteger) -> bool {
+            self.is_header(row)
+        }
+
+        #[unsafe(method(tableView:shouldSelectRow:))]
+        fn should_select_row(&self, table: &NSTableView, row: NSInteger) -> bool {
+            let _ = table;
+            !self.is_header(row)
+        }
+
+        #[unsafe(method(tableViewSelectionDidChange:))]
+        fn selection_did_change(&self, _notification: &NSNotification) {
+            if self.ivars().updating.get() {
+                return;
+            }
+            let row = self.table().selectedRow();
+            tracing::debug!("sidebar selected row {row}");
+            match usize::try_from(row).ok().and_then(|r| self.ivars().rows.borrow().get(r).cloned()) {
+                Some(Row::Place { path, .. }) => super::open_in_active_pane(path),
+                Some(Row::Site { id, .. }) => super::site_action(SiteAction::Connect, Some(id)),
+                _ => {}
+            }
+        }
+    }
+
+    unsafe impl NSMenuDelegate for Sidebar {
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self, menu: &NSMenu) {
+            menu.removeAllItems();
+            let row = usize::try_from(self.table().clickedRow()).ok();
+            let favorite = row.and_then(|r| self.ivars().rows.borrow().get(r).cloned());
+            let add_site_item = |title: &str, action: SiteAction| {
+                let item = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(self.mtm()),
+                        &ns(title),
+                        Some(sel!(siteAction:)),
+                        &ns(""),
+                    )
+                };
+                item.setTag(action as isize);
+                unsafe { item.setTarget(Some(self)) };
+                menu.addItem(&item);
+            };
+            self.ivars().menu_row.set(row);
+            match &favorite {
+                Some(Row::Site { .. }) => {
+                    add_site_item("Connect", SiteAction::Connect);
+                    add_site_item("Connect in Other Pane", SiteAction::ConnectInOther);
+                    menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
+                    add_site_item("Edit\u{2026}", SiteAction::Edit);
+                    add_site_item("Delete", SiteAction::Delete);
+                    return;
+                }
+                Some(Row::Header("Sites")) | None => {
+                    add_site_item("New Site\u{2026}", SiteAction::New);
+                    add_site_item("Import from FileZilla\u{2026}", SiteAction::Import);
+                    return;
+                }
+                _ => {}
+            }
+            if let Some(Row::Place { favorite: true, .. }) = favorite {
+                self.ivars().menu_row.set(row);
+                let item = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(self.mtm()),
+                        &ns("Remove from Sidebar"),
+                        Some(sel!(removeFavorite:)),
+                        &ns(""),
+                    )
+                };
+                unsafe { item.setTarget(Some(self)) };
+                menu.addItem(&item);
+            }
+        }
+    }
+);
+
+impl Sidebar {
+    fn is_header(&self, row: NSInteger) -> bool {
+        let rows = self.ivars().rows.borrow();
+        matches!(usize::try_from(row).ok().and_then(|r| rows.get(r)), Some(Row::Header(_)))
+    }
+
+    fn cell_for(&self, row: NSInteger) -> Option<Retained<NSView>> {
+        let rows = self.ivars().rows.borrow();
+        let row = rows.get(usize::try_from(row).ok()?)?;
+        Some(match row {
+            Row::Header(title) => {
+                let field = NSTextField::labelWithString(&ns(title), self.mtm());
+                field.setFont(Some(&NSFont::boldSystemFontOfSize(NSFont::smallSystemFontSize())));
+                field.setTextColor(Some(&objc2_app_kit::NSColor::secondaryLabelColor()));
+                Retained::into_super(Retained::into_super(field))
+            }
+            Row::Place { title, path, symbol: name, .. } => place_cell(self.mtm(), title, path, *name),
+            Row::Site { title, detail, .. } => site_cell(self.mtm(), title, detail),
+        })
+    }
+
+    pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(SidebarIvars {
+            rows: RefCell::new(Vec::new()),
+            table: OnceCell::new(),
+            scroll: OnceCell::new(),
+            updating: Cell::new(false),
+            menu_row: Cell::new(None),
+        });
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+
+        let table = NSTableView::new(mtm);
+        let column = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), &ns("place"));
+        table.addTableColumn(&column);
+        table.setHeaderView(None);
+        table.setStyle(NSTableViewStyle::SourceList);
+        table.setRowHeight(24.0);
+        table.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
+        unsafe {
+            table.setDataSource(Some(ProtocolObject::from_ref(&*this)));
+            table.setDelegate(Some(ProtocolObject::from_ref(&*this)));
+        }
+        let menu = NSMenu::new(mtm);
+        menu.setDelegate(Some(ProtocolObject::from_ref(&*this)));
+        unsafe { table.setMenu(Some(&menu)) };
+        // Clicking never moves focus away from the file panes.
+        table.setRefusesFirstResponder(true);
+
+        let scroll = NSScrollView::new(mtm);
+        scroll.setDocumentView(Some(&table));
+        scroll.setHasVerticalScroller(true);
+        scroll.setAutohidesScrollers(true);
+        scroll.setDrawsBackground(false);
+
+        let _ = this.ivars().table.set(table);
+        let _ = this.ivars().scroll.set(scroll);
+        this
+    }
+
+    pub fn view(&self) -> Retained<NSView> {
+        Retained::into_super(self.ivars().scroll.get().expect("built").clone())
+    }
+
+    fn table(&self) -> &NSTableView {
+        self.ivars().table.get().expect("built")
+    }
+
+    /// Rebuilds the rows from the favorites and mounted volumes.
+    pub fn reload(&self, favorites: &[PathBuf], sites: &[crate::sites::Site], current: Current) {
+        let mut rows = vec![Row::Header("Favorites")];
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+        let standard = [
+            (dirs::home_dir(), "house"),
+            (dirs::desktop_dir(), "menubar.dock.rectangle"),
+            (dirs::document_dir(), "doc"),
+            (dirs::download_dir(), "arrow.down.circle"),
+            (Some(PathBuf::from("/Applications")), "square.grid.2x2"),
+        ];
+        for (path, name) in standard {
+            if let Some(path) = path {
+                let title = if path == home { title_of(&home) } else { title_of(&path) };
+                rows.push(Row::Place { title, path, symbol: Some(name), favorite: false });
+            }
+        }
+        for path in favorites {
+            rows.push(Row::Place { title: title_of(path), path: path.clone(), symbol: None, favorite: true });
+        }
+        rows.push(Row::Header("Locations"));
+        for (title, path) in volumes() {
+            rows.push(Row::Place { title, path, symbol: None, favorite: false });
+        }
+        rows.push(Row::Header("Sites"));
+        for site in sites {
+            let title = if site.folder.is_empty() {
+                site.name.clone()
+            } else {
+                format!("{} \u{203a} {}", site.folder, site.name)
+            };
+            rows.push(Row::Site { id: site.id.clone(), title, detail: site.address() });
+        }
+        *self.ivars().rows.borrow_mut() = rows;
+        self.table().reloadData();
+        self.highlight(current);
+    }
+
+    /// Selects the row of the active pane's folder or site, if there is one.
+    pub fn highlight(&self, current: Current) {
+        let row = self.ivars().rows.borrow().iter().position(|r| match (r, &current) {
+            (Row::Place { path, .. }, Current::Local(current)) => path == current,
+            (Row::Site { id, .. }, Current::Site(current)) => id == current,
+            _ => false,
+        });
+        self.ivars().updating.set(true);
+        match row {
+            Some(row) => self.table().selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(row), false),
+            None => unsafe { self.table().deselectAll(None) },
+        }
+        self.ivars().updating.set(false);
+    }
+}
+
+/// What the active pane shows, to highlight it in the sidebar.
+pub enum Current {
+    Local(PathBuf),
+    /// A connection opened from this site (by id).
+    Site(String),
+    Other,
+}
+
+fn site_cell(mtm: MainThreadMarker, title: &str, detail: &str) -> Retained<NSView> {
+    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 24.0));
+    let cell = NSTableCellView::initWithFrame(NSTableCellView::alloc(mtm), frame);
+    let image = NSImageView::initWithFrame(
+        NSImageView::alloc(mtm),
+        NSRect::new(NSPoint::new(2.0, 4.0), NSSize::new(16.0, 16.0)),
+    );
+    if let Some(icon) = symbol("server.rack", title) {
+        image.setImage(Some(&icon));
+    }
+    image.setContentTintColor(Some(&objc2_app_kit::NSColor::systemTealColor()));
+    let field = NSTextField::labelWithString(&ns(title), mtm);
+    field.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+    field.setFrame(NSRect::new(NSPoint::new(24.0, 4.0), NSSize::new(150.0, 16.0)));
+    field.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
+    field.setToolTip(Some(&ns(detail)));
+    cell.addSubview(&image);
+    cell.addSubview(&field);
+    unsafe {
+        cell.setImageView(Some(&image));
+        cell.setTextField(Some(&field));
+    }
+    Retained::into_super(cell)
+}
+
+/// Mounted volumes: the startup disk first, then /Volumes.
+fn volumes() -> Vec<(String, PathBuf)> {
+    let mut found = Vec::new();
+    let mut startup = "Macintosh HD".to_string();
+    let mut others = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/Volumes") {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            // The startup disk appears as a link to "/".
+            if std::fs::read_link(&path).is_ok_and(|t| t == Path::new("/")) {
+                startup = name;
+            } else if path.is_dir() {
+                others.push((name, path));
+            }
+        }
+    }
+    others.sort_by(|a, b| crate::fs::natural_cmp(&a.0, &b.0));
+    found.push((startup, PathBuf::from("/")));
+    found.extend(others);
+    found
+}
+
+fn place_cell(mtm: MainThreadMarker, title: &str, path: &Path, symbol_name: Option<&str>) -> Retained<NSView> {
+    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 24.0));
+    let cell = NSTableCellView::initWithFrame(NSTableCellView::alloc(mtm), frame);
+    let image = NSImageView::initWithFrame(
+        NSImageView::alloc(mtm),
+        NSRect::new(NSPoint::new(2.0, 4.0), NSSize::new(16.0, 16.0)),
+    );
+    let icon = symbol_name.and_then(|name| symbol(name, title)).unwrap_or_else(|| icon_for_path(path));
+    image.setImage(Some(&icon));
+    if symbol_name.is_some() {
+        image.setContentTintColor(Some(&objc2_app_kit::NSColor::controlAccentColor()));
+    }
+    let field = NSTextField::labelWithString(&ns(title), mtm);
+    field.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
+    field.setFrame(NSRect::new(NSPoint::new(24.0, 4.0), NSSize::new(150.0, 16.0)));
+    field.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
+    cell.addSubview(&image);
+    cell.addSubview(&field);
+    unsafe {
+        cell.setImageView(Some(&image));
+        cell.setTextField(Some(&field));
+    }
+    Retained::into_super(cell)
+}

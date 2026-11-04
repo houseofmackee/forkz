@@ -1,8 +1,3 @@
-.DS_Store
-/build
+/target
 /dist
-/.build
-DerivedData/
-xcuserdata/
-*.xcuserstate
-.swiftpm/
+.DS_Store

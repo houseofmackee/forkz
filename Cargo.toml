@@ -1,0 +1,46 @@
+[package]
+name = "forkz"
+version = "0.1.0"
+edition = "2024"
+description = "A native dual-pane file manager for macOS"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/houseofmackee/forkz"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "forkz"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+block2 = "0.6"
+dirs = "7"
+dispatch2 = "0.3"
+libc = "0.2"
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["objc2-uniform-type-identifiers"] }
+objc2-core-foundation = "0.3"
+objc2-foundation = "0.3"
+objc2-quick-look-ui = "0.3"
+objc2-uniform-type-identifiers = "0.3"
+roxmltree = "0.21"
+security-framework = "3"
+serde = { version = "1", features = ["derive"] }
+# SFTP, through libssh2 with OpenSSL built in (no Homebrew dependency at run time).
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
+toml = "1.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
