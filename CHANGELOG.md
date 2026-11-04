@@ -7,6 +7,8 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-04
+
 ### Fixed
 
 - Open in Terminal on a server folder now uses the chosen terminal. With Warp it used Terminal instead; it now opens a Warp window running the SSH session (through a tab config forkz keeps in `~/.warp/tab_configs/forkz_ssh_session.toml`).
@@ -48,6 +50,7 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/houseofmackee/forkz/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/houseofmackee/forkz/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/houseofmackee/forkz/releases/tag/v0.1.0
