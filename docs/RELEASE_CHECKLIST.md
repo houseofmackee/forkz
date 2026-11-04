@@ -13,9 +13,9 @@ Work through this for every release, on an Apple silicon Mac.
 ## 2. Release
 
 - [ ] Commit, then tag and push: `git tag vX.Y.Z && git push origin main vX.Y.Z`.
-- [ ] The Release workflow passes, and the pre-release has the DMG, zip, `SHA256SUMS.txt`, and `appcast.xml`.
+- [ ] The Release workflow passes, and the release (published as the latest, regular release) has the DMG, zip, `SHA256SUMS.txt`, and `appcast.xml`.
 - [ ] `Casks/forkz.rb` in houseofmackee/homebrew-tap has the new version and the DMG's checksum.
-- [ ] After the checks below: mark it as a regular release (`gh release edit vX.Y.Z --prerelease=false --latest`), and check that https://github.com/houseofmackee/forkz/releases/latest/download/appcast.xml offers the new version.
+- [ ] https://github.com/houseofmackee/forkz/releases/latest/download/appcast.xml offers the new version.
 
 ## 3. Install
 
@@ -23,7 +23,7 @@ Work through this for every release, on an Apple silicon Mac.
 - [ ] After dragging to Applications, forkz opens without a Gatekeeper warning.
 - [ ] `spctl -a -vv /Applications/forkz.app` says "accepted, source=Notarized Developer ID", and `codesign -dr - /Applications/forkz.app` shows `certificate leaf[subject.OU] = ZD5VPNGP3T`.
 - [ ] Upgrading over the previous release keeps the settings, sites, and the passwords in the Keychain (no Keychain prompt).
-- [ ] Once the release is regular, the previous version offers it with Check for Updates…, shows the changelog notes, installs it, and relaunches.
+- [ ] The previous version offers it with Check for Updates…, shows the changelog notes, installs it, and relaunches.
 - [ ] `brew install --cask houseofmackee/tap/forkz` installs the new version.
 
 ## 4. Use

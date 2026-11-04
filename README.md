@@ -78,7 +78,7 @@ scripts/make_icon.sh     # macos/AppIcon.svg to AppIcon.icns (needs librsvg)
 
 ## Releasing
 
-Pushing a version tag (`git tag v0.1.0 && git push origin v0.1.0`) runs the Release workflow: it builds forkz, signs it with the Developer ID, notarizes it, and publishes a pre-release with the DMG, zip, checksums, and a signed `appcast.xml`, then updates the Homebrew cask. Marking the release as regular makes Sparkle offer it. The steps are in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
+Pushing a version tag (`git tag v0.1.0 && git push origin v0.1.0`) runs the Release workflow: it builds forkz, signs it with the Developer ID, notarizes it, and publishes it as the latest release with the DMG, zip, checksums, and a signed `appcast.xml` (so Sparkle offers it right away), then updates the Homebrew cask. The steps are in [docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
 
 ```sh
 scripts/dist.sh          # the release files in dist/ (FORKZ_SPARKLE_KEY signs the appcast)

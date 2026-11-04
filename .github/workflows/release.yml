@@ -2,8 +2,8 @@ name: Release
 
 # Builds, signs, notarizes and publishes a release when a version tag is pushed:
 #   git tag v0.1.0 && git push origin v0.1.0
-# Every release is published as a pre-release; mark it as a regular release
-# on GitHub once the manual checks in docs/RELEASE_CHECKLIST.md are done.
+# Every release is published as a regular (latest) release, so Sparkle
+# offers it to installed copies as soon as the workflow finishes.
 #
 # Needs these repository secrets:
 #   DEVELOPER_ID_P12_BASE64    the Developer ID Application certificate and key
@@ -18,8 +18,8 @@ name: Release
 # Every release must be signed by the same team: Sparkle and the Keychain
 # trust updates by that signature.
 #
-# The app's update feed is the latest regular release's appcast.xml, so
-# Sparkle offers a version only once it is marked as a regular release.
+# The app's update feed is the latest release's appcast.xml
+# (releases/latest/download/appcast.xml).
 
 on:
   push:
@@ -142,7 +142,7 @@ jobs:
 
           forkz updates itself (forkz > Check for Updates…), or install it with Homebrew: \`brew install --cask houseofmackee/tap/forkz\`.
           NOTES
-          gh release create "$GITHUB_REF_NAME" --prerelease --generate-notes --notes-file "$notes" \
+          gh release create "$GITHUB_REF_NAME" --latest --generate-notes --notes-file "$notes" \
             --title "forkz $version" \
             dist/forkz-$version-arm64.dmg dist/forkz-$version-arm64.zip dist/SHA256SUMS.txt dist/appcast.xml
 
