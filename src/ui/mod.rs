@@ -5,6 +5,7 @@ mod activity;
 mod column_view;
 pub mod commands;
 mod dialogs;
+mod diff_window;
 mod file_viewer;
 mod filters_editor;
 mod icon_view;
@@ -865,7 +866,7 @@ fn main_menu(
         command(&commands, c);
     }
     separator(&commands);
-    for c in [Command::SyncFolders, Command::SyncBrowsing] {
+    for c in [Command::ComparePanes, Command::SyncFolders, Command::SyncBrowsing] {
         command(&commands, c);
     }
     separator(&commands);
@@ -994,6 +995,7 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         Command::Disconnect => !local || pane.fs().key().starts_with("mount:"),
         Command::OpenWithApp => has_selection,
         Command::NewFile => !pane.fs().read_only() && !pane.showing_results(),
+        Command::ComparePanes => !app.panes[0].showing_results() && !app.panes[1].showing_results(),
         Command::NewFolderWithSelection => has_selection && !pane.fs().read_only() && !pane.showing_results(),
         Command::DeleteImmediately => has_selection && !pane.fs().read_only(),
         Command::Share => has_selection && local,
@@ -1050,6 +1052,7 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::DeleteImmediately => delete_immediately(&pane),
         Command::Share => share(&pane),
         Command::SyncFolders => sync_folders(None),
+        Command::ComparePanes => compare_panes(&app),
         Command::SyncBrowsing => toggle_sync_browsing(),
         Command::ExpandPreview => toggle_preview_expanded(),
         Command::ToggleFilters => update_settings(|s| s.filters_on = !s.filters_on),
@@ -1385,8 +1388,9 @@ pub fn start_on_parent() -> bool {
     app().is_some_and(|a| a.settings.borrow().general.start_on_parent)
 }
 
-/// Compare Files: two files in the pane, or one in each pane, in the
-/// chosen compare tool. Server files are downloaded first.
+/// Compare Files: two files (or folders) in the pane, or one in each pane,
+/// in the built-in compare window or the chosen compare tool (server files
+/// are downloaded for those first).
 fn compare_files(pane: &PaneController, other: &PaneController) {
     let here = pane.target_paths();
     let there = other.selected_paths();
@@ -1411,6 +1415,16 @@ fn compare_files(pane: &PaneController, other: &PaneController) {
         return;
     }
     let tool = app().map(|a| a.settings.borrow().general.compare_tool.clone()).unwrap_or_default();
+    if tool == "forkz" {
+        let [(lfs, lpath), (rfs, rpath)]: [(FsRef, PathBuf); 2] = pair.try_into().expect("two");
+        let (left, right) = (diff_window::Side { fs: lfs, path: lpath }, diff_window::Side { fs: rfs, path: rpath });
+        if kinds[0] == Some(true) {
+            diff_window::compare_folders(left, right);
+        } else {
+            diff_window::compare_files(left, right);
+        }
+        return;
+    }
     std::thread::spawn(move || {
         let local: std::io::Result<Vec<PathBuf>> = pair.iter().map(|(fs, path)| local_copy(fs, path)).collect();
         DispatchQueue::main().exec_async(move || {
@@ -1438,6 +1452,22 @@ fn local_copy(fs: &FsRef, path: &Path) -> std::io::Result<PathBuf> {
     let mut writer = std::fs::File::create(&target)?;
     std::io::copy(&mut reader, &mut writer)?;
     Ok(target)
+}
+
+/// Compare Panes: selects in each pane what differs from the other pane:
+/// items the other does not have, newer files, and files of the same date
+/// but another size. Folders in both are not looked into.
+fn compare_panes(app: &App) {
+    let (left, right) = (&app.panes[0], &app.panes[1]);
+    let (on_left, on_right) = crate::fs::diff::compare_listings(&left.items(), &right.items());
+    left.select_paths(&on_left);
+    right.select_paths(&on_right);
+    if on_left.is_empty() && on_right.is_empty() {
+        dialogs::show_info(
+            "Both panes have the same items.".into(),
+            "Items are compared by name, date, and size. Folders in both panes are not looked into: use Compare Files on them to compare everything inside.".into(),
+        );
+    }
 }
 
 /// Calculate Folder Sizes: for the selected folders, or every folder in
@@ -2332,6 +2362,10 @@ fn pane(index: usize) -> Option<Retained<PaneController>> {
     app().and_then(|a| a.panes.get(index).cloned())
 }
 
+fn active_pane() -> Option<Retained<PaneController>> {
+    app().and_then(|a| a.panes.get(a.active.get()).cloned())
+}
+
 /// Opens the selection with each item's default app (archives too, instead
 /// of browsing them). Server and archive items are downloaded first.
 fn open_with_app(pane: &PaneController) {
@@ -2628,6 +2662,7 @@ fn command_palette() {
         Site(String),
         RemoteFolder(String, PathBuf),
         Synclet(usize),
+        SmartFolder(usize),
         Preset(usize),
         OpenWith(PathBuf, PathBuf),
     }
@@ -2693,6 +2728,13 @@ fn command_palette() {
             .enumerate()
             .map(|(i, s)| item(format!("Sync \u{201c}{}\u{201d}", s.name), "Synclet", Action::Synclet(i))),
     );
+    items.extend(
+        settings
+            .smart_folders
+            .iter()
+            .enumerate()
+            .map(|(i, f)| item(format!("Open {}", f.name), "Smart folder", Action::SmartFolder(i))),
+    );
     // Presets and apps need a selection.
     let pane = app.panes[active].clone();
     let selection = pane.target_paths();
@@ -2728,6 +2770,7 @@ fn command_palette() {
         Some(Action::Site(id)) => site_action(sidebar::SiteAction::Connect, Some(id)),
         Some(Action::RemoteFolder(site, path)) => open_remote_favorite(&site, &path),
         Some(Action::Synclet(index)) => open_synclet(index),
+        Some(Action::SmartFolder(index)) => search::open_smart_folder(index),
         Some(Action::Preset(index)) => rename_with_preset(&pane, index),
         Some(Action::OpenWith(file, app)) => open_with(&file, &app),
         None => {}
@@ -3134,7 +3177,8 @@ pub fn reload_sidebar() {
     let connected: Vec<String> = app.connections.borrow().iter().map(|(id, _)| id.clone()).collect();
     let synclets: Vec<String> = app.settings.borrow().synclets.iter().map(|s| s.name.clone()).collect();
     let presets: Vec<String> = app.settings.borrow().rename_presets.iter().map(|p| p.name.clone()).collect();
-    let saved = sidebar::Saved { synclets: &synclets, presets: &presets };
+    let smart: Vec<String> = app.settings.borrow().smart_folders.iter().map(|f| f.name.clone()).collect();
+    let saved = sidebar::Saved { synclets: &synclets, presets: &presets, smart_folders: &smart };
     app.sidebar.reload(&favorites, &remote, &sites, &connected, saved, current_place(&app));
 }
 

@@ -54,16 +54,37 @@ fn describe(query: &Query) -> String {
     parts.join(", ")
 }
 
-/// Asks what to search for. `local`: Spotlight can be used.
-fn ask(folder: &str, local: bool) -> Option<(Query, bool)> {
+/// What the search dialog asked for.
+struct Asked {
+    query: Query,
+    spotlight: bool,
+    /// Save it as a smart folder.
+    save: bool,
+}
+
+/// Asks what to search for. `local`: Spotlight can be used (and the search
+/// can be saved as a smart folder). `editing`: a smart folder's search and
+/// name, changed instead of searching.
+fn ask(folder: &str, local: bool, editing: Option<(&Query, bool, &str)>) -> Option<Asked> {
     let mtm = mtm();
-    let (last_query, last_spotlight) = LAST.with(|l| (l.borrow().query.clone(), l.borrow().spotlight));
+    let (last_query, last_spotlight) = match editing {
+        Some((query, spotlight, _)) => (query.clone(), spotlight),
+        None => LAST.with(|l| (l.borrow().query.clone(), l.borrow().spotlight)),
+    };
     let alert = NSAlert::new(mtm);
-    alert.setMessageText(&ns(&format!("Search in \u{201c}{folder}\u{201d}")));
-    alert.setInformativeText(&ns(
-        "Searches the folder and everything in it. For names, * matches any text and ? one character; separate several with ;.",
-    ));
-    alert.addButtonWithTitle(&ns("Search"));
+    alert.setMessageText(&ns(&match editing {
+        Some((_, _, name)) => format!("Edit \u{201c}{name}\u{201d}"),
+        None => format!("Search in \u{201c}{folder}\u{201d}"),
+    }));
+    alert.setInformativeText(&ns(&format!(
+        "{} For names, * matches any text and ? one character; separate several with ;.",
+        if editing.is_some() {
+            format!("Searches \u{201c}{folder}\u{201d} and everything in it whenever the smart folder is opened.")
+        } else {
+            "Searches the folder and everything in it.".to_string()
+        }
+    )));
+    alert.addButtonWithTitle(&ns(if editing.is_some() { "Save" } else { "Search" }));
     alert.addButtonWithTitle(&ns("Cancel"));
     let field = NSTextField::initWithFrame(
         NSTextField::alloc(mtm),
@@ -97,6 +118,8 @@ fn ask(folder: &str, local: bool) -> Option<(Query, bool)> {
     let hidden = checkbox("Include hidden items", last_query.include_hidden);
     let spotlight = checkbox("Use Spotlight (fast, for indexed folders)", local && last_spotlight);
     spotlight.setEnabled(local);
+    let save = checkbox("Save as a smart folder in the sidebar", false);
+    save.setHidden(!local || editing.is_some());
     let label = |text: &str| Retained::into_super(Retained::into_super(NSTextField::labelWithString(&ns(text), mtm)));
     let rows: Vec<Retained<NSArray<NSView>>> = [
         (label("Find:"), view(&*field)),
@@ -105,6 +128,7 @@ fn ask(folder: &str, local: bool) -> Option<(Query, bool)> {
         (label("Tag:"), view(&*tag)),
         (label(""), view(&*hidden)),
         (label(""), view(&*spotlight)),
+        (label(""), view(&*save)),
     ]
     .into_iter()
     .map(|(l, c)| NSArray::from_retained_slice(&[l, c]))
@@ -135,11 +159,14 @@ fn ask(folder: &str, local: bool) -> Option<(Query, bool)> {
         return None;
     }
     let use_spotlight = local && spotlight.state() == NSControlStateValueOn;
-    LAST.with(|l| {
-        *l.borrow_mut() =
-            Last { query: query.clone(), spotlight: if local { use_spotlight } else { l.borrow().spotlight } }
-    });
-    Some((query, use_spotlight))
+    if editing.is_none() {
+        LAST.with(|l| {
+            *l.borrow_mut() =
+                Last { query: query.clone(), spotlight: if local { use_spotlight } else { l.borrow().spotlight } }
+        });
+    }
+    let save = local && editing.is_none() && save.state() == NSControlStateValueOn;
+    Some(Asked { query, spotlight: use_spotlight, save })
 }
 
 /// Asks, searches the pane's folder, and shows the results in the pane.
@@ -149,11 +176,73 @@ pub fn run(pane: &PaneController) {
     let fs = fs.browse_fs().unwrap_or(fs);
     let root = pane.location();
     let folder = if root.parent().is_none() && !fs.is_local() { fs.label() } else { title_of(&root) };
-    let Some((query, use_spotlight)) = ask(&folder, fs.is_local()) else { return };
+    let Some(Asked { query, spotlight: use_spotlight, save }) = ask(&folder, fs.is_local(), None) else { return };
+    let name = if save { save_smart_folder(&root, &folder, &query, use_spotlight) } else { None };
+    start(pane.index(), fs, root, folder, query, use_spotlight, name);
+}
+
+/// Saves a search as a smart folder (named first); returns the name.
+fn save_smart_folder(root: &std::path::Path, folder: &str, query: &Query, spotlight: bool) -> Option<String> {
+    let suggested = format!("{} in {folder}", describe(query)).replace(['\u{201c}', '\u{201d}'], "");
+    let name = super::dialogs::prompt("Save Smart Folder", "Name in the sidebar:", "Save", &suggested, None)?;
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let smart = crate::settings::SmartFolder {
+        name: name.clone(),
+        folder: root.to_path_buf(),
+        query: query.clone(),
+        spotlight,
+    };
+    super::update_settings(|s| s.smart_folders.push(smart));
+    super::reload_sidebar();
+    Some(name)
+}
+
+/// Opens a smart folder: searches again and shows what it finds in the
+/// active pane.
+pub fn open_smart_folder(index: usize) {
+    let Some(smart) = super::current_settings().and_then(|s| s.smart_folders.get(index).cloned()) else { return };
+    let Some(pane) = super::active_pane() else { return };
+    if !smart.folder.is_dir() {
+        super::dialogs::show_error(
+            format!("The folder of \u{201c}{}\u{201d} is gone.", smart.name),
+            format!("{} could not be found.", smart.folder.display()),
+        );
+        return;
+    }
+    let folder = title_of(&smart.folder);
+    start(pane.index(), vfs::local(), smart.folder, folder, smart.query, smart.spotlight, Some(smart.name));
+}
+
+/// Changes a smart folder's search.
+pub fn edit_smart_folder(index: usize) {
+    let Some(smart) = super::current_settings().and_then(|s| s.smart_folders.get(index).cloned()) else { return };
+    let folder = title_of(&smart.folder);
+    let Some(asked) = ask(&folder, true, Some((&smart.query, smart.spotlight, &smart.name))) else { return };
+    super::update_settings(|s| {
+        if let Some(saved) = s.smart_folders.get_mut(index) {
+            saved.query = asked.query;
+            saved.spotlight = asked.spotlight;
+        }
+    });
+}
+
+/// Searches in the background and shows the results in a pane (titled
+/// with `name` for a smart folder).
+fn start(
+    index: usize,
+    fs: FsRef,
+    root: PathBuf,
+    folder: String,
+    query: Query,
+    use_spotlight: bool,
+    name: Option<String>,
+) {
     let Some(activity) = super::activity_view() else { return };
     let (note, cancel) =
         activity.begin_task(&format!("Searching \u{201c}{folder}\u{201d} for {}\u{2026}", describe(&query)));
-    let index = pane.index();
     std::thread::spawn(move || {
         let result = find(&fs, &root, &query, use_spotlight, &cancel);
         let stopped = cancel.is_cancelled();
@@ -161,7 +250,7 @@ pub fn run(pane: &PaneController) {
             if let Some(activity) = super::activity_view() {
                 activity.remove(note);
             }
-            show(index, fs, root, folder, query, result, stopped);
+            show(index, fs, root, folder, query, result, stopped, name);
         });
     });
 }
@@ -188,6 +277,7 @@ fn find(
     search::walk(fs, root, query, cancel)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn show(
     index: usize,
     fs: FsRef,
@@ -196,6 +286,7 @@ fn show(
     query: Query,
     result: std::io::Result<Vec<crate::fs::Entry>>,
     stopped: bool,
+    name: Option<String>,
 ) {
     let entries = match result {
         Ok(entries) => entries,
@@ -226,10 +317,47 @@ fn show(
         return;
     }
     let more = if count >= search::LIMIT || stopped { "+" } else { "" };
-    let title = format!("{} in {folder} ({count}{more}){}", describe(&query), if stopped { ", stopped" } else { "" });
+    let what = name.unwrap_or_else(|| format!("{} in {folder}", describe(&query)));
+    let title = format!("{what} ({count}{more}){}", if stopped { ", stopped" } else { "" });
     let results = vfs::results::ResultsFs::new(fs, root.clone(), title, entries);
     if let Some(pane) = super::pane(index) {
         pane.navigate_to(results, root);
         pane.focus();
+    }
+}
+
+/// Renames a smart folder.
+pub fn rename_smart_folder(index: usize) {
+    let Some(smart) = super::current_settings().and_then(|s| s.smart_folders.get(index).cloned()) else { return };
+    let Some(name) = super::dialogs::prompt("Rename Smart Folder", "New name:", "Rename", &smart.name, None) else {
+        return;
+    };
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return;
+    }
+    super::update_settings(|s| {
+        if let Some(saved) = s.smart_folders.get_mut(index) {
+            saved.name = name;
+        }
+    });
+    super::reload_sidebar();
+}
+
+/// Removes a smart folder from the sidebar (the items it finds stay).
+pub fn delete_smart_folder(index: usize) {
+    let Some(smart) = super::current_settings().and_then(|s| s.smart_folders.get(index).cloned()) else { return };
+    if super::dialogs::confirm(
+        &format!("Delete the smart folder \u{201c}{}\u{201d}?", smart.name),
+        "Only the saved search is deleted; the items it finds are not changed.",
+        "Delete",
+        true,
+    ) {
+        super::update_settings(|s| {
+            if index < s.smart_folders.len() {
+                s.smart_folders.remove(index);
+            }
+        });
+        super::reload_sidebar();
     }
 }

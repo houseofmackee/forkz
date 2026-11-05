@@ -4,7 +4,7 @@
 //! status line, Quick Look, and the preview pane work as in the list.
 
 use std::cell::{Cell, OnceCell, RefCell};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
@@ -549,14 +549,25 @@ impl IconView {
     /// Shows the pane's items and selection.
     pub fn sync(&self, entries: Vec<Entry>, local: bool, selected: &[PathBuf]) {
         self.ivars().syncing.set(true);
-        let changed = {
+        let (changed, same_folder) = {
             let current = self.ivars().entries.borrow();
-            current.len() != entries.len() || current.iter().zip(&entries).any(|(a, b)| a != b)
+            let folder = |list: &[Entry]| list.first().and_then(|e| e.path.parent().map(Path::to_path_buf));
+            let changed = current.len() != entries.len() || current.iter().zip(&entries).any(|(a, b)| a != b);
+            (changed, folder(&current) == folder(&entries))
         };
         if changed || self.ivars().local.get() != local {
+            // A change in the same folder (after a drop, say) keeps the
+            // scroll position; reloading would go back to the top.
+            let origin = self.visibleRect().origin;
             *self.ivars().entries.borrow_mut() = entries;
             self.ivars().local.set(local);
             self.reloadData();
+            if same_folder {
+                if let Some(scroll) = self.enclosingScrollView() {
+                    scroll.layoutSubtreeIfNeeded();
+                }
+                self.scrollPoint(origin);
+            }
         }
         let set: Retained<NSMutableSet<NSIndexPath>> = NSMutableSet::new();
         let mut first = None;

@@ -12,14 +12,14 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 
 ### Two panes, on the Mac and on servers
 
-- Two panes side by side, or stacked one above the other (View > Stack Panes), each with tabs, and a sidebar with favorites, volumes, saved sites, synclets, and Finder tags. The sidebar, either pane, and the preview pane can each be hidden.
+- Two panes side by side, or stacked one above the other (View > Stack Panes), each with tabs, and a sidebar with favorites, smart folders, volumes, saved sites, synclets, and Finder tags. The sidebar, either pane, and the preview pane can each be hidden.
 - A line in your accent color along the top of the active pane shows where commands, new connections, and Go to Folder will open. Tabs show a close button when the pointer is over them.
 - A sortable list (name, date modified, size, kind, Git status, and more) with ".." on top to go up, groups by kind, date, or size, a clickable path bar, a filter field, and a status line with the selection size and free space; or icons, or columns, as in Finder
 - A viewer for text and hex (F3), and filename filters that hide items in the lists and leave them out of copies
 - Copy, move, duplicate, trash, rename, new file, and new folder, with progress, Stop, Pause, and a conflict dialog (Replace, Replace if Older, Keep Both, Skip, Merge, and "Apply to all")
 - Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files
 - Quick Look, a hidden files toggle, and live updates when folders change
-- Folder sizes, SHA-256 and MD5 checksums, Compare Files in your diff tool, and Open in Terminal with your terminal app
+- Folder sizes, SHA-256 and MD5 checksums, a built-in compare for files and folders (or your own diff tool), Compare Panes, and Open in Terminal with your terminal app
 - Workspaces: saved sets of tabs for both panes, including server folders
 - A transfer queue: speed limits, Pause and Resume, Pause All and Stop All, and waiting transfers that can be started now or moved up and down (right-click a transfer), plus rules for errors
 - Zoom (Command-= and Command-minus) and a Settings window (Command-comma) with color themes, text size, row spacing, and your own keyboard shortcuts
@@ -55,6 +55,20 @@ Select several items and press Return (or Option-Command-R). Rules (replace, reg
 
 Search (Shift-Command-F) finds items by name or contents, by kind (folders, images, movies, audio, documents, archives, source code, and more), and by Finder tag, or any mix of these. It uses Spotlight on the Mac and also works on servers and in archives. The results open in a pane, with a column for the folder each one is in, and work like any other list.
 
+A search on the Mac can be saved as a smart folder ("Save as a smart folder in the sidebar"): clicking it in the sidebar searches again and shows what it finds now. Right-click a smart folder to change its search, rename it, or delete it.
+
+### Compare files and folders
+
+![Two versions of a JavaScript file side by side, with changed lines in blue, the changed words marked, and added lines in green](docs/images/compare-files.png)
+
+Compare Files (Control-Command-C) compares two selected files, or one selected in each pane, in a window of its own: side by side, line by line, with changed lines in blue (and the words that changed marked), removed lines in red, and added lines in green. Command-Down Arrow and Command-Up Arrow move to the next and previous change, and whitespace or case can be ignored. Binary files are compared byte by byte. It works on the Mac, on servers, and in archives.
+
+![Two website folders compared: files only on one side, files of different sizes, and identical files, with each folder's contents indented below it](docs/images/compare-folders.png)
+
+Two folders are compared with everything in them: what only one side has, what differs in size or date (or in contents, with Compare Contents), and what is the same. Double-click two files to compare them. Settings > General can send Compare Files to FileMerge, Kaleidoscope, Beyond Compare, BBEdit, Visual Studio Code, or Araxis Merge instead.
+
+Compare Panes (Commands menu) selects, in each pane, the items that differ from the other pane: what the other pane does not have, files that are newer, and files of the same date but a different size. Copy the selection over to bring the folders in line.
+
 ### Sync Folders and synclets
 
 ![Sync Folders comparing a local folder with a staging server, showing four copies and one delete](docs/images/sync.png)
@@ -73,7 +87,7 @@ Transfers beyond the simultaneous limit (Commands menu, default 2) wait in a que
 
 ![The command palette showing commands and saved sites that match "on"](docs/images/palette.png)
 
-The command palette (Option-Command-P) runs any command and goes anywhere: places, favorites, devices, sites, server folders, synclets, and workspaces. It also applies rename presets to the selection and opens the selected file with any app that can open it.
+The command palette (Option-Command-P) runs any command and goes anywhere: places, favorites, devices, sites, server folders, synclets, smart folders, and workspaces. It also applies rename presets to the selection and opens the selected file with any app that can open it.
 
 ### Color themes
 
@@ -191,7 +205,8 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 | Command-K, Command-E | Connect to a server, disconnect |
 | Command-I | Permissions |
 | Option-Command-S | Calculate folder sizes |
-| Control-Command-C | Compare files |
+| Control-Command-C | Compare files or folders |
+| Command-Down Arrow, Command-Up Arrow | Next change, previous change (when comparing files) |
 | Shift-Command-. | Show or hide hidden files |
 | Command-1, Command-2, Command-3 | Show as a list, as icons, as columns |
 | Shift-Command-P | Show or hide the preview pane |

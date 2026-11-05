@@ -85,6 +85,7 @@ pub enum Command {
     StackPanes,
     ViewFile,
     ToggleFilters,
+    ComparePanes,
 }
 
 impl Command {
@@ -189,6 +190,7 @@ impl Command {
         Command::StackPanes,
         Command::ViewFile,
         Command::ToggleFilters,
+        Command::ComparePanes,
     ];
 
     pub fn tag(self) -> isize {
@@ -297,6 +299,7 @@ impl Command {
             Command::StackPanes => "Stack Panes",
             Command::ViewFile => "View",
             Command::ToggleFilters => "Use Filename Filters",
+            Command::ComparePanes => "Compare Panes",
         }
     }
 
@@ -386,6 +389,7 @@ impl Command {
             Command::ViewAsColumns => ("3", cmd),
             Command::StackPanes => ("", cmd),
             Command::ToggleFilters => ("", cmd),
+            Command::ComparePanes => ("", cmd),
             // F3, as in Total Commander (also handled in the lists).
             Command::ViewFile => ("\u{f706}", NSEventModifierFlags::empty()),
         }

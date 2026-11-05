@@ -1991,6 +1991,11 @@ impl PaneController {
         rows.len()
     }
 
+    /// The items the folder shows (without "..").
+    pub fn items(&self) -> Vec<crate::fs::Entry> {
+        self.ivars().state.borrow().entries().to_vec()
+    }
+
     /// How many items the folder shows.
     pub fn item_count(&self) -> usize {
         self.ivars().state.borrow().entries().len()

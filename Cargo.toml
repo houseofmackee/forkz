@@ -1,6 +1,6 @@
 [package]
 name = "forkz"
-version = "0.11.1"
+version = "0.12.0"
 edition = "2024"
 description = "A native dual-pane file manager for macOS"
 license = "MIT OR Apache-2.0"
@@ -45,6 +45,7 @@ ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+similar = "3.2.1"
 
 [dev-dependencies]
 tempfile = "3"

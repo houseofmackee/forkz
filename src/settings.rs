@@ -47,6 +47,24 @@ pub struct Settings {
     pub sync: crate::fs::sync::Options,
     /// Saved syncs, in the sidebar.
     pub synclets: Vec<Synclet>,
+    /// Saved searches, in the sidebar.
+    pub smart_folders: Vec<SmartFolder>,
+}
+
+/// A saved search on the Mac: clicking it in the sidebar searches again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SmartFolder {
+    pub name: String,
+    /// Where it searches (and everything in it).
+    pub folder: PathBuf,
+    #[serde(default)]
+    pub query: crate::fs::search::Query,
+    #[serde(default = "yes")]
+    pub spotlight: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// A saved sync: two folders and how to sync them.
@@ -150,7 +168,7 @@ pub struct GeneralSettings {
 
 impl Default for GeneralSettings {
     fn default() -> Self {
-        GeneralSettings { start_on_parent: false, terminal: "terminal".into(), compare_tool: "filemerge".into() }
+        GeneralSettings { start_on_parent: false, terminal: "terminal".into(), compare_tool: "forkz".into() }
     }
 }
 
@@ -166,6 +184,8 @@ pub const TERMINALS: &[(&str, &str, &str)] = &[
 
 /// Compare tools: (key, name, bundle identifier of the app it needs).
 pub const COMPARE_TOOLS: &[(&str, &str, &str)] = &[
+    // The built-in diff (no app needed).
+    ("forkz", "forkz (built in)", ""),
     ("filemerge", "FileMerge", "com.apple.FileMerge"),
     ("kaleidoscope", "Kaleidoscope", "app.kaleidoscope.v4,com.kaleidoscopeapp.v3,com.blackpixel.kaleidoscope"),
     ("beyondcompare", "Beyond Compare", "com.ScooterSoftware.BeyondCompare"),
@@ -343,6 +363,7 @@ impl Default for Settings {
             sidebar_width: 180.0,
             sync: crate::fs::sync::Options::default(),
             synclets: Vec::new(),
+            smart_folders: Vec::new(),
         }
     }
 }

@@ -7,6 +7,18 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-05
+
+### Added
+
+- A built-in compare tool for Compare Files (Control-Command-C), the default for new installs (choose "forkz (built in)" in Settings > General to switch from another tool): two files side by side, line by line, with changed lines and the words that changed marked, removed and added lines, Next and Previous Change (Command-Down and Command-Up Arrow), and options to ignore whitespace and case; binary files are compared byte by byte. Two folders are compared with everything in them, showing what only one side has, what differs in size, date, or contents, and what is the same; double-click two files to compare them. Works on the Mac, on servers, and in archives.
+- Compare Panes (Commands menu): selects, in each pane, the items that differ from the other pane (items the other does not have, newer files, and files of the same date but a different size).
+- Smart folders: a search on the Mac can be saved in the sidebar, and clicking it searches again. Right-click one to change its search, rename it, or delete it. They are in the command palette too.
+
+### Fixed
+
+- Icon view jumped back to the top after a drop onto a folder that was not selected (or any other change in the folder); it now stays where it was scrolled.
+
 ## [0.11.1] - 2026-11-05
 
 ### Changed
@@ -232,7 +244,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/houseofmackee/forkz/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/houseofmackee/forkz/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/houseofmackee/forkz/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/houseofmackee/forkz/compare/v0.10.0...v0.10.1

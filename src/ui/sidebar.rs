@@ -43,6 +43,11 @@ enum Row {
         detail: String,
         connected: bool,
     },
+    /// A saved search (by its place in the settings).
+    SmartFolder {
+        index: usize,
+        name: String,
+    },
     /// A saved sync (by its place in the settings).
     Synclet {
         index: usize,
@@ -125,6 +130,24 @@ define_class!(
             };
             if site.is_some() {
                 super::site_action(SiteAction::Disconnect, site);
+            }
+        }
+
+        /// Smart folder menu items: 1 edit, 2 rename, 3 delete.
+        #[unsafe(method(smartFolderAction:))]
+        fn smart_folder_action(&self, sender: &NSMenuItem) {
+            let row = self.ivars().menu_row.take();
+            let index = row.and_then(|r| match self.ivars().rows.borrow().get(r) {
+                Some(Row::SmartFolder { index, .. }) => Some(*index),
+                _ => None,
+            });
+            if let Some(index) = index {
+                let tag = sender.tag();
+                dispatch2::DispatchQueue::main().exec_async(move || match tag {
+                    1 => super::search::edit_smart_folder(index),
+                    2 => super::search::rename_smart_folder(index),
+                    _ => super::search::delete_smart_folder(index),
+                });
             }
         }
 
@@ -260,6 +283,11 @@ define_class!(
                     self.deselect_soon();
                     super::open_synclet(index);
                 }
+                Some(Row::SmartFolder { index, .. }) => {
+                    // Clicked again later: searched again.
+                    self.deselect_soon();
+                    dispatch2::DispatchQueue::main().exec_async(move || super::search::open_smart_folder(index));
+                }
                 Some(Row::Preset { index, .. }) => {
                     self.deselect_soon();
                     dispatch2::DispatchQueue::main().exec_async(move || super::apply_rename_preset(index, None));
@@ -305,6 +333,22 @@ define_class!(
                 Some(Row::Header("Sites")) | None => {
                     add_site_item("New Site\u{2026}", SiteAction::New);
                     add_site_item("Import from FileZilla\u{2026}", SiteAction::Import);
+                    return;
+                }
+                Some(Row::SmartFolder { .. }) => {
+                    for (tag, title) in [(1, "Edit Search\u{2026}"), (2, "Rename\u{2026}"), (3, "Delete Smart Folder")] {
+                        let item = unsafe {
+                            NSMenuItem::initWithTitle_action_keyEquivalent(
+                                NSMenuItem::alloc(self.mtm()),
+                                &ns(title),
+                                Some(sel!(smartFolderAction:)),
+                                &ns(""),
+                            )
+                        };
+                        item.setTag(tag);
+                        unsafe { item.setTarget(Some(self)) };
+                        menu.addItem(&item);
+                    }
                     return;
                 }
                 Some(Row::Synclet { .. }) => {
@@ -405,6 +449,10 @@ impl Sidebar {
                 }
                 view
             }
+            Row::SmartFolder { name, .. } => {
+                let icon = symbol("folder.badge.gearshape", name).unwrap_or_else(super::util::folder_icon);
+                cell(self.mtm(), name, &icon, Some(accent()), Some("Search again and show what is found"), zoom)
+            }
             Row::Synclet { name, .. } => {
                 let icon = symbol("arrow.triangle.2.circlepath", name).unwrap_or_else(super::util::folder_icon);
                 cell(self.mtm(), name, &icon, Some(accent()), Some("Open this sync"), zoom)
@@ -489,7 +537,7 @@ impl Sidebar {
         saved: Saved,
         current: Current,
     ) {
-        let Saved { synclets, presets } = saved;
+        let Saved { synclets, presets, smart_folders } = saved;
         let mut rows = vec![Row::Header("Favorites")];
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let standard = [
@@ -519,6 +567,12 @@ impl Sidebar {
                 detail: format!("{}{}", site.address(), favorite.path.display()),
                 connected: connected.contains(&favorite.site_id),
             });
+        }
+        if !smart_folders.is_empty() {
+            rows.push(Row::Header("Smart Folders"));
+            for (index, name) in smart_folders.iter().enumerate() {
+                rows.push(Row::SmartFolder { index, name: name.clone() });
+            }
         }
         rows.push(Row::Header("Locations"));
         for (title, path) in volumes() {
@@ -650,6 +704,7 @@ impl Sidebar {
 pub struct Saved<'a> {
     pub synclets: &'a [String],
     pub presets: &'a [String],
+    pub smart_folders: &'a [String],
 }
 
 /// What the active pane shows, to highlight it in the sidebar.

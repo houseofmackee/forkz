@@ -8,20 +8,25 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 use super::Entry;
 use super::glob::Patterns;
 use super::ops::CancelToken;
 use crate::vfs::FsRef;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Mode {
     /// Names containing the text, or matching it if it has wildcards.
+    #[default]
     Name,
     /// Files whose contents contain the text (ignoring case).
     Contents,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Query {
     pub text: String,
     pub mode: Mode,
@@ -33,7 +38,8 @@ pub struct Query {
 }
 
 /// Kinds of items to search for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Kind {
     #[default]
     Any,

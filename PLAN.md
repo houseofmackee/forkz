@@ -91,6 +91,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Preview pane (info, preview, activity, log)
 - [x] Filter field on each list
 - [x] Search (name, content, kind, tag; Spotlight locally, scanning remotely), Select Matching
+- [x] Smart folders (saved searches in the sidebar)
 - [x] Folder sync with preview, saved as "synclets", and sync browsing
 - [x] Multi-rename with rules and presets (presets in the sidebar take dropped items)
 - [x] Archives browsed as folders (libarchive), extracting by copying out
@@ -113,7 +114,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 
 ## Phase 4: extras
 
-- [ ] Built-in diff for text and folders
+- [x] Built-in diff for text and folders; Compare Panes (selects what differs)
 - [ ] Terminal pane that follows the current folder
 - [x] Command palette (commands, places, sites, synclets, workspaces, rename presets, Open With)
 - [x] Transfer speed limits, Pause and Resume, and error rules

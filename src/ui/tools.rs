@@ -36,7 +36,11 @@ pub fn installed_terminals() -> Vec<(&'static str, &'static str)> {
 pub fn installed_compare_tools() -> Vec<(&'static str, &'static str)> {
     COMPARE_TOOLS
         .iter()
-        .filter(|(key, _, id)| if *key == "filemerge" { filemerge_path().is_some() } else { app_path(id).is_some() })
+        .filter(|(key, _, id)| match *key {
+            "forkz" => true,
+            "filemerge" => filemerge_path().is_some(),
+            _ => app_path(id).is_some(),
+        })
         .map(|(key, name, _)| (*key, *name))
         .collect()
 }
@@ -126,7 +130,7 @@ fn run_in_warp(app: &Path, command: &str) -> io::Result<()> {
 
 /// Compares two local files in the chosen tool.
 pub fn compare(key: &str, left: &Path, right: &Path) -> io::Result<()> {
-    let tool = COMPARE_TOOLS.iter().find(|(k, _, _)| *k == key).or_else(|| COMPARE_TOOLS.first());
+    let tool = COMPARE_TOOLS.iter().find(|(k, _, _)| *k == key && *k != "forkz").or_else(|| COMPARE_TOOLS.get(1));
     let Some((key, name, id)) = tool else { return Err(io::Error::other("No compare tool is set.")) };
     let not_installed = || io::Error::new(io::ErrorKind::NotFound, format!("{name} is not installed."));
     let spawn = |program: &Path, args: &[&str]| -> io::Result<()> {

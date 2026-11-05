@@ -2,6 +2,7 @@
 //! and formatting sizes. Pure Rust, so it can be tested without AppKit.
 
 pub mod checksum;
+pub mod diff;
 pub mod filters;
 pub mod git;
 pub mod glob;
