@@ -5,16 +5,15 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::PathBuf;
-use std::ptr::NonNull;
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
 use objc2::{ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSBox, NSBoxType, NSCollectionView, NSCollectionViewDataSource, NSCollectionViewDelegate,
-    NSCollectionViewDropOperation, NSCollectionViewFlowLayout, NSCollectionViewItem, NSColor, NSDragOperation,
-    NSDraggingInfo, NSDraggingSession, NSEvent, NSFont, NSImageView, NSIndexPathNSCollectionViewAdditions,
-    NSLineBreakMode, NSPasteboardWriting, NSResponder, NSTextAlignment, NSTextField, NSView, NSViewController,
+    NSCollectionViewFlowLayout, NSCollectionViewItem, NSColor, NSDragOperation, NSDraggingInfo, NSDraggingSession,
+    NSEvent, NSFont, NSImageView, NSIndexPathNSCollectionViewAdditions, NSLineBreakMode, NSPasteboardWriting,
+    NSResponder, NSTextAlignment, NSTextField, NSView, NSViewController,
 };
 use objc2_foundation::{
     NSArray, NSEdgeInsets, NSIndexPath, NSInteger, NSMutableSet, NSObjectProtocol, NSPoint, NSRect, NSSet, NSSize,
@@ -111,6 +110,9 @@ impl IconItem {
                 NSSize::new(icon, icon),
             ),
         );
+        // An image view takes drags of image files for itself (and refuses
+        // them when not editable), which would hide the folder underneath.
+        image.unregisterDraggedTypes();
         let label = NSTextField::labelWithString(&ns(""), mtm);
         label.setFont(Some(&NSFont::systemFontOfSize(text)));
         label.setAlignment(NSTextAlignment::Center);
@@ -160,6 +162,14 @@ impl IconItem {
         }
     }
 
+    /// Shown while a drag would drop onto this folder.
+    fn show_as_drop_target(&self) {
+        let Some(highlight) = self.highlight() else { return };
+        let accent = super::themed::colors().map_or_else(NSColor::controlAccentColor, |c| c.accent);
+        highlight.setFillColor(&accent.colorWithAlphaComponent(0.35));
+        highlight.setHidden(false);
+    }
+
     fn highlight(&self) -> Option<Retained<NSBox>> {
         if !self.isViewLoaded() {
             return None;
@@ -193,6 +203,8 @@ pub struct IconIvars {
     local: Cell<bool>,
     /// Set while forkz changes the selection itself.
     syncing: Cell<bool>,
+    /// The folder icon highlighted under a drag.
+    drop_index: Cell<Option<NSInteger>>,
 }
 
 define_class!(
@@ -338,55 +350,61 @@ define_class!(
                 pane.remember_drag(dragged);
             }
         }
-
-        #[unsafe(method(collectionView:validateDrop:proposedIndexPath:dropOperation:))]
-        fn validate_drop(
-            &self,
-            _view: &NSCollectionView,
-            info: &ProtocolObject<dyn NSDraggingInfo>,
-            path: *mut *mut NSIndexPath,
-            operation: NonNull<NSCollectionViewDropOperation>,
-        ) -> NSDragOperation {
-            let icons = self.view();
-            let under = icons.as_ref().and_then(|i| i.folder_under(info));
-            // Over a folder the drop goes onto it (accept looks again): the
-            // proposed drop between items is left as it is.
-            let _ = (path, operation);
-            let target = match under {
-                Some((_, folder)) => Some(folder),
-                None => icons.as_ref().and_then(|i| i.pane()).map(|p| p.location()),
-            };
-            match (icons.and_then(|i| i.pane()), target) {
-                (Some(pane), Some(target)) => pane.drop_operation(info, &target),
-                _ => NSDragOperation::None,
-            }
-        }
-
-        #[unsafe(method(collectionView:acceptDrop:indexPath:dropOperation:))]
-        fn accept_drop(
-            &self,
-            _view: &NSCollectionView,
-            info: &ProtocolObject<dyn NSDraggingInfo>,
-            path: &NSIndexPath,
-            operation: NSCollectionViewDropOperation,
-        ) -> bool {
-            let _ = (path, operation);
-            let icons = self.view();
-            let target = match icons.as_ref().and_then(|i| i.folder_under(info)) {
-                Some((_, folder)) => Some(folder),
-                None => icons.as_ref().and_then(|i| i.pane()).map(|p| p.location()),
-            };
-            match (icons.and_then(|i| i.pane()), target) {
-                (Some(pane), Some(target)) => pane.drop_into(info, target),
-                _ => false,
-            }
-        }
     }
 
 );
 
 impl IconSource {
     fn view(&self) -> Option<Retained<IconView>> {
+        self.ivars().get().and_then(Weak::load)
+    }
+}
+
+define_class!(
+    /// The icon view's scroll view, which takes drops (so the empty space
+    /// below the icons counts too): onto the folder icon under the pointer,
+    /// or into the pane's folder.
+    #[unsafe(super(objc2_app_kit::NSScrollView, NSView, NSResponder, objc2_foundation::NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "ForkzIconScroll"]
+    #[ivars = OnceCell<Weak<IconView>>]
+    pub struct IconScroll;
+
+    impl IconScroll {
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.icons().map_or(NSDragOperation::None, |icons| icons.drag_moved(info))
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.icons().map_or(NSDragOperation::None, |icons| icons.drag_moved(info))
+        }
+
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, _info: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+            if let Some(icons) = self.icons() {
+                icons.show_drop_target(None);
+            }
+        }
+
+        #[unsafe(method(prepareForDragOperation:))]
+        fn prepare_for_drag(&self, _info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            true
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            match self.icons() {
+                Some(icons) => icons.drop_items(info),
+                None => false,
+            }
+        }
+    }
+);
+
+impl IconScroll {
+    fn icons(&self) -> Option<Retained<IconView>> {
         self.ivars().get().and_then(Weak::load)
     }
 }
@@ -399,6 +417,7 @@ impl IconView {
             entries: RefCell::new(Vec::new()),
             local: Cell::new(true),
             syncing: Cell::new(false),
+            drop_index: Cell::new(None),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         let _ = this.ivars().pane.set(Weak::from_retained(&pane.retain()));
@@ -413,7 +432,6 @@ impl IconView {
         }
         this.setSelectable(true);
         this.setAllowsMultipleSelection(true);
-        this.registerForDraggedTypes(&NSArray::from_retained_slice(&super::pane_view::drag_types()));
         for local in [false, true] {
             this.setDraggingSourceOperationMask_forLocal(
                 NSDragOperation::Copy | NSDragOperation::Move | NSDragOperation::Generic,
@@ -454,6 +472,55 @@ impl IconView {
         let background = super::themed::colors().map_or_else(NSColor::controlBackgroundColor, |c| c.background);
         self.setBackgroundColors(Some(&NSArray::from_retained_slice(&[background])));
         self.reloadData();
+    }
+
+    /// Items dropped: onto the folder icon under the pointer, or into the
+    /// pane's folder.
+    fn drop_items(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+        self.show_drop_target(None);
+        match (self.pane(), self.drop_target(info)) {
+            (Some(pane), Some(target)) => pane.drop_into(info, target),
+            _ => false,
+        }
+    }
+
+    /// Where a drop goes: the folder icon under the pointer, or the pane's
+    /// folder.
+    fn drop_target(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> Option<PathBuf> {
+        match self.folder_under(info) {
+            Some((_, folder)) => Some(folder),
+            None => self.pane().map(|pane| pane.location()),
+        }
+    }
+
+    /// The operation for a drag where it is now, with its folder shown.
+    fn drag_moved(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+        let under = self.folder_under(info);
+        let operation = match (self.pane(), self.drop_target(info)) {
+            (Some(pane), Some(target)) => pane.drop_operation(info, &target),
+            _ => NSDragOperation::None,
+        };
+        let highlight = under.map(|(index, _)| index).filter(|_| operation != NSDragOperation::None);
+        self.show_drop_target(highlight);
+        operation
+    }
+
+    /// Highlights the folder icon a drop would go to (or none).
+    fn show_drop_target(&self, index: Option<NSInteger>) {
+        let previous = self.ivars().drop_index.replace(index);
+        if previous == index {
+            return;
+        }
+        let item = |i: NSInteger| {
+            self.itemAtIndexPath(&NSIndexPath::indexPathForItem_inSection(i, 0))
+                .and_then(|item| item.downcast::<IconItem>().ok())
+        };
+        if let Some(old) = previous.and_then(item) {
+            old.update_highlight();
+        }
+        if let Some(new) = index.and_then(item) {
+            new.show_as_drop_target();
+        }
     }
 
     /// The folder icon under a drag, if any (with its index).
@@ -513,11 +580,15 @@ impl IconView {
     }
 }
 
-/// The icon view inside its scroll view, ready for the pane.
+/// The icon view inside its scroll view (which takes drops), ready for
+/// the pane.
 pub fn scroll_view(icons: &IconView, mtm: MainThreadMarker) -> Retained<objc2_app_kit::NSScrollView> {
-    let scroll = objc2_app_kit::NSScrollView::new(mtm);
+    let scroll = IconScroll::alloc(mtm).set_ivars(OnceCell::new());
+    let scroll: Retained<IconScroll> = unsafe { msg_send![super(scroll), initWithFrame: NSRect::ZERO] };
+    let _ = scroll.ivars().set(Weak::from_retained(&icons.retain()));
     scroll.setDocumentView(Some(icons));
     scroll.setHasVerticalScroller(true);
     scroll.setAutohidesScrollers(true);
-    scroll
+    scroll.registerForDraggedTypes(&NSArray::from_retained_slice(&super::pane_view::drag_types()));
+    scroll.into_super()
 }

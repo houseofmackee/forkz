@@ -218,8 +218,10 @@ impl ColumnBrowser {
         this.setSendsActionOnArrowKeys(true);
         this.setTakesTitleFromPreviousColumn(false);
         this.setColumnResizingType(NSBrowserColumnResizingType::UserColumnResizing);
-        this.setMinColumnWidth(160.0);
-        this.setDefaultColumnWidth(220.0);
+        this.setMinColumnWidth(140.0);
+        this.setDefaultColumnWidth(300.0);
+        // Widths the user sets are kept (per pane).
+        this.setColumnsAutosaveName(&ns(&format!("ForkzColumns{}", pane.index())));
         unsafe {
             this.setDelegate(Some(ProtocolObject::from_ref(&*this)));
             this.setTarget(Some(&this));
@@ -311,14 +313,24 @@ impl ColumnBrowser {
     /// An item's label: its icon, then its name (the browser's text cells
     /// show images as attachments).
     fn label(&self, path: &Path) -> Retained<AnyObject> {
-        use objc2_app_kit::{NSAttributedStringAttachmentConveniences, NSFontAttributeName, NSTextAttachment};
+        use objc2_app_kit::{
+            NSAttributedStringAttachmentConveniences, NSFontAttributeName, NSMutableParagraphStyle,
+            NSParagraphStyleAttributeName, NSTextAttachment,
+        };
         use objc2_foundation::{NSAttributedString, NSDictionary, NSMutableAttributedString};
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let (text, _) = super::pane_view::look_metrics();
         let font = NSFont::systemFontOfSize(text);
+        // One line, shortened in the middle when the column is narrow (a
+        // wrapped second line would not show, leaving the row blank).
+        let paragraph = NSMutableParagraphStyle::new();
+        paragraph.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingMiddle);
         let attributes: Retained<NSDictionary<NSString, AnyObject>> = NSDictionary::from_retained_objects(
-            &[unsafe { NSFontAttributeName }],
-            &[Retained::into_super(Retained::into_super(font.clone()))],
+            &[unsafe { NSFontAttributeName }, unsafe { NSParagraphStyleAttributeName }],
+            &[
+                Retained::into_super(Retained::into_super(font.clone())),
+                Retained::into_super(Retained::into_super(Retained::into_super(paragraph.clone()))),
+            ],
         );
         let label = NSMutableAttributedString::new();
         if let Some(entry) = self.entry(path) {
@@ -341,6 +353,14 @@ impl ColumnBrowser {
         }
         let title = unsafe { NSAttributedString::new_with_attributes(&ns(&name), &attributes) };
         label.appendAttributedString(&title);
+        // The style counts from a paragraph's first character: the icon.
+        unsafe {
+            label.addAttribute_value_range(
+                NSParagraphStyleAttributeName,
+                &paragraph,
+                objc2_foundation::NSRange::new(0, label.length()),
+            );
+        }
         Retained::into_super(Retained::into_super(Retained::into_super(label)))
     }
 
@@ -387,8 +407,13 @@ impl ColumnBrowser {
         if let Some(entries) = entries {
             self.ivars().cache.borrow_mut().insert(location.to_path_buf(), entries);
         }
-        if !same_fs || !inside || reload_all {
+        if !same_fs || !inside || (reload_all && first_showing) {
             self.loadColumnZero();
+        } else if reload_all {
+            // Changes: every column again, each where it was scrolled.
+            for column in 0..=self.lastColumn() {
+                self.reloadColumn(column);
+            }
         }
         let column = self.column_of(location).unwrap_or(0);
         if column <= self.lastColumn() {
@@ -418,8 +443,20 @@ impl ColumnBrowser {
                 self.selectRowIndexes_inColumn(&set, column);
             }
         }
+        // The next column as far as it fits, but the folder's own first
+        // (a narrow pane would otherwise show mostly the next column).
         self.scrollColumnToVisible(self.lastColumn());
+        self.reveal_column(column);
         self.ivars().syncing.set(false);
+    }
+
+    /// Scrolls a column fully into view (scrollColumnToVisible leaves a
+    /// partly visible column as it is).
+    fn reveal_column(&self, column: NSInteger) {
+        let scroll = self.subviews().iter().find_map(|v| v.downcast::<objc2_app_kit::NSScrollView>().ok());
+        let Some(document) = scroll.and_then(|s| s.documentView()) else { return };
+        let frame = document.convertRect_fromView(self.frameOfColumn(column), Some(self));
+        document.scrollRectToVisible(frame);
     }
 
     /// Forgets listings (after changes, or the hidden-files setting or

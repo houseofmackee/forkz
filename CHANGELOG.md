@@ -7,6 +7,19 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-05
+
+### Changed
+
+- Column view columns start wider (300 points instead of 220), and the widths you set are kept between launches.
+
+### Fixed
+
+- Dropping items onto a folder icon (or into the empty space) in icon view did nothing: the icon pictures took the drag for themselves and refused it.
+- Column view jumped back to the top of the list after a drop or any other change in the folder; it now keeps each column where it was scrolled.
+- Names too long for a narrow column view column were not shown at all; they are now shortened in the middle.
+- In a narrow pane, column view scrolled the current folder's column mostly out of sight to show the next one; the current column now stays in view.
+
 ## [0.11.0] - 2026-11-05
 
 ### Added
@@ -219,7 +232,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/houseofmackee/forkz/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/houseofmackee/forkz/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/houseofmackee/forkz/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/houseofmackee/forkz/compare/v0.9.2...v0.10.0
