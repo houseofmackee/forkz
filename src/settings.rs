@@ -38,6 +38,11 @@ pub struct Settings {
     /// Hidden with Hide Sidebar, and its width when shown.
     pub sidebar_hidden: bool,
     pub sidebar_width: f64,
+    /// View > Stack Panes: one above the other instead of side by side.
+    pub stacked_panes: bool,
+    /// Settings > Filters, and View > Use Filename Filters.
+    pub filters: Vec<crate::fs::filters::NameFilter>,
+    pub filters_on: bool,
     /// The Sync window's options, as last used.
     pub sync: crate::fs::sync::Options,
     /// Saved syncs, in the sidebar.
@@ -102,6 +107,14 @@ impl Default for AppearanceSettings {
             alternating_rows: true,
         }
     }
+}
+
+fn is_list_view(view: &crate::pane::ViewMode) -> bool {
+    *view == crate::pane::ViewMode::List
+}
+
+fn is_default_group(group: &crate::pane::GroupBy) -> bool {
+    *group == crate::pane::GroupBy::None
 }
 
 pub const THEMES: &[(&str, &str)] = &[("system", "Same as macOS"), ("light", "Light"), ("dark", "Dark")];
@@ -177,6 +190,7 @@ pub const COLUMNS: &[(&str, &str)] = &[
     ("permissions", "Permissions"),
     ("owner", "Owner"),
     ("group", "Group"),
+    ("git", "Git"),
 ];
 
 /// Which optional columns show (Name always does), for folders on the Mac
@@ -273,6 +287,12 @@ impl Default for SftpSettings {
 pub struct PaneSettings {
     pub location: PathBuf,
     pub sort: Sort,
+    /// View > Group By.
+    #[serde(skip_serializing_if = "crate::settings::is_default_group")]
+    pub group_by: crate::pane::GroupBy,
+    /// View > as List, as Icons, or as Columns.
+    #[serde(skip_serializing_if = "crate::settings::is_list_view")]
+    pub view: crate::pane::ViewMode,
     /// Every tab's folder (on the Mac), in order; empty for one tab.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tabs: Vec<PathBuf>,
@@ -288,6 +308,8 @@ impl Default for PaneSettings {
         PaneSettings {
             location: dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
             sort: Sort::default(),
+            group_by: crate::pane::GroupBy::None,
+            view: crate::pane::ViewMode::List,
             tabs: Vec::new(),
             active_tab: 0,
             hidden: false,
@@ -315,6 +337,9 @@ impl Default for Settings {
             toolbar_version: 0,
             workspaces: Vec::new(),
             sidebar_hidden: false,
+            stacked_panes: false,
+            filters: crate::fs::filters::defaults(),
+            filters_on: true,
             sidebar_width: 180.0,
             sync: crate::fs::sync::Options::default(),
             synclets: Vec::new(),

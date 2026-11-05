@@ -12,9 +12,10 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 
 ### Two panes, on the Mac and on servers
 
-- Two panes side by side, each with tabs, and a sidebar with favorites, volumes, saved sites, synclets, and Finder tags. The sidebar, either pane, and the preview pane can each be hidden.
+- Two panes side by side, or stacked one above the other (View > Stack Panes), each with tabs, and a sidebar with favorites, volumes, saved sites, synclets, and Finder tags. The sidebar, either pane, and the preview pane can each be hidden.
 - A line in your accent color along the top of the active pane shows where commands, new connections, and Go to Folder will open. Tabs show a close button when the pointer is over them.
-- A sortable list (name, date modified, size, kind, and more) with ".." on top to go up, a clickable path bar, a filter field, and a status line with the selection size and free space
+- A sortable list (name, date modified, size, kind, Git status, and more) with ".." on top to go up, groups by kind, date, or size, a clickable path bar, a filter field, and a status line with the selection size and free space; or icons, or columns, as in Finder
+- A viewer for text and hex (F3), and filename filters that hide items in the lists and leave them out of copies
 - Copy, move, duplicate, trash, rename, new file, and new folder, with progress, Stop, Pause, and a conflict dialog (Replace, Replace if Older, Keep Both, Skip, Merge, and "Apply to all")
 - Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files
 - Quick Look, a hidden files toggle, and live updates when folders change
@@ -23,6 +24,16 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - A transfer queue: speed limits, Pause and Resume, Pause All and Stop All, and waiting transfers that can be started now or moved up and down (right-click a transfer), plus rules for errors
 - Zoom (Command-= and Command-minus) and a Settings window (Command-comma) with color themes, text size, row spacing, and your own keyboard shortcuts
 - Optionally used for "Show in Finder" in other apps (Settings > General): the file opens selected in forkz. macOS keeps Finder as the app that opens folders, but forkz can open them with Open With
+
+### Icons, columns, Group By, and Git status
+
+![Icon view: folders and files as large icons, with the selected folder highlighted](docs/images/icons.png)
+
+![Column view in the top pane, and below it a list grouped by kind with a Git column showing modified and untracked items](docs/images/columns.png)
+
+Each pane shows a list (Command-1), icons (Command-2), or columns (Command-3), as in Finder. Icons grow with the text size (zoom); in column view, choosing a folder opens its contents in the next column, and the arrow keys browse. In every view, commands, Quick Look, the preview pane, and drag and drop work as in the list: drag items out to another pane or to Finder, or drop them on a folder (or a column or the view itself) to copy or move them there. View > Group By groups the list by kind, date modified (Today, Yesterday, Previous 7 Days, and so on), or size, keeping the sort within each group. View > Stack Panes puts the panes one above the other.
+
+In a Git repository, the Git column (View > Columns) shows whether each item is modified, added, untracked, renamed, ignored, or in conflict; a folder shows the most important change inside it. It uses Homebrew's git, or Apple's when the command line tools are installed.
 
 ### Preview pane and archives
 
@@ -87,6 +98,18 @@ accent = "#b58900"
 sidebar = "#eee8d5"
 ```
 
+### Viewer
+
+![The viewer showing a source file as text, with Text and Hex modes and a Wrap Lines option](docs/images/viewer.png)
+
+View (F3) opens a file in a window of its own, on the Mac, on a server, or in an archive: as text (UTF-8, UTF-16, or Latin-1, with Command-F to search and optional line wrapping) or as hex, with offsets and characters. Files that look binary open in hex. Up to 64 MB of a file is read.
+
+### Filename filters
+
+![Settings > Filters with filters for build output, macOS metadata, logs, and version control folders](docs/images/filters.png)
+
+Filters are named sets of patterns, such as `node_modules; target; *.o`, as in FileZilla. Each can hide matching items in the lists, leave them out of the folders you copy (uploads and downloads included), or both, and apply to files, folders, or both. Settings > Filters edits them and comes with a few to start from; View > Use Filename Filters turns them all on or off, and the status line says how many items they hide. Items you choose yourself are always copied, and moves take everything, so nothing is left behind.
+
 ### Finder tags and Select Matching
 
 - Tags show as colors on file icons; Tags… edits them, and a tag in the sidebar finds everything with it.
@@ -141,6 +164,7 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 | Command-[ and Command-] | Back and forward |
 | Command-R | Refresh |
 | Space or Command-Y | Quick Look |
+| F3 | View (text or hex) |
 | F5 or Shift-Command-C | Copy to the other pane |
 | F6 or Shift-Command-M | Move to the other pane |
 | Command-C, Command-V, Option-Command-V | Copy items, paste items, move items here |
@@ -169,6 +193,7 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 | Option-Command-S | Calculate folder sizes |
 | Control-Command-C | Compare files |
 | Shift-Command-. | Show or hide hidden files |
+| Command-1, Command-2, Command-3 | Show as a list, as icons, as columns |
 | Shift-Command-P | Show or hide the preview pane |
 | Control-Command-P | Expand the preview pane to fill the window, or shrink it back |
 | Control-Command-S | Show or hide the sidebar |

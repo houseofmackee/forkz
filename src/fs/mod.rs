@@ -2,11 +2,14 @@
 //! and formatting sizes. Pure Rust, so it can be tested without AppKit.
 
 pub mod checksum;
+pub mod filters;
+pub mod git;
 pub mod glob;
 pub mod ops;
 pub mod search;
 pub mod sync;
 pub mod tags;
+pub mod view;
 
 use std::cmp::Ordering;
 use std::ffi::CString;

@@ -11,6 +11,16 @@ pub struct Patterns {
 
 impl Patterns {
     pub fn new(text: &str) -> Patterns {
+        Patterns::parse(text, true)
+    }
+
+    /// Like `new`, but a pattern without wildcards matches only that whole
+    /// name (for filters: "target" is not "targets.txt").
+    pub fn exact(text: &str) -> Patterns {
+        Patterns::parse(text, false)
+    }
+
+    fn parse(text: &str, contains: bool) -> Patterns {
         let patterns = text
             .split([';', ','])
             .map(str::trim)
@@ -19,7 +29,7 @@ impl Patterns {
                 let lower = p.to_lowercase();
                 // Plain text: names containing it.
                 let wildcards = lower.contains(['*', '?']) || (lower.contains('[') && lower.contains(']'));
-                let wild = if wildcards { lower } else { format!("*{lower}*") };
+                let wild = if wildcards || !contains { lower } else { format!("*{lower}*") };
                 wild.chars().collect()
             })
             .collect();

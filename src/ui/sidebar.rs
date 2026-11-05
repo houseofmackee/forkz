@@ -156,7 +156,10 @@ define_class!(
         #[unsafe(method(removeFavorite:))]
         fn remove_favorite(&self, _sender: Option<&AnyObject>) {
             let Some(row) = self.ivars().menu_row.take() else { return };
-            match self.ivars().rows.borrow().get(row).cloned() {
+            // Copied out first: removing reloads the sidebar, which replaces
+            // the rows (a borrow held across that would panic).
+            let clicked = self.ivars().rows.borrow().get(row).cloned();
+            match clicked {
                 Some(Row::Place { path, favorite: true, .. }) => super::remove_favorite(&path),
                 Some(Row::RemoteFavorite { site_id, path, .. }) => super::remove_remote_favorite(&site_id, &path),
                 _ => {}

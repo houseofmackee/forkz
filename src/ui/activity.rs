@@ -233,7 +233,11 @@ impl Activity {
     }
 
     /// Starts a job on a worker thread, with a row for it.
-    pub fn start(&self, job: Job) {
+    pub fn start(&self, mut job: Job) {
+        // Copies leave out what the filename filters name.
+        if job.kind == JobKind::Copy && job.exclude.is_none() {
+            job.exclude = super::transfer_exclusions();
+        }
         if job.sources.is_empty() {
             return;
         }

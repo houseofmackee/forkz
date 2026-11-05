@@ -39,6 +39,9 @@ pub struct Job {
     pub open_when_done: bool,
     /// Keep modification dates on streamed copies (uploads, downloads).
     pub keep_dates: bool,
+    /// Items inside the folders copied that the filename filters leave out
+    /// (copies only: a move always takes everything, so nothing is lost).
+    pub exclude: Option<crate::fs::filters::Exclusions>,
 }
 
 impl Job {
@@ -62,6 +65,7 @@ impl Job {
             destination,
             on_conflict: None,
             open_when_done: false,
+            exclude: None,
             keep_dates: true,
         }
     }
@@ -272,6 +276,8 @@ struct Runner<'a> {
     folder_answer: Option<Resolution>,
     outcome: Outcome,
     fxp: Fxp,
+    /// What the filename filters leave out of this copy.
+    exclude: Option<crate::fs::filters::Exclusions>,
 }
 
 /// Copying straight from one FTP server to another (FXP), for this job.
@@ -319,6 +325,7 @@ pub fn run(job: &Job, observer: &mut dyn Observer, cancel: CancelToken) -> Outco
         folder_answer: job.on_conflict,
         outcome: Outcome::default(),
         fxp,
+        exclude: if job.kind == JobKind::Copy { job.exclude.clone() } else { None },
     };
     let result = match job.kind {
         JobKind::Trash => runner.trash_all(&job.sources),
@@ -440,8 +447,11 @@ impl Runner<'_> {
         // Totals first, for a meaningful progress bar. Renames count as
         // items, not bytes.
         for source in &job.sources {
-            let (bytes, items) =
-                if moving && self.renames(source, &job.destination) { (0, 1) } else { measure(&self.src, source) };
+            let (bytes, items) = if moving && self.renames(source, &job.destination) {
+                (0, 1)
+            } else {
+                measure_excluding(&self.src, source, self.exclude.as_ref())
+            };
             self.progress.total_bytes += bytes;
             self.progress.total_items += items;
         }
@@ -541,6 +551,7 @@ impl Runner<'_> {
                 return Ok(());
             }
         };
+        let children: Vec<Entry> = children.into_iter().filter(|c| moving || !self.excluded(c)).collect();
         for child in children {
             self.check_cancel()?;
             self.place(&child.path, &target.join(&child.name), moving)?;
@@ -550,6 +561,11 @@ impl Runner<'_> {
             let _ = self.src.remove_dir(source);
         }
         Ok(())
+    }
+
+    /// Whether the filename filters leave an item out of this copy.
+    fn excluded(&self, entry: &Entry) -> bool {
+        self.exclude.as_ref().is_some_and(|x| x.excludes(&entry.name, entry.is_folder_like()))
     }
 
     fn skip(&mut self, source: &Path) {
@@ -629,6 +645,7 @@ impl Runner<'_> {
             }
         };
         let mut complete = true;
+        let children: Vec<Entry> = children.into_iter().filter(|c| !self.excluded(c)).collect();
         for child in children {
             complete &= self.copy_item(&child.path, &target.join(&child.name))?;
         }
@@ -826,13 +843,21 @@ fn is_older(conflict: &Conflict) -> bool {
 
 /// Total bytes and items under `path` (links are not followed).
 pub fn measure(fs: &FsRef, path: &Path) -> (u64, usize) {
+    measure_excluding(fs, path, None)
+}
+
+/// Like `measure`, leaving out what `exclude` names inside `path`.
+pub fn measure_excluding(fs: &FsRef, path: &Path, exclude: Option<&crate::fs::filters::Exclusions>) -> (u64, usize) {
     let Ok(entry) = fs.stat(path) else { return (0, 0) };
     if entry.kind != EntryKind::Folder {
         return (entry.size, 1);
     }
     let mut total = (0, 1);
     for child in fs.list(path).unwrap_or_default() {
-        let (bytes, items) = measure(fs, &child.path);
+        if exclude.is_some_and(|x| x.excludes(&child.name, child.is_folder_like())) {
+            continue;
+        }
+        let (bytes, items) = measure_excluding(fs, &child.path, exclude);
         total.0 += bytes;
         total.1 += items;
     }
@@ -1258,6 +1283,44 @@ mod tests {
         assert!(!root.join("src/a.txt").exists(), "moved, so the source is gone");
         assert!(!root.join("src/folder").exists());
         assert!(root.join("dst/folder/inner/c.txt").exists());
+    }
+
+    #[test]
+    fn filters_leave_items_out_of_copies_but_not_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tree(root);
+        std::fs::create_dir(root.join("src/folder/node_modules")).unwrap();
+        std::fs::write(root.join("src/folder/node_modules/big.js"), "0123456789").unwrap();
+        std::fs::write(root.join("src/folder/main.o"), "obj").unwrap();
+        let filter = crate::fs::filters::NameFilter {
+            patterns: "node_modules; *.o".into(),
+            transfers: true,
+            ..Default::default()
+        };
+        let exclude = crate::fs::filters::Exclusions::new(&[filter], |f| f.transfers);
+        // Copies (streamed too) leave them out, and count without them.
+        for mut copy in [job(JobKind::Copy, root, &["folder"]), upload(JobKind::Copy, root, &["folder"])] {
+            let _ = std::fs::remove_dir_all(root.join("dst/folder"));
+            copy.exclude = exclude.clone();
+            let mut observer = Scripted::new(Resolution::Replace);
+            let outcome = run(&copy, &mut observer, CancelToken::default());
+            assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+            assert!(root.join("dst/folder/inner/c.txt").exists());
+            assert!(!root.join("dst/folder/node_modules").exists() && !root.join("dst/folder/main.o").exists());
+            assert_eq!(observer.last.total_bytes, 3, "b.txt and c.txt");
+        }
+        // Chosen directly, a filtered item is copied.
+        let mut direct = Job::local(JobKind::Copy, vec![root.join("src/folder/main.o")], root.join("dst"));
+        direct.exclude = exclude.clone();
+        run(&direct, &mut Scripted::new(Resolution::Replace), CancelToken::default());
+        assert!(root.join("dst/main.o").exists());
+        // A move takes everything (nothing is left behind to be lost).
+        let _ = std::fs::remove_dir_all(root.join("dst/folder"));
+        let mut moving = upload(JobKind::Move, root, &["folder"]);
+        moving.exclude = exclude;
+        run(&moving, &mut Scripted::new(Resolution::Replace), CancelToken::default());
+        assert!(root.join("dst/folder/node_modules/big.js").exists() && !root.join("src/folder").exists());
     }
 
     #[test]

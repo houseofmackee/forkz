@@ -49,6 +49,12 @@ fn look() -> Look {
     LOOK.with(Cell::get)
 }
 
+/// The lists' text size and row height (for the column view).
+pub fn look_metrics() -> (f64, f64) {
+    let look = look();
+    (look.text, look.row)
+}
+
 /// Sets the text size and row height of the file lists (applied by
 /// `PaneController::apply_appearance`).
 pub fn set_look(text: f64, row: f64) {
@@ -75,24 +81,7 @@ define_class!(
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let Some(controller) = self.controller() else { return };
-            let flags = event.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask;
-            let plain = (flags & !(NSEventModifierFlags::Function | NSEventModifierFlags::NumericPad)).is_empty();
-            let shift = flags.contains(NSEventModifierFlags::Shift);
-            let command = match event.keyCode() {
-                30 if flags.contains(NSEventModifierFlags::Command) && shift => Some(Command::NextTab), // Shift-Command-]
-                33 if flags.contains(NSEventModifierFlags::Command) && shift => Some(Command::PreviousTab), // Shift-Command-[
-                48 if plain => Some(Command::SwitchPane),                  // Tab
-                36 | 76 if plain => Some(Command::Rename),                 // Return, Enter
-                49 if plain => Some(Command::QuickLook),                   // Space
-                125 if flags.contains(NSEventModifierFlags::Command) => Some(Command::Open), // Command-Down
-                120 => Some(Command::Rename),                              // F2
-                96 => Some(Command::CopyToOther),                          // F5
-                97 => Some(Command::MoveToOther),                          // F6
-                98 => Some(Command::NewFolder),                            // F7
-                100 => Some(Command::Trash),                               // F8
-                _ => None,
-            };
-            match command {
+            match key_command(event) {
                 Some(command) => super::run_command(command, Some(controller.index())),
                 // Arrows, type-to-select, and the rest.
                 None => unsafe { msg_send![super(self), keyDown: event] },
@@ -110,11 +99,21 @@ define_class!(
 
         #[unsafe(method(becomeFirstResponder))]
         fn become_first_responder(&self) -> bool {
-            let accepted: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
-            if accepted && let Some(controller) = self.controller() {
-                super::set_active(controller.index());
+            match self.controller() {
+                // In column view the (hidden) list passes the focus on.
+                Some(controller) if controller.view_mode() != crate::pane::ViewMode::List => {
+                    let index = controller.index();
+                    DispatchQueue::main().exec_async(move || super::focus_pane(index));
+                    false
+                }
+                controller => {
+                    let accepted: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+                    if accepted && let Some(controller) = controller {
+                        super::set_active(controller.index());
+                    }
+                    accepted
+                }
             }
-            accepted
         }
 
         /// Edit > Copy: the selected files, to paste in Finder or the other pane.
@@ -128,11 +127,11 @@ define_class!(
         /// Select All: every item, but not "..", which is not an item.
         #[unsafe(method(selectAll:))]
         fn select_all(&self, _sender: Option<&AnyObject>) {
-            let offset = self.controller().map_or(0, |c| parent_offset(&c.ivars().state.borrow()));
-            let rows = usize::try_from(self.numberOfRows()).unwrap_or(0);
             let set = NSMutableIndexSet::new();
-            if rows > offset {
-                set.addIndexesInRange(objc2_foundation::NSRange::new(offset, rows - offset));
+            if let Some(c) = self.controller() {
+                for row in item_rows(&c.ivars().state.borrow()) {
+                    set.addIndex(row);
+                }
             }
             self.selectRowIndexes_byExtendingSelection(&set, false);
         }
@@ -290,6 +289,20 @@ pub struct PaneIvars {
     active_tab: Cell<usize>,
     /// The tab buttons, above the path bar (hidden with one tab).
     tab_bar: OnceCell<Retained<NSStackView>>,
+    /// View > Group By, for every tab of the pane.
+    group: Cell<crate::pane::GroupBy>,
+    /// The list's scroll view, and the column view shown instead of it.
+    list_scroll: OnceCell<Retained<NSScrollView>>,
+    columns: OnceCell<Retained<super::column_view::ColumnBrowser>>,
+    icons: OnceCell<Retained<super::icon_view::IconView>>,
+    icon_scroll: OnceCell<Retained<NSScrollView>>,
+    mode: Cell<crate::pane::ViewMode>,
+    /// Set while the column view changes the pane (it shows that itself).
+    from_columns: Cell<bool>,
+    /// The Git column: what `git status` says in this folder's repository.
+    git: RefCell<crate::fs::git::Statuses>,
+    git_running: Cell<bool>,
+    git_again: Cell<bool>,
     /// A thin accent-colored line along the top, shown while this is the
     /// active pane (where commands, connections, and Go to Folder go).
     active_bar: OnceCell<Retained<objc2_app_kit::NSBox>>,
@@ -385,8 +398,7 @@ define_class!(
     unsafe impl NSTableViewDataSource for PaneController {
         #[unsafe(method(numberOfRowsInTableView:))]
         fn number_of_rows(&self, _table: &NSTableView) -> NSInteger {
-            let state = self.ivars().state.borrow();
-            (state.entries().len() + parent_offset(&state)) as NSInteger
+            self.ivars().state.borrow().rows().len() as NSInteger
         }
 
         #[unsafe(method(tableView:sortDescriptorsDidChange:))]
@@ -395,6 +407,9 @@ define_class!(
             let key = descriptor.key().and_then(|k| SortKey::from_id(&k.to_string())).unwrap_or_default();
             let sort = Sort { key, ascending: descriptor.ascending() };
             let selected = self.selected_paths();
+            if let Some(columns) = self.ivars().columns.get() {
+                columns.forget_listings();
+            }
             self.ivars().state.borrow_mut().set_sort(sort);
             self.table().reloadData();
             self.select_paths(&selected);
@@ -489,14 +504,25 @@ define_class!(
         /// so a selection is only items.
         #[unsafe(method_id(tableView:selectionIndexesForProposedSelection:))]
         fn proposed_selection(&self, _table: &NSTableView, proposed: &NSIndexSet) -> Retained<NSIndexSet> {
-            if proposed.count() > 1 && proposed.containsIndex(0) && is_parent_row(&self.ivars().state.borrow(), 0) {
-                let set = NSMutableIndexSet::new();
-                set.addIndexes(proposed);
-                set.removeIndex(0);
-                Retained::into_super(set)
-            } else {
-                proposed.retain()
+            // Group titles are never selected, and ".." only on its own.
+            let state = self.ivars().state.borrow();
+            let rows = index_set_rows(proposed);
+            let drop_parent = rows.len() > 1;
+            let keep: Vec<usize> = rows
+                .into_iter()
+                .filter(|&r| !is_header_row(&state, r) && !(drop_parent && is_parent_row(&state, r)))
+                .collect();
+            let set = NSMutableIndexSet::new();
+            for row in keep {
+                set.addIndex(row);
             }
+            Retained::into_super(set)
+        }
+
+        /// Group titles (View > Group By) float at the top while scrolling.
+        #[unsafe(method(tableView:isGroupRow:))]
+        fn is_group_row(&self, _table: &NSTableView, row: NSInteger) -> bool {
+            usize::try_from(row).is_ok_and(|r| is_header_row(&self.ivars().state.borrow(), r))
         }
 
         /// Rows in the theme's colors (macOS's own rows without a theme).
@@ -534,14 +560,20 @@ define_class!(
             }
             let table = self.table();
             let clicked = table.clickedRow();
-            let on_parent = clicked == 0 && is_parent_row(&self.ivars().state.borrow(), 0);
+            // "..", a group title, and the empty area are about the folder.
+            let on_parent = usize::try_from(clicked).is_ok_and(|r| {
+                let state = self.ivars().state.borrow();
+                is_parent_row(&state, r) || is_header_row(&state, r)
+            });
             let clicked = if on_parent { -1 } else { clicked };
             let outside = clicked >= 0 && !table.isRowSelected(clicked);
             self.ivars().menu_row.set(if outside { usize::try_from(clicked).ok() } else { None });
-            if clicked < 0 {
+            let in_list = self.ivars().mode.get() == crate::pane::ViewMode::List;
+            if clicked < 0 && in_list {
                 // A right-click on the empty area is about the folder.
                 unsafe { table.deselectAll(None) };
             }
+            let outside = outside && in_list;
             let has_items = outside || !self.selected_paths().is_empty();
             self.build_context_menu(menu, has_items);
         }
@@ -650,6 +682,29 @@ impl PaneController {
         }
     }
 
+    /// Items dragged from the column or icon view: file URLs on the Mac,
+    /// file promises from servers (downloaded where they are dropped), and
+    /// remembered for drops on panes.
+    pub fn write_drag(&self, entries: &[crate::fs::Entry], pasteboard: &objc2_app_kit::NSPasteboard) -> bool {
+        if entries.is_empty() {
+            return false;
+        }
+        let fs = self.fs();
+        DRAG.with(|d| *d.borrow_mut() = Some((fs.clone(), entries.iter().map(|e| e.path.clone()).collect())));
+        let writers: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = entries
+            .iter()
+            .map(|e| -> Retained<ProtocolObject<dyn NSPasteboardWriting>> {
+                if fs.is_local() {
+                    ProtocolObject::from_retained(file_url(&e.path))
+                } else {
+                    ProtocolObject::from_retained(super::promises::provider(fs.clone(), e))
+                }
+            })
+            .collect();
+        pasteboard.clearContents();
+        pasteboard.writeObjects(&NSArray::from_retained_slice(&writers))
+    }
+
     fn writer_for_row(&self, row: NSInteger) -> Option<Retained<ProtocolObject<dyn NSPasteboardWriting>>> {
         let state = self.ivars().state.borrow();
         let entry = entry_at(&state, usize::try_from(row).ok()?)?;
@@ -674,6 +729,11 @@ impl PaneController {
         operation: NSTableViewDropOperation,
     ) -> bool {
         let target = self.drop_target(row, operation).unwrap_or_else(|| self.location());
+        self.drop_into(info, target)
+    }
+
+    /// Items dropped on a folder of this pane: copied or moved there.
+    pub fn drop_into(&self, info: &ProtocolObject<dyn NSDraggingInfo>, target: PathBuf) -> bool {
         let kind = match self.drop_operation(info, &target) {
             op if op == NSDragOperation::Move => JobKind::Move,
             op if op == NSDragOperation::Copy => JobKind::Copy,
@@ -690,9 +750,13 @@ impl PaneController {
         column: Option<&NSTableColumn>,
         row: NSInteger,
     ) -> Option<Retained<NSView>> {
-        let column_id = column?.identifier().to_string();
         let state = self.ivars().state.borrow();
         let row = usize::try_from(row).ok()?;
+        // A group's title spans the row (the table asks without a column).
+        if let Some(crate::pane::Row::Header(title)) = state.rows().get(row) {
+            return Some(group_title(title, self.mtm()));
+        }
+        let column_id = column?.identifier().to_string();
         let cell = reusable_cell(table, &column_id, self.mtm());
         // SAFETY: plain getters of the cell's own subviews.
         let (image_view, text_field) = unsafe { (cell.imageView(), cell.textField()) };
@@ -739,6 +803,13 @@ impl PaneController {
             "permissions" => fs::format_permissions(entry),
             "owner" => entry.owner.clone().unwrap_or_default(),
             "tags" if state.is_local() => super::util::tags_of(&entry.path).join(", "),
+            "git" => {
+                let status = self.ivars().git.borrow().of(&entry.path, entry.is_folder_like());
+                if let Some(field) = &text_field {
+                    field.setTextColor(Some(&git_color(status)));
+                }
+                status.map(|s| s.title().to_string()).unwrap_or_default()
+            }
             "tags" => String::new(),
             "folder" => {
                 let parent = entry.path.parent().unwrap_or(Path::new("/"));
@@ -792,6 +863,16 @@ impl PaneController {
             tab_bar: OnceCell::new(),
             active_bar: OnceCell::new(),
             tab_close: RefCell::new(Vec::new()),
+            group: Cell::new(crate::pane::GroupBy::None),
+            list_scroll: OnceCell::new(),
+            columns: OnceCell::new(),
+            icons: OnceCell::new(),
+            icon_scroll: OnceCell::new(),
+            mode: Cell::new(crate::pane::ViewMode::List),
+            from_columns: Cell::new(false),
+            git: RefCell::new(crate::fs::git::Statuses::default()),
+            git_running: Cell::new(false),
+            git_again: Cell::new(false),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.build();
@@ -814,6 +895,7 @@ impl PaneController {
             ("owner", "Owner", 90.0, NSTextAlignment::Left),
             ("group", "Group", 90.0, NSTextAlignment::Left),
             ("tags", "Tags", 110.0, NSTextAlignment::Left),
+            ("git", "Git", 80.0, NSTextAlignment::Left),
             // Search results: where each item is.
             ("folder", "Folder", 170.0, NSTextAlignment::Left),
         ] {
@@ -825,7 +907,7 @@ impl PaneController {
             column.headerCell().setAlignment(align);
             // Size and date sort largest/newest first on the first click.
             let ascending = !matches!(id, "size" | "modified");
-            if !matches!(id, "permissions" | "owner" | "group" | "tags" | "folder") {
+            if !matches!(id, "permissions" | "owner" | "group" | "tags" | "folder" | "git") {
                 let prototype = NSSortDescriptor::sortDescriptorWithKey_ascending(Some(&ns(id)), ascending);
                 column.setSortDescriptorPrototype(Some(&prototype));
             }
@@ -853,10 +935,7 @@ impl PaneController {
             NSDragOperation::Copy | NSDragOperation::Move | NSDragOperation::Generic,
             false,
         );
-        let items_type = ns(ITEMS_TYPE);
-        let mut types: Vec<Retained<NSString>> = vec![unsafe { NSPasteboardTypeFileURL }.retain(), items_type.clone()];
-        types.extend(objc2_app_kit::NSFilePromiseReceiver::readableDraggedTypes().iter());
-        table.registerForDraggedTypes(&NSArray::from_retained_slice(&types));
+        table.registerForDraggedTypes(&NSArray::from_retained_slice(&drag_types()));
         let sort = self.ivars().state.borrow().sort;
         let descriptor = NSSortDescriptor::sortDescriptorWithKey_ascending(Some(&ns(sort.key.id())), sort.ascending);
         table.setSortDescriptors(&NSArray::from_slice(&[&*descriptor]));
@@ -919,6 +998,7 @@ impl PaneController {
         container.addArrangedSubview(&status);
         let _ = self.ivars().filter.set(filter);
         let _ = self.ivars().tab_bar.set(tab_bar.clone());
+        let _ = self.ivars().list_scroll.set(scroll.clone());
         for view in [&*tab_bar as &NSView, &*path_row as &NSView, &scroll, &status] {
             view.leadingAnchor().constraintEqualToAnchor_constant(&container.leadingAnchor(), 6.0).setActive(true);
             view.trailingAnchor().constraintEqualToAnchor_constant(&container.trailingAnchor(), -6.0).setActive(true);
@@ -1289,8 +1369,171 @@ impl PaneController {
     }
 
     pub fn focus(&self) {
-        if let Some(window) = self.table().window() {
-            window.makeFirstResponder(Some(self.table()));
+        let Some(window) = self.table().window() else { return };
+        use crate::pane::ViewMode;
+        match self.ivars().mode.get() {
+            ViewMode::Columns if let Some(columns) = self.ivars().columns.get() => {
+                window.makeFirstResponder(Some(columns))
+            }
+            ViewMode::Icons if let Some(icons) = self.ivars().icons.get() => window.makeFirstResponder(Some(icons)),
+            _ => window.makeFirstResponder(Some(self.table())),
+        };
+    }
+
+    pub fn column_browser(&self) -> Option<Retained<super::column_view::ColumnBrowser>> {
+        self.ivars().columns.get().cloned()
+    }
+
+    pub fn icon_view(&self) -> Option<Retained<super::icon_view::IconView>> {
+        self.ivars().icons.get().cloned()
+    }
+
+    pub fn view_mode(&self) -> crate::pane::ViewMode {
+        self.ivars().mode.get()
+    }
+
+    pub fn is_column_view(&self) -> bool {
+        self.ivars().mode.get() == crate::pane::ViewMode::Columns
+    }
+
+    /// View > as List, as Icons, or as Columns.
+    pub fn set_view_mode(&self, mode: crate::pane::ViewMode) {
+        use crate::pane::ViewMode;
+        if mode == self.ivars().mode.get() {
+            return;
+        }
+        let (Some(container), Some(scroll)) = (self.ivars().container.get(), self.ivars().list_scroll.get()) else {
+            return;
+        };
+        let focused = self.has_focus();
+        let place = |view: &NSView| {
+            container.insertArrangedSubview_atIndex(view, 3);
+            view.leadingAnchor().constraintEqualToAnchor_constant(&container.leadingAnchor(), 6.0).setActive(true);
+            view.trailingAnchor().constraintEqualToAnchor_constant(&container.trailingAnchor(), -6.0).setActive(true);
+            view.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Vertical);
+            view.setHidden(true);
+        };
+        if mode == ViewMode::Columns && self.ivars().columns.get().is_none() {
+            let columns = super::column_view::ColumnBrowser::new(self.mtm(), self);
+            // The list's context menu, for the selection.
+            unsafe { columns.setMenu(self.table().menu().as_deref()) };
+            place(&columns);
+            let _ = self.ivars().columns.set(columns);
+        }
+        if mode == ViewMode::Icons && self.ivars().icons.get().is_none() {
+            let icons = super::icon_view::IconView::new(self.mtm(), self);
+            unsafe { icons.setMenu(self.table().menu().as_deref()) };
+            let icon_scroll = super::icon_view::scroll_view(&icons, self.mtm());
+            place(&icon_scroll);
+            let _ = self.ivars().icons.set(icons);
+            let _ = self.ivars().icon_scroll.set(icon_scroll);
+        }
+        self.ivars().mode.set(mode);
+        scroll.setHidden(mode != ViewMode::List);
+        if let Some(columns) = self.ivars().columns.get() {
+            columns.setHidden(mode != ViewMode::Columns);
+        }
+        if let Some(icon_scroll) = self.ivars().icon_scroll.get() {
+            icon_scroll.setHidden(mode != ViewMode::Icons);
+        }
+        match mode {
+            ViewMode::Columns => {
+                self.sync_columns();
+                // Again once the window shows (at launch it is not on screen yet).
+                let index = self.index();
+                DispatchQueue::main().exec_async(move || super::sync_pane_columns(index));
+            }
+            ViewMode::Icons => self.sync_icons(),
+            ViewMode::List => {}
+        }
+        if focused {
+            self.focus();
+        }
+    }
+
+    /// Whether the pane's list, columns, or icons have the keyboard focus.
+    fn has_focus(&self) -> bool {
+        let Some(responder) = self.table().window().and_then(|w| w.firstResponder()) else { return false };
+        let ptr = Retained::as_ptr(&responder).cast::<AnyObject>();
+        std::ptr::eq(ptr, (self.table() as &FileTable as *const FileTable).cast())
+            || self.ivars().columns.get().is_some_and(|c| std::ptr::eq(ptr, Retained::as_ptr(c).cast()))
+            || self.ivars().icons.get().is_some_and(|i| std::ptr::eq(ptr, Retained::as_ptr(i).cast()))
+    }
+
+    /// Shows the pane's items and selection in the icon view.
+    pub fn sync_icons(&self) {
+        if self.ivars().mode.get() != crate::pane::ViewMode::Icons {
+            return;
+        }
+        let Some(icons) = self.ivars().icons.get() else { return };
+        let selected = self.selected_paths();
+        let (entries, local) = {
+            let state = self.ivars().state.borrow();
+            (state.entries().to_vec(), state.is_local())
+        };
+        icons.sync(entries, local, &selected);
+    }
+
+    /// What a dragged item puts on the pasteboard: its file URL, or from a
+    /// server a file promise (downloaded where it is dropped).
+    pub fn drag_writer(&self, entry: &crate::fs::Entry) -> Retained<ProtocolObject<dyn NSPasteboardWriting>> {
+        let fs = self.fs();
+        if fs.is_local() {
+            ProtocolObject::from_retained(file_url(&entry.path))
+        } else {
+            ProtocolObject::from_retained(super::promises::provider(fs, entry))
+        }
+    }
+
+    /// Remembers dragged items, for drops on panes.
+    pub fn remember_drag(&self, paths: Vec<PathBuf>) {
+        let fs = self.fs();
+        DRAG.with(|d| *d.borrow_mut() = Some((fs, paths)));
+    }
+
+    /// Shows the pane's folder and selection in the column view.
+    pub fn sync_columns(&self) {
+        let Some(columns) = self.ivars().columns.get().filter(|_| self.is_column_view()) else { return };
+        let selected = self.selected_paths();
+        let (fs, location, entries) = {
+            let state = self.ivars().state.borrow();
+            // While a server listing is on its way, the column keeps its own.
+            let entries = (!state.loading).then(|| {
+                let mut list: Vec<crate::fs::Entry> = state.entries().to_vec();
+                crate::fs::sort_entries(&mut list, state.sort);
+                list
+            });
+            (state.fs().clone(), state.location().to_path_buf(), entries)
+        };
+        columns.sync(&fs, &location, entries, &selected);
+    }
+
+    /// The column view chose items: their folder becomes the pane's (no
+    /// history: the columns show the way), and they its selection.
+    pub fn browse_select(&self, folder: PathBuf, paths: Vec<PathBuf>) {
+        self.ivars().from_columns.set(true);
+        let moved = self.ivars().state.borrow().location() != folder;
+        if moved {
+            self.ivars().state.borrow_mut().browse(folder);
+        }
+        self.refresh(Some(&paths));
+        if moved {
+            self.start_loading();
+            super::location_changed(self.index());
+        }
+        self.ivars().from_columns.set(false);
+    }
+
+    /// Quick Look from the column view: the hidden list provides items.
+    pub fn hand_quick_look(&self, panel: &QLPreviewPanel, begin: bool) {
+        unsafe {
+            if begin {
+                panel.setDataSource(Some(ProtocolObject::from_ref(self.table())));
+                panel.setDelegate(Some(self.table().as_ref()));
+            } else {
+                panel.setDataSource(None);
+                panel.setDelegate(None);
+            }
         }
     }
 
@@ -1334,7 +1577,7 @@ impl PaneController {
         {
             let state = self.ivars().state.borrow();
             for path in paths {
-                if let Some(row) = state.row_of(path).map(|r| r + parent_offset(&state)) {
+                if let Some(row) = state.table_row_of(path) {
                     set.addIndex(row);
                     first = Some(first.map_or(row, |f: usize| f.min(row)));
                 }
@@ -1351,6 +1594,10 @@ impl PaneController {
     fn refresh(&self, select: Option<&[PathBuf]>) {
         let keep = if select.is_none() { self.selected_paths() } else { Vec::new() };
         let first_row = self.table().selectedRow();
+        // Another tab may show (each keeps the pane's grouping).
+        self.ivars().state.borrow_mut().set_group_by(self.ivars().group.get(), kind_of);
+        let (exclusions, version) = super::listing_exclusions();
+        self.ivars().state.borrow_mut().set_exclusions(exclusions, version);
         self.table().reloadData();
         match select {
             Some(paths) if !paths.is_empty() => self.select_paths(paths),
@@ -1359,15 +1606,12 @@ impl PaneController {
                 // for the keyboard.
                 let first = {
                     let state = self.ivars().state.borrow();
-                    let offset = parent_offset(&state);
-                    if offset > 0 && super::start_on_parent() {
-                        NSIndexSet::indexSetWithIndex(0)
-                    } else if !state.entries().is_empty() {
-                        NSIndexSet::indexSetWithIndex(offset)
-                    } else if offset > 0 {
-                        NSIndexSet::indexSetWithIndex(0)
-                    } else {
-                        NSIndexSet::new()
+                    let parent = is_parent_row(&state, 0);
+                    match item_rows(&state).first() {
+                        _ if parent && super::start_on_parent() => NSIndexSet::indexSetWithIndex(0),
+                        Some(first) => NSIndexSet::indexSetWithIndex(*first),
+                        None if parent => NSIndexSet::indexSetWithIndex(0),
+                        None => NSIndexSet::new(),
                     }
                 };
                 self.table().selectRowIndexes_byExtendingSelection(&first, false);
@@ -1377,10 +1621,7 @@ impl PaneController {
                 self.select_paths(&keep);
                 // The selected items are gone (moved or deleted): select
                 // what took their place, like Finder.
-                let count = {
-                    let state = self.ivars().state.borrow();
-                    (state.entries().len() + parent_offset(&state)) as NSInteger
-                };
+                let count = self.ivars().state.borrow().rows().len() as NSInteger;
                 if !keep.is_empty() && self.table().selectedRow() < 0 && first_row >= 0 && count > 0 {
                     let row = first_row.min(count - 1) as usize;
                     self.table().selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(row), false);
@@ -1400,6 +1641,49 @@ impl PaneController {
         self.sync_filter_field();
         self.update_path_bar();
         self.update_status();
+        if !self.ivars().from_columns.get() {
+            self.sync_columns();
+            self.sync_icons();
+        }
+        self.update_git();
+    }
+
+    /// Runs `git status` in the background for the Git column (when it
+    /// shows, on the Mac); one at a time, again if asked meanwhile.
+    fn update_git(&self) {
+        let shown = self.is_local() && super::visible_columns(true).iter().any(|c| c == "git");
+        if !shown {
+            return;
+        }
+        if self.ivars().git_running.replace(true) {
+            self.ivars().git_again.set(true);
+            return;
+        }
+        let (location, index) = (self.location(), self.index());
+        std::thread::spawn(move || {
+            let statuses = crate::fs::git::repository_root(&location)
+                .and_then(|root| crate::fs::git::status(&root).ok())
+                .unwrap_or_default();
+            DispatchQueue::main().exec_async(move || super::git_status_arrived(index, statuses));
+        });
+    }
+
+    /// `git status` finished: the Git column shows it.
+    pub fn git_arrived(&self, statuses: crate::fs::git::Statuses) {
+        *self.ivars().git.borrow_mut() = statuses;
+        self.ivars().git_running.set(false);
+        let table = self.table();
+        let column = table.columnWithIdentifier(&ns("git"));
+        if column >= 0 {
+            let rows = NSIndexSet::indexSetWithIndexesInRange(objc2_foundation::NSRange::new(
+                0,
+                table.numberOfRows() as usize,
+            ));
+            table.reloadDataForRowIndexes_columnIndexes(&rows, &NSIndexSet::indexSetWithIndex(column as usize));
+        }
+        if self.ivars().git_again.replace(false) {
+            self.update_git();
+        }
     }
 
     fn filter_changed(&self) {
@@ -1490,6 +1774,7 @@ impl PaneController {
         }
         if changed {
             self.fit_columns();
+            self.update_git();
         }
     }
 
@@ -1552,6 +1837,11 @@ impl PaneController {
         self.ivars().state.borrow().all_entries().iter().map(|e| e.name.clone()).collect()
     }
 
+    /// The entries a command applies to (see `target_paths`).
+    pub fn target_entries(&self) -> Vec<crate::fs::Entry> {
+        self.entries_for(&self.target_paths())
+    }
+
     /// The entries shown for these paths (from the listing, no file access).
     pub fn entries_for(&self, paths: &[PathBuf]) -> Vec<crate::fs::Entry> {
         let state = self.ivars().state.borrow();
@@ -1567,15 +1857,21 @@ impl PaneController {
                 format!("Loading from {}\u{2026}", state.fs().label())
             }
             None => {
-                let offset = parent_offset(&state);
                 let rows: Vec<usize> = index_set_rows(&self.table().selectedRowIndexes())
                     .into_iter()
-                    .filter(|&r| r >= offset)
-                    .map(|r| r - offset)
+                    .filter_map(|r| match state.rows().get(r) {
+                        Some(crate::pane::Row::Entry(index)) => Some(*index),
+                        _ => None,
+                    })
                     .collect();
                 let mut text = selection_summary(state.entries(), &rows);
                 if !state.filter_text().is_empty() {
                     text.push_str(&format!(" (filtered from {})", state.unfiltered_count()));
+                }
+                match state.filtered_out() {
+                    0 => {}
+                    1 => text.push_str(", 1 hidden by filters"),
+                    n => text.push_str(&format!(", {n} hidden by filters")),
                 }
                 if !state.is_local() {
                     text.push_str(&format!(", {}", state.fs().label()));
@@ -1620,6 +1916,37 @@ impl PaneController {
         let selected = self.selected_paths();
         table.reloadData();
         self.select_paths(&selected);
+        if let Some(columns) = self.ivars().columns.get() {
+            columns.forget_listings();
+            columns.apply_look();
+            self.sync_columns();
+        }
+        if let Some(icons) = self.ivars().icons.get() {
+            icons.apply_look();
+            self.sync_icons();
+        }
+    }
+
+    /// The filename filters changed: the list (and columns) again.
+    pub fn filters_changed(&self) {
+        if let Some(columns) = self.ivars().columns.get() {
+            columns.forget_listings();
+        }
+        self.refresh(None);
+    }
+
+    pub fn group_by(&self) -> crate::pane::GroupBy {
+        self.ivars().group.get()
+    }
+
+    /// Groups the list (and the pane's other tabs, when shown).
+    pub fn set_group_by(&self, group: crate::pane::GroupBy) {
+        self.ivars().group.set(group);
+        let selected = self.selected_paths();
+        self.ivars().state.borrow_mut().set_group_by(group, kind_of);
+        self.table().reloadData();
+        self.select_paths(&selected);
+        self.update_status();
     }
 
     pub fn sort(&self) -> Sort {
@@ -1639,13 +1966,9 @@ impl PaneController {
     pub fn select_matching(&self, patterns: &crate::fs::glob::Patterns, add: bool, remove: bool) -> usize {
         let rows: Vec<usize> = {
             let state = self.ivars().state.borrow();
-            let offset = parent_offset(&state);
-            state
-                .entries()
-                .iter()
-                .enumerate()
-                .filter(|(_, e)| patterns.matches(&e.name))
-                .map(|(i, _)| i + offset)
+            item_rows(&state)
+                .into_iter()
+                .filter(|&row| state.entry_at_row(row).is_some_and(|e| patterns.matches(&e.name)))
                 .collect()
         };
         let set = NSMutableIndexSet::new();
@@ -1675,6 +1998,11 @@ impl PaneController {
 
     /// Reads the folder again, keeping the selection.
     pub fn reload(&self) {
+        // The column view lists every column again (a drop or change may
+        // be in any of them).
+        if let Some(columns) = self.ivars().columns.get() {
+            columns.forget_listings();
+        }
         self.ivars().state.borrow_mut().load();
         self.refresh(None);
         self.start_loading();
@@ -1682,6 +2010,9 @@ impl PaneController {
 
     /// Reloads and selects `paths` (for example what a job created).
     pub fn reload_selecting(&self, paths: &[PathBuf]) {
+        if let Some(columns) = self.ivars().columns.get() {
+            columns.forget_listings();
+        }
         self.ivars().state.borrow_mut().load();
         self.refresh(Some(paths));
         self.start_loading();
@@ -1754,6 +2085,9 @@ impl PaneController {
     }
 
     pub fn set_show_hidden(&self, show: bool) {
+        if let Some(columns) = self.ivars().columns.get() {
+            columns.forget_listings();
+        }
         self.ivars().state.borrow_mut().set_show_hidden(show);
         self.refresh(None);
     }
@@ -1812,7 +2146,7 @@ impl PaneController {
 
     /// Move within a volume, copy across volumes, like Finder; Option
     /// forces a copy, Command a move.
-    fn drop_operation(&self, info: &ProtocolObject<dyn NSDraggingInfo>, target: &Path) -> NSDragOperation {
+    pub fn drop_operation(&self, info: &ProtocolObject<dyn NSDraggingInfo>, target: &Path) -> NSDragOperation {
         let Some((source_fs, sources)) = self.drag_sources(info) else { return NSDragOperation::None };
         let target_fs = self.fs();
         if target_fs.read_only() {
@@ -1850,30 +2184,99 @@ impl PaneController {
     }
 }
 
-/// 1 when the list starts with "..", the enclosing folder (every folder
-/// but the top one), else 0. Table rows are entry indexes plus this.
-fn parent_offset(state: &PaneState) -> usize {
-    usize::from(state.can_go_up())
+/// The command a key runs in a file list (or column view); None for
+/// keys the view handles itself (arrows, type-to-select).
+pub fn key_command(event: &NSEvent) -> Option<Command> {
+    let flags = event.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask;
+    let plain = (flags & !(NSEventModifierFlags::Function | NSEventModifierFlags::NumericPad)).is_empty();
+    let shift = flags.contains(NSEventModifierFlags::Shift);
+    match event.keyCode() {
+        30 if flags.contains(NSEventModifierFlags::Command) && shift => Some(Command::NextTab), // Shift-Command-]
+        33 if flags.contains(NSEventModifierFlags::Command) && shift => Some(Command::PreviousTab), // Shift-Command-[
+        48 if plain => Some(Command::SwitchPane),                                               // Tab
+        36 | 76 if plain => Some(Command::Rename),                                              // Return, Enter
+        49 if plain => Some(Command::QuickLook),                                                // Space
+        125 if flags.contains(NSEventModifierFlags::Command) => Some(Command::Open),            // Command-Down
+        120 => Some(Command::Rename),                                                           // F2
+        99 => Some(Command::ViewFile),                                                          // F3
+        96 => Some(Command::CopyToOther),                                                       // F5
+        97 => Some(Command::MoveToOther),                                                       // F6
+        98 => Some(Command::NewFolder),                                                         // F7
+        100 => Some(Command::Trash),                                                            // F8
+        _ => None,
+    }
 }
 
+/// Whether a table row is "..", the enclosing folder (first in every
+/// folder but the top one).
 fn is_parent_row(state: &PaneState, row: usize) -> bool {
-    row == 0 && parent_offset(state) == 1
+    state.rows().get(row) == Some(&crate::pane::Row::Parent)
 }
 
-/// The entry shown in a table row; None for "..".
+/// Whether a table row is a group's title (View > Group By).
+fn is_header_row(state: &PaneState, row: usize) -> bool {
+    matches!(state.rows().get(row), Some(crate::pane::Row::Header(_)))
+}
+
+/// The entry shown in a table row; None for ".." and group titles.
 fn entry_at(state: &PaneState, row: usize) -> Option<&crate::fs::Entry> {
-    row.checked_sub(parent_offset(state)).and_then(|i| state.entry(i))
+    state.entry_at_row(row)
+}
+
+/// The Git column's text color for a status.
+fn git_color(status: Option<crate::fs::git::Status>) -> Retained<NSColor> {
+    use crate::fs::git::Status;
+    match status {
+        Some(Status::Modified) => NSColor::systemOrangeColor(),
+        Some(Status::Added | Status::Untracked) => NSColor::systemGreenColor(),
+        Some(Status::Deleted | Status::Conflicted) => NSColor::systemRedColor(),
+        Some(Status::Renamed) => NSColor::systemBlueColor(),
+        Some(Status::Ignored) | None => NSColor::tertiaryLabelColor(),
+    }
+}
+
+/// A group title's view: small, bold, secondary text.
+fn group_title(title: &str, mtm: MainThreadMarker) -> Retained<NSView> {
+    let look = look();
+    let field = NSTextField::labelWithString(&ns(title), mtm);
+    field.setFont(Some(&objc2_app_kit::NSFont::boldSystemFontOfSize((look.text - 1.0).max(10.0))));
+    let color = super::themed::colors().map_or_else(NSColor::secondaryLabelColor, |c| c.secondary);
+    field.setTextColor(Some(&color));
+    let cell = NSTableCellView::initWithFrame(NSTableCellView::alloc(mtm), NSRect::ZERO);
+    let height = (look.text * 1.25).ceil() + 1.0;
+    field.setFrame(NSRect::new(NSPoint::new(6.0, ((look.row - height) / 2.0).floor()), NSSize::new(600.0, height)));
+    field.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
+    cell.addSubview(&field);
+    Retained::into_super(cell)
+}
+
+/// The rows that are items (not ".." or group titles).
+fn item_rows(state: &PaneState) -> Vec<usize> {
+    (0..state.rows().len()).filter(|&r| state.entry_at_row(r).is_some()).collect()
 }
 
 /// File URLs on a pasteboard (from a drag, or Edit > Copy in Finder).
+/// What the file views accept dropped: files, items from panes, and file
+/// promises.
+pub fn drag_types() -> Vec<Retained<NSString>> {
+    let mut types: Vec<Retained<NSString>> = vec![unsafe { NSPasteboardTypeFileURL }.retain(), ns(ITEMS_TYPE)];
+    types.extend(objc2_app_kit::NSFilePromiseReceiver::readableDraggedTypes().iter());
+    types
+}
+
 /// Where dragged items come from: a pane of this app (any file system) or
 /// Finder (local files).
 pub fn dragged_items(info: &ProtocolObject<dyn NSDraggingInfo>) -> Option<(FsRef, Vec<PathBuf>)> {
     let pasteboard = info.draggingPasteboard();
     let types = pasteboard.types().map(|t| t.iter().map(|t| t.to_string()).collect::<Vec<_>>()).unwrap_or_default();
-    // From a pane of this app: what DRAG says (server items are file
-    // promises on the pasteboard, which panes do not need).
-    let from_pane = info.draggingSource().is_some_and(|source| source.downcast_ref::<FileTable>().is_some());
+    // From a pane of this app (its list, columns, or icons): what DRAG says
+    // (server items are file promises on the pasteboard, which panes do
+    // not need).
+    let from_pane = info.draggingSource().is_some_and(|source| {
+        source.downcast_ref::<FileTable>().is_some()
+            || source.downcast_ref::<super::column_view::ColumnBrowser>().is_some()
+            || source.downcast_ref::<super::icon_view::IconView>().is_some()
+    });
     if from_pane || types.iter().any(|t| t == ITEMS_TYPE) {
         return DRAG.with(|d| d.borrow().clone());
     }
@@ -1889,6 +2292,11 @@ pub fn paths_on_pasteboard(pasteboard: &objc2_app_kit::NSPasteboard) -> Vec<Path
         .filter_map(|s| objc2_foundation::NSURL::URLWithString(&s))
         .filter_map(|url| url_path(&url))
         .collect()
+}
+
+/// The indexes in a set, in order.
+pub fn index_rows(set: &NSIndexSet) -> Vec<usize> {
+    index_set_rows(set)
 }
 
 fn index_set_rows(set: &NSIndexSet) -> Vec<usize> {

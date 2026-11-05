@@ -9,6 +9,7 @@ A native dual-pane file manager and file transfer client for macOS on Apple sili
 | `fs` | Listing folders, sorting (folders first, natural order), sizes, free space | No |
 | `fs::search`, `fs::glob` | Searching by name, contents, kind, and tag (Spotlight on the Mac, walking folders elsewhere); name patterns for search and Select Matching | Foundation only (Spotlight) |
 | `fs::sync` | Comparing two folders on any file systems and planning the copies and deletes that make them match | No |
+| `fs::git`, `fs::view`, `fs::filters` | Git status of items; the viewer's text decoding and hex rows; filename filters | No |
 | `fs::tags`, `fs::checksum` | Finder tags (read from and written to the file's extended attribute); SHA-256 and MD5 | Foundation only (tags) |
 | `fs::ops` | Copy, move, trash, and delete jobs between any two file systems: conflict resolution, progress, cancel, retry. Runs on a worker thread and talks to the UI through the `Observer` trait | Foundation only (Trash) |
 | `vfs` | The `Vfs` trait; `LocalFs`; `vfs::archive` (archives as read-only folders, through libarchive); `vfs::sftp` (connecting, auth, browsing, streaming); `vfs::ftp` (FTP and FTPS); `vfs::webdav`; `vfs::s3` (Signature Version 4); `vfs::http` (what WebDAV and S3 share); `vfs::known_hosts` (host keys and trusted certificates); `vfs::ssh_config`; `vfs::mount` (SMB, AFP, and NFS shares mounted with NetFS); `vfs::fxp` (direct copies between FTP servers); `vfs::results` (search results shown as a folder) | Foundation only (`vfs::mount`: NetFS) |
@@ -27,6 +28,8 @@ A native dual-pane file manager and file transfer client for macOS on Apple sili
 | `ui::preview`, `ui::oplog` | The preview pane, and the session's operation log it shows | Yes |
 | `ui::promises` | File promises for dragging server items to Finder | Yes |
 | `ui::palette` | The command palette | Yes |
+| `ui::column_view`, `ui::icon_view` | Column view (NSBrowser) and icon view (NSCollectionView), with the hidden list following their selection | Yes |
+| `ui::viewer`, `ui::filters_editor` | The text and hex viewer; Settings > Filters | Yes |
 | `ui::themed`, `ui::theme_editor` | Drawing lists in theme colors; the Customize Theme editor | Yes |
 | `ui::file_viewer` | "Show in Finder" in other apps (NSFileViewer), opened folders, and reveal requests | Yes |
 | `ui::search` | The Search dialog, and showing its results in a pane | Yes |
@@ -82,7 +85,9 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 
 - [x] Tabs in each pane (restored at launch)
 - [x] Workspaces (saved sets of tabs and locations)
-- [ ] Column and icon views; Group by
+- [x] Column view; Group by
+- [x] Icon view
+- [x] Stacked panes (one above the other)
 - [x] Preview pane (info, preview, activity, log)
 - [x] Filter field on each list
 - [x] Search (name, content, kind, tag; Spotlight locally, scanning remotely), Select Matching
@@ -92,7 +97,9 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Compressing (zip, tar, tar.gz, tar.bz2, tar.xz, 7z)
 - [ ] Changing archives in place
 - [ ] App deleter (leftover files when trashing an app)
-- [ ] Git status in the list; add, commit, push, pull
+- [x] Git status in the list
+- [ ] Git add, commit, push, pull
+- [x] Filename filters for listings and copies
 - [x] Open in Terminal for iTerm, Warp, Ghostty, Kitty (and SSH sessions in them)
 - [x] Tags (column and editing)
 - [ ] Cloud drives (Google Drive, OneDrive, Dropbox) through OAuth
@@ -113,7 +120,8 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Expandable preview pane; zoom
 - [ ] Remote locations in Finder (File Provider)
 - [x] Checksums (SHA-256, MD5)
-- [ ] Disk usage view, duplicate finder, hex viewer
+- [x] Viewer for text and hex
+- [ ] Disk usage view, duplicate finder
 - [ ] Scripting or plugins
 - [ ] Drop stack
 

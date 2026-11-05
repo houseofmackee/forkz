@@ -75,9 +75,42 @@ pub enum Command {
     SyncFolders,
     SyncBrowsing,
     ExpandPreview,
+    GroupNone,
+    GroupKind,
+    GroupModified,
+    GroupSize,
+    ViewAsList,
+    ViewAsIcons,
+    ViewAsColumns,
+    StackPanes,
+    ViewFile,
+    ToggleFilters,
 }
 
 impl Command {
+    /// The view an "as List", "as Icons", or "as Columns" command picks.
+    pub fn view_mode(self) -> Option<crate::pane::ViewMode> {
+        use crate::pane::ViewMode;
+        match self {
+            Command::ViewAsList => Some(ViewMode::List),
+            Command::ViewAsIcons => Some(ViewMode::Icons),
+            Command::ViewAsColumns => Some(ViewMode::Columns),
+            _ => None,
+        }
+    }
+
+    /// The grouping a Group By command picks.
+    pub fn grouping(self) -> Option<crate::pane::GroupBy> {
+        use crate::pane::GroupBy;
+        match self {
+            Command::GroupNone => Some(GroupBy::None),
+            Command::GroupKind => Some(GroupBy::Kind),
+            Command::GroupModified => Some(GroupBy::Modified),
+            Command::GroupSize => Some(GroupBy::Size),
+            _ => None,
+        }
+    }
+
     pub const ALL: &[Command] = &[
         Command::Open,
         Command::NewFolder,
@@ -146,6 +179,16 @@ impl Command {
         Command::SyncFolders,
         Command::SyncBrowsing,
         Command::ExpandPreview,
+        Command::GroupNone,
+        Command::GroupKind,
+        Command::GroupModified,
+        Command::GroupSize,
+        Command::ViewAsList,
+        Command::ViewAsIcons,
+        Command::ViewAsColumns,
+        Command::StackPanes,
+        Command::ViewFile,
+        Command::ToggleFilters,
     ];
 
     pub fn tag(self) -> isize {
@@ -244,6 +287,16 @@ impl Command {
             Command::SyncFolders => "Sync Folders\u{2026}",
             Command::SyncBrowsing => "Sync Browsing",
             Command::ExpandPreview => "Expand Preview Pane",
+            Command::GroupNone => "No Grouping",
+            Command::GroupKind => "Group by Kind",
+            Command::GroupModified => "Group by Date Modified",
+            Command::GroupSize => "Group by Size",
+            Command::ViewAsList => "as List",
+            Command::ViewAsIcons => "as Icons",
+            Command::ViewAsColumns => "as Columns",
+            Command::StackPanes => "Stack Panes",
+            Command::ViewFile => "View",
+            Command::ToggleFilters => "Use Filename Filters",
         }
     }
 
@@ -325,6 +378,16 @@ impl Command {
             Command::SyncFolders => ("s", shift_cmd),
             Command::SyncBrowsing => ("b", shift_cmd),
             Command::ExpandPreview => ("p", cmd | NSEventModifierFlags::Control),
+            // Control-Command-1 to 9 open workspaces.
+            Command::GroupNone | Command::GroupKind | Command::GroupModified | Command::GroupSize => ("", cmd),
+            // As in Finder.
+            Command::ViewAsList => ("1", cmd),
+            Command::ViewAsIcons => ("2", cmd),
+            Command::ViewAsColumns => ("3", cmd),
+            Command::StackPanes => ("", cmd),
+            Command::ToggleFilters => ("", cmd),
+            // F3, as in Total Commander (also handled in the lists).
+            Command::ViewFile => ("\u{f706}", NSEventModifierFlags::empty()),
         }
     }
 

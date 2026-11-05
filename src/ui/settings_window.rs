@@ -71,6 +71,7 @@ struct Controls {
 pub struct WindowIvars {
     window: OnceCell<Retained<NSWindow>>,
     controls: OnceCell<Controls>,
+    filters: OnceCell<Retained<super::filters_editor::FiltersEditor>>,
 }
 
 define_class!(
@@ -248,7 +249,11 @@ fn grid(rows: Vec<(Retained<NSView>, Retained<NSView>)>, mtm: MainThreadMarker) 
 
 impl SettingsWindow {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(WindowIvars { window: OnceCell::new(), controls: OnceCell::new() });
+        let this = Self::alloc(mtm).set_ivars(WindowIvars {
+            window: OnceCell::new(),
+            controls: OnceCell::new(),
+            filters: OnceCell::new(),
+        });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.build(mtm);
         this
@@ -438,12 +443,16 @@ impl SettingsWindow {
             mtm,
         );
         let shortcuts = self.shortcuts_tab(&controls.shortcuts, mtm);
+        let filters_editor = super::filters_editor::FiltersEditor::new(mtm);
+        let filters = filters_editor.view();
+        let _ = self.ivars().filters.set(filters_editor);
 
         let tabs = NSTabView::new(mtm);
         for (title, content) in [
             ("General", general),
             ("Appearance", appearance),
             ("Transfers", transfers),
+            ("Filters", filters),
             ("SFTP", sftp),
             ("Shortcuts", shortcuts),
         ] {
@@ -543,6 +552,9 @@ impl SettingsWindow {
 
     /// Puts the current settings into the controls.
     fn load(&self) {
+        if let Some(filters) = self.ivars().filters.get() {
+            filters.load();
+        }
         let Some(c) = self.ivars().controls.get() else { return };
         let Some(settings) = super::current_settings() else { return };
         let set = |b: &NSButton, on: bool| b.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });

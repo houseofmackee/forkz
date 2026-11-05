@@ -7,6 +7,23 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-05
+
+### Added
+
+- Icon view (View > as Icons, Command-2) and column view (View > as Columns, Command-3; as List is Command-1), as in Finder: large icons that grow with zoom, or a pane's folders side by side, browsed with the mouse or the arrow keys. Commands, Quick Look, the preview pane, and drag and drop (out to other panes and Finder, and onto folders) work as in the list.
+- Group By (View > Group By): the list grouped by kind, date modified (Today, Yesterday, Previous 7 Days, Previous 30 Days, months, and years), or size, keeping the sort within each group.
+- Stack Panes (View menu): the two panes one above the other instead of side by side.
+- A Git column (View > Columns > Git): in a repository, whether each item is modified, added, untracked, renamed, ignored, or in conflict; folders show the most important change inside them.
+- A viewer (View, F3): a file as text (UTF-8, UTF-16, or Latin-1, with search and optional wrapping) or as hex, in its own window; on the Mac, on servers, and in archives.
+- Filename filters (Settings > Filters, View > Use Filename Filters): named sets of patterns that hide items in the lists, leave them out of copies, or both, with a few to start from.
+
+### Fixed
+
+- Command-W in another window (a viewer, Settings) closed the main window; it closes that window.
+- The Git column and other optional columns now show from launch (they needed a refresh before).
+- Removing a folder from the sidebar (Remove from Sidebar) no longer makes forkz quit.
+
 ## [0.10.1] - 2026-11-05
 
 ### Fixed
@@ -202,7 +219,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/houseofmackee/forkz/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/houseofmackee/forkz/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/houseofmackee/forkz/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/houseofmackee/forkz/compare/v0.9.1...v0.9.2

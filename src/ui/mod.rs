@@ -2,9 +2,12 @@
 //! the bottom; the menu bar and toolbar; and folder watching.
 
 mod activity;
+mod column_view;
 pub mod commands;
 mod dialogs;
 mod file_viewer;
+mod filters_editor;
+mod icon_view;
 mod multi_rename;
 mod oplog;
 mod palette;
@@ -22,6 +25,7 @@ mod theme_editor;
 mod themed;
 mod tools;
 mod util;
+mod viewer;
 mod workspaces;
 
 use std::cell::{Cell, OnceCell, RefCell};
@@ -321,6 +325,18 @@ pub fn prepare_item(item: &NSMenuItem, command: Command, pane: usize) {
         let on = SYNC_BROWSING.with(|s| s.borrow().is_some());
         item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
     }
+    if let Some(group) = command.grouping() {
+        let on = app().is_some_and(|a| a.panes[pane].group_by() == group);
+        item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+    }
+    if command == Command::ToggleFilters {
+        let on = app().is_some_and(|a| a.settings.borrow().filters_on);
+        item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+    }
+    if let Some(mode) = command.view_mode() {
+        let on = app().is_some_and(|a| a.panes[pane].view_mode() == mode);
+        item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+    }
 }
 
 /// A command's title for a pane: "Delete..." instead of "Move to Trash" on
@@ -341,9 +357,19 @@ pub fn command_title(command: Command, pane: usize) -> String {
         Command::CloseTab if app.panes[pane].tab_count() <= 1 => "Close Window",
         Command::TogglePreview if !app.preview.view().isHidden() => "Hide Preview Pane",
         Command::Disconnect if app.panes[pane].fs().outside().is_some() => "Close Archive",
+        Command::ToggleLeftPane | Command::ToggleRightPane if app.settings.borrow().stacked_panes => {
+            let hidden = app.panes[usize::from(command == Command::ToggleRightPane)].view().isHidden();
+            match (command == Command::ToggleLeftPane, hidden) {
+                (true, true) => "Show Top Pane",
+                (true, false) => "Hide Top Pane",
+                (false, true) => "Show Bottom Pane",
+                (false, false) => "Hide Bottom Pane",
+            }
+        }
         Command::ToggleLeftPane if app.panes[0].view().isHidden() => "Show Left Pane",
         Command::ToggleSidebar if app.sidebar.view().isHidden() => "Show Sidebar",
         Command::ExpandPreview if PREVIEW_EXPANDED.with(|e| e.get().is_some()) => "Shrink Preview Pane",
+        Command::StackPanes if app.settings.borrow().stacked_panes => "Panes Side by Side",
         Command::ToggleRightPane if app.panes[1].view().isHidden() => "Show Right Pane",
         _ => command.title(),
     };
@@ -478,15 +504,34 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     });
     app.activity.set_limit(app.settings.borrow().transfers.max_transfers);
     restore_tabs(&app);
+    apply_filters(&app);
+    {
+        let (left, right) = {
+            let s = app.settings.borrow();
+            ((s.left.group_by, s.left.view), (s.right.group_by, s.right.view))
+        };
+        for (pane, (group, view)) in app.panes.iter().zip([left, right]) {
+            pane.set_group_by(group);
+            pane.set_view_mode(view);
+        }
+    }
     apply_appearance(&app);
     apply_speed_limits(&app);
     APP.with(|a| a.set(app.clone())).map_err(|_| anyhow::anyhow!("the app is already running"))?;
+    // The columns from settings (the panes were made before the app was
+    // reachable, with the default columns).
+    for pane in &app.panes {
+        pane.apply_columns();
+    }
 
     start_watching();
     reload_sidebar();
     crate::updates::start(mtm);
     app.window.makeKeyAndOrderFront(None);
     first_launch_layout(&app.window);
+    if app.settings.borrow().stacked_panes {
+        set_panes_stacked(&app, true);
+    }
     add_new_toolbar_items(&app);
     // The split view restores its own idea of what is hidden: settings win.
     let (preview_visible, sidebar_hidden) = {
@@ -698,7 +743,7 @@ fn main_menu(
     command(&file, Command::Disconnect);
     command(&file, Command::ImportFileZilla);
     separator(&file);
-    for c in [Command::Open, Command::OpenWithApp, Command::QuickLook] {
+    for c in [Command::Open, Command::OpenWithApp, Command::QuickLook, Command::ViewFile] {
         command(&file, c);
     }
     separator(&file);
@@ -742,12 +787,17 @@ fn main_menu(
     command(&edit, Command::Search);
 
     let view = submenu("View");
-    for c in [Command::ToggleHidden, Command::Refresh] {
+    for c in [Command::ViewAsList, Command::ViewAsIcons, Command::ViewAsColumns] {
+        command(&view, c);
+    }
+    separator(&view);
+    for c in [Command::ToggleHidden, Command::ToggleFilters, Command::Refresh] {
         command(&view, c);
     }
     separator(&view);
     for c in [
         Command::ToggleSidebar,
+        Command::StackPanes,
         Command::ToggleLeftPane,
         Command::ToggleRightPane,
         Command::TogglePreview,
@@ -760,6 +810,14 @@ fn main_menu(
         command(&view, c);
     }
     separator(&view);
+    let group = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Group By"));
+    for c in [Command::GroupNone, Command::GroupKind, Command::GroupModified, Command::GroupSize] {
+        command(&group, c);
+    }
+    let group_item = NSMenuItem::new(mtm);
+    group_item.setTitle(&ns("Group By"));
+    group_item.setSubmenu(Some(&group));
+    view.addItem(&group_item);
     let columns = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Columns"));
     for (index, (_, title)) in crate::settings::COLUMNS.iter().enumerate() {
         let item = unsafe {
@@ -914,6 +972,7 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         | Command::MoveToOther => has_selection,
         // These need files on the Mac.
         Command::CopyFiles | Command::QuickLook => has_selection && local,
+        Command::ViewFile => pane.target_entries().iter().any(|e| !e.is_folder_like()),
         Command::RevealInFinder => local,
         Command::AddToSidebar => local || site_of(&pane.fs()).is_some(),
         Command::RemoveFromSidebar => {
@@ -993,6 +1052,30 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::SyncFolders => sync_folders(None),
         Command::SyncBrowsing => toggle_sync_browsing(),
         Command::ExpandPreview => toggle_preview_expanded(),
+        Command::ToggleFilters => update_settings(|s| s.filters_on = !s.filters_on),
+        Command::StackPanes => {
+            let stacked = !app.settings.borrow().stacked_panes;
+            set_panes_stacked(&app, stacked);
+            update_settings(|s| s.stacked_panes = stacked);
+        }
+        Command::ViewAsList | Command::ViewAsIcons | Command::ViewAsColumns => {
+            if let Some(mode) = command.view_mode() {
+                pane.set_view_mode(mode);
+                update_settings(|s| {
+                    let side = if index == 0 { &mut s.left } else { &mut s.right };
+                    side.view = mode;
+                });
+            }
+        }
+        Command::GroupNone | Command::GroupKind | Command::GroupModified | Command::GroupSize => {
+            if let Some(group) = command.grouping() {
+                pane.set_group_by(group);
+                update_settings(|s| {
+                    let side = if index == 0 { &mut s.left } else { &mut s.right };
+                    side.group_by = group;
+                });
+            }
+        }
         Command::ZoomIn => zoom(1),
         Command::ZoomOut => zoom(-1),
         Command::ActualSize => zoom(0),
@@ -1045,6 +1128,12 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::RevealInFinder => {}
         Command::OpenInTerminal => open_in_terminal(&pane),
         Command::QuickLook => pane_view::toggle_quick_look(&pane),
+        Command::ViewFile => {
+            // The first file chosen (folders have nothing to view).
+            if let Some(entry) = pane.target_entries().into_iter().find(|e| !e.is_folder_like()) {
+                viewer::open(pane.fs(), entry.path, entry.size);
+            }
+        }
         Command::AddToSidebar if pane.is_local() => {
             let folders: Vec<PathBuf> = targets().into_iter().filter(|p| p.is_dir()).collect();
             if folders.is_empty() {
@@ -1113,8 +1202,15 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::Settings => settings_window::show(),
         Command::NewTab => pane.new_tab(pane.fs(), pane.location()),
         Command::CloseTab => {
-            if !pane.close_tab(pane.active_tab()) {
-                app.window.performClose(None);
+            // Command-W in another window (a viewer, Settings) closes that.
+            let key = NSApplication::sharedApplication(mtm()).keyWindow();
+            match key {
+                Some(key) if !std::ptr::eq(&*key, &*app.window) => key.performClose(None),
+                _ => {
+                    if !pane.close_tab(pane.active_tab()) {
+                        app.window.performClose(None);
+                    }
+                }
             }
         }
         Command::NextTab => pane.cycle_tab(1),
@@ -1162,10 +1258,11 @@ pub fn current_settings() -> Option<Settings> {
 /// Changes settings, saves them, and applies what changed.
 pub fn update_settings(change: impl FnOnce(&mut Settings)) {
     let Some(app) = app() else { return };
-    let (show_hidden, limit, appearance_changed, shortcuts_changed) = {
+    let (show_hidden, limit, appearance_changed, shortcuts_changed, filters_changed) = {
         let mut settings = app.settings.borrow_mut();
         let (appearance, shortcuts, workspaces) =
             (settings.appearance.clone(), settings.shortcuts.clone(), settings.workspaces.clone());
+        let filters = (settings.filters.clone(), settings.filters_on);
         change(&mut settings);
         settings.save();
         (
@@ -1173,8 +1270,12 @@ pub fn update_settings(change: impl FnOnce(&mut Settings)) {
             settings.transfers.max_transfers,
             settings.appearance != appearance,
             settings.shortcuts != shortcuts || settings.workspaces != workspaces,
+            (settings.filters.clone(), settings.filters_on) != filters,
         )
     };
+    if filters_changed {
+        apply_filters(&app);
+    }
     for pane in &app.panes {
         if pane.show_hidden() != show_hidden {
             pane.set_show_hidden(show_hidden);
@@ -1187,6 +1288,44 @@ pub fn update_settings(change: impl FnOnce(&mut Settings)) {
     }
     if shortcuts_changed {
         rebuild_main_menu();
+    }
+}
+
+thread_local! {
+    /// What the filename filters leave out of lists (with a version that
+    /// changes with them) and of copies.
+    static FILTERS: RefCell<(u64, Option<crate::fs::filters::Exclusions>, Option<crate::fs::filters::Exclusions>)> =
+        const { RefCell::new((0, None, None)) };
+}
+
+/// The filename filters for lists, and their version.
+pub fn listing_exclusions() -> (Option<crate::fs::filters::Exclusions>, u64) {
+    FILTERS.with(|f| {
+        let f = f.borrow();
+        (f.1.clone(), f.0)
+    })
+}
+
+/// The filename filters for copies.
+pub fn transfer_exclusions() -> Option<crate::fs::filters::Exclusions> {
+    FILTERS.with(|f| f.borrow().2.clone())
+}
+
+/// The filename filters from settings, applied to the lists.
+fn apply_filters(app: &App) {
+    use crate::fs::filters::Exclusions;
+    let (filters, on) = {
+        let s = app.settings.borrow();
+        (s.filters.clone(), s.filters_on)
+    };
+    let listing = if on { Exclusions::new(&filters, |f| f.listings) } else { None };
+    let transfer = if on { Exclusions::new(&filters, |f| f.transfers) } else { None };
+    FILTERS.with(|f| {
+        let mut f = f.borrow_mut();
+        *f = (f.0 + 1, listing, transfer);
+    });
+    for pane in &app.panes {
+        pane.filters_changed();
     }
 }
 
@@ -2702,6 +2841,19 @@ pub fn show_tag(name: &'static str) {
 }
 
 /// Hides a pane (the other fills the window) or shows it again.
+/// The panes one above the other (or side by side again), split evenly.
+fn set_panes_stacked(app: &App, stacked: bool) {
+    let Some(split) = unsafe { app.panes[0].view().superview() }.and_then(|v| v.downcast::<NSSplitView>().ok()) else {
+        return;
+    };
+    split.setVertical(!stacked);
+    split.adjustSubviews();
+    split.layoutSubtreeIfNeeded();
+    let size = split.frame().size;
+    let length = if stacked { size.height } else { size.width };
+    split.setPosition_ofDividerAtIndex((length / 2.0).round(), 0);
+}
+
 fn toggle_pane(index: usize) {
     let Some(app) = app() else { return };
     let hide = !app.panes[index].view().isHidden();
@@ -3254,6 +3406,41 @@ fn show_site(site: &crate::sites::Site, fs: FsRef, pane_index: usize) {
         app.panes[1 - pane_index].navigate_to(vfs::local(), local.clone());
     }
     update_title(&app);
+}
+
+/// Gives a pane the keyboard focus (its list, or its column view).
+fn focus_pane(index: usize) {
+    if let Some(pane) = app().and_then(|a| a.panes.get(index).cloned()) {
+        pane.focus();
+    }
+}
+
+/// `git status` for a pane's Git column.
+fn git_status_arrived(index: usize, statuses: crate::fs::git::Statuses) {
+    if let Some(pane) = app().and_then(|a| a.panes.get(index).cloned()) {
+        pane.git_arrived(statuses);
+    }
+}
+
+/// The icon view's selection colors, after the focus moved.
+fn refresh_icon_highlights(index: usize) {
+    if let Some(icons) = app().and_then(|a| a.panes.get(index).and_then(|p| p.icon_view())) {
+        icons.refresh_highlights();
+    }
+}
+
+/// The column view shows the pane's folder (after the window appears).
+fn sync_pane_columns(index: usize) {
+    if let Some(pane) = app().and_then(|a| a.panes.get(index).cloned()) {
+        pane.sync_columns();
+    }
+}
+
+/// A server folder listed for a pane's column view.
+fn column_listing_arrived(index: usize, folder: PathBuf, list: Vec<crate::fs::Entry>) {
+    if let Some(columns) = app().and_then(|a| a.panes.get(index).and_then(|p| p.column_browser())) {
+        columns.listing_arrived(folder, list);
+    }
 }
 
 /// Shows folders and files sent to forkz (opened with it, or revealed as

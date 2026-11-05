@@ -9,6 +9,64 @@ use crate::vfs::{self, FsRef};
 /// A place in history: a folder on a file system.
 type Place = (FsRef, PathBuf);
 
+/// How a pane shows its folder (View > as List, as Icons, as Columns).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ViewMode {
+    #[default]
+    List,
+    Icons,
+    Columns,
+}
+
+/// How the list is grouped (View > Group By).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GroupBy {
+    #[default]
+    None,
+    Kind,
+    Modified,
+    Size,
+}
+
+impl GroupBy {
+    pub const ALL: [GroupBy; 4] = [GroupBy::None, GroupBy::Kind, GroupBy::Modified, GroupBy::Size];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            GroupBy::None => "None",
+            GroupBy::Kind => "Kind",
+            GroupBy::Modified => "Date Modified",
+            GroupBy::Size => "Size",
+        }
+    }
+}
+
+/// A row of the list: "..", a group's title, or an entry (its index in
+/// `entries()`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Row {
+    Parent,
+    Header(String),
+    Entry(usize),
+}
+
+/// The kind of an entry for Group By Kind ("Folder", "PDF document"); the
+/// view gives macOS's names.
+pub type KindLabel = fn(&Entry) -> String;
+
+fn plain_kind(entry: &Entry) -> String {
+    if entry.is_folder_like() {
+        "Folder".into()
+    } else {
+        match entry.path.extension() {
+            Some(ext) => format!("{} file", ext.to_string_lossy().to_uppercase()),
+            None => "Document".into(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PaneState {
     fs: FsRef,
@@ -31,6 +89,15 @@ pub struct PaneState {
     filter_text: String,
     /// Sizes of folders calculated in this folder, kept across reloads.
     folder_sizes: std::collections::HashMap<PathBuf, u64>,
+    group: GroupBy,
+    kind_label: KindLabel,
+    /// Items the filename filters hide, and which version of the filters.
+    exclusions: Option<crate::fs::filters::Exclusions>,
+    exclusions_version: u64,
+    /// How many items the filters hide here.
+    filtered_out: usize,
+    /// The list's rows: "..", group titles, and `visible` (grouped).
+    rows: Vec<Row>,
 }
 
 impl PaneState {
@@ -49,6 +116,12 @@ impl PaneState {
             generation: 0,
             filter_text: String::new(),
             folder_sizes: std::collections::HashMap::new(),
+            group: GroupBy::None,
+            kind_label: plain_kind,
+            exclusions: None,
+            exclusions_version: 0,
+            filtered_out: 0,
+            rows: Vec::new(),
         };
         pane.load();
         pane
@@ -167,13 +240,76 @@ impl PaneState {
                 entry.size = *size;
             }
         }
+        let excluded = |e: &Entry| self.exclusions.as_ref().is_some_and(|x| x.excludes(&e.name, e.is_folder_like()));
+        self.filtered_out = self.all.iter().filter(|e| (self.show_hidden || !e.hidden) && excluded(e)).count();
         self.visible = self
             .all
             .iter()
             .filter(|e| self.show_hidden || !e.hidden)
+            .filter(|e| !excluded(e))
             .filter(|e| needle.is_empty() || e.name.to_lowercase().contains(&needle))
             .cloned()
             .collect();
+        self.group_rows();
+    }
+
+    /// Orders `visible` by group (keeping the sort within each) and lays
+    /// out the rows.
+    fn group_rows(&mut self) {
+        let mut keys: Vec<(i64, String)> = Vec::new();
+        if self.group != GroupBy::None {
+            let today = local_date(std::time::SystemTime::now());
+            keys = self.visible.iter().map(|e| group_key(self.group, e, today, self.kind_label)).collect();
+            let mut order: Vec<usize> = (0..self.visible.len()).collect();
+            order.sort_by(|&a, &b| {
+                keys[a].0.cmp(&keys[b].0).then_with(|| keys[a].1.to_lowercase().cmp(&keys[b].1.to_lowercase()))
+            });
+            self.visible = order.iter().map(|&i| self.visible[i].clone()).collect();
+            keys = order.iter().map(|&i| keys[i].clone()).collect();
+        }
+        self.rows.clear();
+        if self.can_go_up() {
+            self.rows.push(Row::Parent);
+        }
+        for index in 0..self.visible.len() {
+            if let Some((_, label)) = keys.get(index)
+                && (index == 0 || keys[index - 1].1 != *label)
+            {
+                self.rows.push(Row::Header(label.clone()));
+            }
+            self.rows.push(Row::Entry(index));
+        }
+    }
+
+    pub fn rows(&self) -> &[Row] {
+        &self.rows
+    }
+
+    /// The entry in a list row (None for ".." and group titles).
+    pub fn entry_at_row(&self, row: usize) -> Option<&Entry> {
+        match self.rows.get(row) {
+            Some(Row::Entry(index)) => self.visible.get(*index),
+            _ => None,
+        }
+    }
+
+    /// The list row of an entry.
+    pub fn table_row_of(&self, path: &Path) -> Option<usize> {
+        let index = self.row_of(path)?;
+        self.rows.iter().position(|r| *r == Row::Entry(index))
+    }
+
+    pub fn group_by(&self) -> GroupBy {
+        self.group
+    }
+
+    /// Groups the list (`kind` names kinds for Group By Kind).
+    pub fn set_group_by(&mut self, group: GroupBy, kind: KindLabel) {
+        self.kind_label = kind;
+        if self.group != group {
+            self.group = group;
+            self.filter();
+        }
     }
 
     fn apply_sizes_and_sort(&mut self) {
@@ -196,6 +332,21 @@ impl PaneState {
     }
 
     /// How many items there are without the filter (hidden ones aside).
+    /// Hides what the filename filters name (`version` changes with them,
+    /// so the list is only filtered again when they do).
+    pub fn set_exclusions(&mut self, exclusions: Option<crate::fs::filters::Exclusions>, version: u64) {
+        if self.exclusions_version != version {
+            self.exclusions = exclusions;
+            self.exclusions_version = version;
+            self.filter();
+        }
+    }
+
+    /// How many items the filename filters hide here.
+    pub fn filtered_out(&self) -> usize {
+        self.filtered_out
+    }
+
     pub fn unfiltered_count(&self) -> usize {
         self.all.iter().filter(|e| self.show_hidden || !e.hidden).count()
     }
@@ -247,6 +398,20 @@ impl PaneState {
         let previous = std::mem::replace(&mut self.location, path);
         self.back.push((previous_fs, previous));
         self.forward.clear();
+        self.all.clear();
+        self.visible.clear();
+        self.filter_text.clear();
+        self.folder_sizes.clear();
+        self.load();
+    }
+
+    /// Shows another folder of the same file system without recording
+    /// history (browsing in column view, where columns show the way).
+    pub fn browse(&mut self, path: PathBuf) {
+        if path == self.location {
+            return;
+        }
+        self.location = path;
         self.all.clear();
         self.visible.clear();
         self.filter_text.clear();
@@ -361,9 +526,128 @@ pub fn selection_summary(entries: &[Entry], selected: &[usize]) -> String {
     text
 }
 
+/// A local calendar date (year, month 1 to 12, day).
+type Date = (i32, u32, u32);
+
+fn local_date(time: std::time::SystemTime) -> Date {
+    let seconds = match time.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_secs() as libc::time_t,
+        Err(_) => 0,
+    };
+    // SAFETY: localtime_r fills the tm it is given.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&seconds, &mut tm) };
+    (tm.tm_year + 1900, (tm.tm_mon + 1) as u32, tm.tm_mday as u32)
+}
+
+/// Days since 1970-01-01 of a calendar date (Howard Hinnant's algorithm).
+fn day_number((y, m, d): Date) -> i64 {
+    let y = i64::from(y) - i64::from(m <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = i64::from(m);
+    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + i64::from(d) - 1;
+    era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468
+}
+
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// A date's group, as Finder names them: Today, Yesterday, Previous 7
+/// Days, Previous 30 Days, a month of this year, or a year. Newest first.
+fn date_group(today: Date, date: Date) -> (i64, String) {
+    let ago = day_number(today) - day_number(date);
+    match ago {
+        i64::MIN..=0 => (0, "Today".into()),
+        1 => (1, "Yesterday".into()),
+        2..=7 => (2, "Previous 7 Days".into()),
+        8..=30 => (3, "Previous 30 Days".into()),
+        _ if date.0 == today.0 => (100 + 12 - i64::from(date.1), MONTHS[(date.1 - 1) as usize].into()),
+        _ => (1000 + i64::from(today.0 - date.0), date.0.to_string()),
+    }
+}
+
+/// An entry's group (order, then title) for a grouping.
+fn group_key(group: GroupBy, entry: &Entry, today: Date, kind: KindLabel) -> (i64, String) {
+    match group {
+        GroupBy::None => (0, String::new()),
+        GroupBy::Kind => (i64::from(!entry.is_folder_like()), kind(entry)),
+        GroupBy::Modified => match entry.modified {
+            Some(time) => date_group(today, local_date(time)),
+            None => (i64::MAX, "Unknown Date".into()),
+        },
+        GroupBy::Size => {
+            const MB: u64 = 1_000_000;
+            match entry.size {
+                _ if entry.is_folder_like() => (0, "Folders".into()),
+                s if s >= 1000 * MB => (1, "Huge (1 GB or more)".into()),
+                s if s >= 100 * MB => (2, "Large (100 MB to 1 GB)".into()),
+                s if s >= MB => (3, "Medium (1 to 100 MB)".into()),
+                s if s >= 100_000 => (4, "Small (100 KB to 1 MB)".into()),
+                0 => (6, "Empty".into()),
+                _ => (5, "Tiny (under 100 KB)".into()),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn date_groups_like_finder() {
+        let today = (2026, 11, 5);
+        let group = |date| date_group(today, date).1;
+        assert_eq!(group((2026, 11, 5)), "Today");
+        assert_eq!(group((2026, 11, 6)), "Today", "the future counts as today");
+        assert_eq!(group((2026, 11, 4)), "Yesterday");
+        assert_eq!(group((2026, 10, 30)), "Previous 7 Days");
+        assert_eq!(group((2026, 10, 10)), "Previous 30 Days");
+        assert_eq!(group((2026, 3, 1)), "March");
+        assert_eq!(group((2024, 12, 31)), "2024");
+        // Across a year end, and newest groups first.
+        assert_eq!(date_group((2027, 1, 1), (2026, 12, 31)).1, "Yesterday");
+        let order = |date| date_group(today, date).0;
+        assert!(order((2026, 11, 4)) < order((2026, 3, 1)) && order((2026, 3, 1)) < order((2025, 6, 1)));
+        assert!(order((2026, 9, 1)) < order((2026, 2, 1)));
+    }
+
+    #[test]
+    fn grouped_rows_have_titles_and_keep_the_sort() {
+        let dir = folder();
+        std::fs::write(dir.path().join("a.md"), vec![b'x'; 200_000]).unwrap();
+        let mut pane = PaneState::new(vfs::local(), dir.path().to_path_buf(), Sort::default(), false);
+        assert!(pane.rows().iter().all(|r| !matches!(r, Row::Header(_))));
+        pane.set_group_by(GroupBy::Size, plain_kind);
+        let titles: Vec<String> =
+            pane.rows().iter().filter_map(|r| if let Row::Header(t) = r { Some(t.clone()) } else { None }).collect();
+        assert_eq!(titles, ["Folders", "Small (100 KB to 1 MB)", "Tiny (under 100 KB)"]);
+        assert_eq!(pane.rows()[0], Row::Parent);
+        let names: Vec<&str> =
+            (0..pane.rows().len()).filter_map(|r| pane.entry_at_row(r)).map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["sub", "a.md", "b.txt"]);
+        let row = pane.table_row_of(&dir.path().join("b.txt")).unwrap();
+        assert_eq!(pane.entry_at_row(row).unwrap().name, "b.txt");
+        pane.set_group_by(GroupBy::Kind, plain_kind);
+        let titles: Vec<String> =
+            pane.rows().iter().filter_map(|r| if let Row::Header(t) = r { Some(t.clone()) } else { None }).collect();
+        assert_eq!(titles, ["Folder", "MD file", "TXT file"]);
+        pane.set_group_by(GroupBy::None, plain_kind);
+        assert_eq!(pane.rows().len(), 4, "\"..\" and three items");
+    }
 
     fn folder() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
