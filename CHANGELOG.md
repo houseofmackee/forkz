@@ -7,6 +7,10 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the checksum and signing libraries (sha2 0.11, hmac 0.13, and md-5 0.11).
+
 ## [0.10.0] - 2026-11-05
 
 ### Added
