@@ -11,28 +11,31 @@ A native dual-pane file manager and file transfer client for macOS on Apple sili
 | `fs::sync` | Comparing two folders on any file systems and planning the copies and deletes that make them match | No |
 | `fs::tags`, `fs::checksum` | Finder tags (read from and written to the file's extended attribute); SHA-256 and MD5 | Foundation only (tags) |
 | `fs::ops` | Copy, move, trash, and delete jobs between any two file systems: conflict resolution, progress, cancel, retry. Runs on a worker thread and talks to the UI through the `Observer` trait | Foundation only (Trash) |
-| `vfs` | The `Vfs` trait; `LocalFs`; `vfs::archive` (archives as read-only folders, through libarchive); `vfs::sftp` (connecting, auth, browsing, streaming); `vfs::ftp` (FTP and FTPS); `vfs::webdav`; `vfs::s3` (Signature Version 4); `vfs::http` (what WebDAV and S3 share); `vfs::known_hosts` (host keys and trusted certificates); `vfs::ssh_config`; `vfs::mount` (SMB, AFP, and NFS shares mounted with NetFS); `vfs::results` (search results shown as a folder) | Foundation only (`vfs::mount`: NetFS) |
+| `vfs` | The `Vfs` trait; `LocalFs`; `vfs::archive` (archives as read-only folders, through libarchive); `vfs::sftp` (connecting, auth, browsing, streaming); `vfs::ftp` (FTP and FTPS); `vfs::webdav`; `vfs::s3` (Signature Version 4); `vfs::http` (what WebDAV and S3 share); `vfs::known_hosts` (host keys and trusted certificates); `vfs::ssh_config`; `vfs::mount` (SMB, AFP, and NFS shares mounted with NetFS); `vfs::fxp` (direct copies between FTP servers); `vfs::results` (search results shown as a folder) | Foundation only (`vfs::mount`: NetFS) |
 | `sites` | Saved sites (`sites.toml`), Keychain passwords, `sites::filezilla` import | Security framework |
 | `pane` | One pane's state: location, entries, hidden items, history | No |
 | `rename` | Multi-rename rules, the preview with its problems, and renaming with swaps | No |
 | `settings` | `~/Library/Application Support/forkz/settings.toml` | No |
+| `theme` | Color themes: the built-in ones and the user's TOML files | No |
 | `updates` | Sparkle, loaded at runtime when the app bundle has it | Yes |
 | `ui` | Window, menus, toolbar, folder watching (FSEvents through `notify`), and app-wide commands | Yes |
 | `ui::pane_view` | The file list (NSTableView), path bar, status line, drag and drop, Quick Look, context menu | Yes |
 | `ui::sidebar` | Favorites, standard places, volumes, sites (with connection state), synclets, and tags | Yes |
-| `ui::activity` | A row per running job, with progress, Stop, Pause, and Start Next | Yes |
+| `ui::activity` | A row per running job, with progress, Stop, and Pause; the transfer queue (reordering, Start Now, Pause All, Stop All) | Yes |
 | `ui::dialogs` | Conflict and error alerts (queued, one at a time), text prompts | Yes |
 | `ui::multi_rename` | The Rename Multiple Items window | Yes |
 | `ui::preview`, `ui::oplog` | The preview pane, and the session's operation log it shows | Yes |
 | `ui::promises` | File promises for dragging server items to Finder | Yes |
 | `ui::palette` | The command palette | Yes |
+| `ui::themed`, `ui::theme_editor` | Drawing lists in theme colors; the Customize Theme editor | Yes |
+| `ui::file_viewer` | Being the default folder viewer: the system settings, opened folders, and reveal requests | Yes |
 | `ui::search` | The Search dialog, and showing its results in a pane | Yes |
 | `ui::sync_window` | The Sync Folders window and synclets | Yes |
 | `ui::workspaces` | Saving and opening workspaces | Yes |
 | `ui::settings_window`, `ui::site_form`, `ui::permissions` | The Settings window, the Connect and site form, and the Permissions dialog | Yes |
 | `ui::remote_edit`, `ui::tools` | Upload on save for server files; the terminal and compare apps forkz hands work to | Yes |
 
-The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `fs::sync`, `fs::tags`, `vfs::archive`, `vfs::mount`, `pane`, `rename`, `settings`, `sites`, `vfs::known_hosts`, `vfs::http`, `vfs::s3` signing, `ui::commands`) has unit tests; a fake remote file system runs the streaming transfer code in them. `tests/sftp_live.rs` runs against a real sshd (`scripts/test_sftp.sh` starts a throwaway one), and `tests/protocols_live.rs` against FTP/FTPS, WebDAV, and S3 servers (`scripts/test_protocols.sh` starts throwaway ones).
+The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `fs::sync`, `fs::tags`, `vfs::archive`, `vfs::mount`, `pane`, `rename`, `settings`, `sites`, `vfs::known_hosts`, `vfs::http`, `vfs::s3` signing, `ui::commands`) has unit tests; a fake remote file system runs the streaming transfer code in them. `tests/sftp_live.rs` runs against a real sshd (`scripts/test_sftp.sh` starts a throwaway one), and `tests/protocols_live.rs` against FTP/FTPS (including FXP between servers), WebDAV, and S3 servers (`scripts/test_protocols.sh` starts throwaway ones).
 
 ## Phase 1: local dual-pane MVP (done)
 
@@ -69,6 +72,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Simultaneous transfer limit (FileZilla's "Number of Transfers")
 - [x] Resume of partial transfers
 - [x] FTP and FTPS (`suppaftp`, with macOS TLS)
+- [x] FXP between FTP servers (direct server-to-server copies when both allow it; SSCN for FTPS)
 - [x] S3 and S3-compatible (Backblaze B2, R2, MinIO), with Signature Version 4
 - [x] WebDAV
 - [x] SMB, AFP, and NFS shares (mounted through NetFS, as Finder does)
@@ -83,7 +87,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Filter field on each list
 - [x] Search (name, content, kind, tag; Spotlight locally, scanning remotely), Select Matching
 - [x] Folder sync with preview, saved as "synclets", and sync browsing
-- [x] Multi-rename with rules and presets
+- [x] Multi-rename with rules and presets (presets in the sidebar take dropped items)
 - [x] Archives browsed as folders (libarchive), extracting by copying out
 - [x] Compressing (zip, tar, tar.gz, tar.bz2, tar.xz, 7z)
 - [ ] Changing archives in place
@@ -95,7 +99,10 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Settings window
 - [x] Compare Files in an external tool (FileMerge, Kaleidoscope, Beyond Compare, BBEdit, VS Code)
 - [x] Folder sizes; server folder bookmarks
-- [x] Shortcut editor; themes (appearance, text size, row spacing, alternating rows)
+- [x] Shortcut editor; appearance, text size, row spacing, alternating rows
+- [x] Color themes: built-in ones and the user's own (TOML files, a Customize editor)
+- [x] Default folder viewer instead of Finder (NSFileViewer and the folder handler)
+- [x] Transfer queue management (reorder, start now, pause all, stop all)
 
 ## Phase 4: extras
 

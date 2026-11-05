@@ -1,5 +1,7 @@
 //! Running jobs: each runs on its own thread and shows a row (progress,
 //! details, and a Stop button) at the bottom of the window until it ends.
+//! Transfers beyond the simultaneous limit wait in a queue, which can be
+//! reordered from a row's menu; a header pauses or stops them all.
 
 use std::cell::{OnceCell, RefCell};
 use std::path::Path;
@@ -8,10 +10,11 @@ use std::time::{Duration, Instant};
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSBezelStyle, NSButton, NSProgressIndicator, NSProgressIndicatorStyle, NSStackView, NSTextField,
-    NSUserInterfaceLayoutOrientation, NSView,
+    NSBezelStyle, NSButton, NSMenu, NSMenuDelegate, NSMenuItem, NSProgressIndicator, NSProgressIndicatorStyle,
+    NSStackView, NSTextField, NSUserInterfaceLayoutOrientation, NSView,
 };
 use objc2_foundation::{NSEdgeInsets, NSObject, NSObjectProtocol};
 
@@ -58,8 +61,55 @@ fn icon_button(
     button
 }
 
+/// What a row's menu items do (encoded in their tags with the row's id).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueueAction {
+    StartNow = 1,
+    ToTop,
+    Up,
+    Down,
+    ToBottom,
+    Pause,
+    Stop,
+    PauseAll,
+    ResumeAll,
+    StopAll,
+}
+
+impl QueueAction {
+    const ALL: [QueueAction; 10] = [
+        QueueAction::StartNow,
+        QueueAction::ToTop,
+        QueueAction::Up,
+        QueueAction::Down,
+        QueueAction::ToBottom,
+        QueueAction::Pause,
+        QueueAction::Stop,
+        QueueAction::PauseAll,
+        QueueAction::ResumeAll,
+        QueueAction::StopAll,
+    ];
+
+    fn tag(self, id: isize) -> isize {
+        id * 16 + self as isize
+    }
+
+    fn from_tag(tag: isize) -> Option<(isize, QueueAction)> {
+        let action = QueueAction::ALL.into_iter().find(|a| *a as isize == tag % 16)?;
+        Some((tag / 16, action))
+    }
+}
+
+/// The line above the rows while several transfers are listed.
+struct Header {
+    view: Retained<NSStackView>,
+    summary: Retained<NSTextField>,
+    pause_all: Retained<NSButton>,
+}
+
 pub struct ActivityIvars {
     stack: OnceCell<Retained<NSStackView>>,
+    header: OnceCell<Header>,
     rows: RefCell<Vec<Row>>,
     next_id: std::cell::Cell<isize>,
     /// Transfers with a server end that may run at once.
@@ -98,15 +148,42 @@ define_class!(
         fn start_next(&self, sender: &NSButton) {
             self.move_to_front(sender.tag());
         }
+
+        #[unsafe(method(pauseAll:))]
+        fn pause_all_action(&self, _sender: &NSButton) {
+            let all_paused = self.all_paused();
+            self.pause_all(!all_paused);
+        }
+
+        #[unsafe(method(stopAll:))]
+        fn stop_all_action(&self, _sender: &NSButton) {
+            self.stop_all();
+        }
+
+        #[unsafe(method(queueAction:))]
+        fn queue_action(&self, sender: &NSMenuItem) {
+            if let Some((id, action)) = QueueAction::from_tag(sender.tag()) {
+                self.perform(id, action);
+            }
+        }
     }
 
     unsafe impl NSObjectProtocol for Activity {}
+
+    unsafe impl NSMenuDelegate for Activity {
+        /// A transfer row's menu, built when it opens.
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self, menu: &NSMenu) {
+            self.fill_row_menu(menu);
+        }
+    }
 );
 
 impl Activity {
     pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ActivityIvars {
             stack: OnceCell::new(),
+            header: OnceCell::new(),
             rows: RefCell::new(Vec::new()),
             next_id: std::cell::Cell::new(1),
             limit: std::cell::Cell::new(2),
@@ -119,6 +196,34 @@ impl Activity {
         stack.setSpacing(6.0);
         stack.setEdgeInsets(NSEdgeInsets { top: 6.0, left: 10.0, bottom: 8.0, right: 10.0 });
         stack.setHidden(true);
+        let summary = small_label("", mtm);
+        summary.setTextColor(Some(&objc2_app_kit::NSColor::secondaryLabelColor()));
+        let pause_all = NSButton::new(mtm);
+        pause_all.setTitle(&ns("Pause All"));
+        pause_all.setBezelStyle(NSBezelStyle::Push);
+        pause_all.setControlSize(objc2_app_kit::NSControlSize::Small);
+        let stop_all = NSButton::new(mtm);
+        stop_all.setTitle(&ns("Stop All"));
+        stop_all.setBezelStyle(NSBezelStyle::Push);
+        stop_all.setControlSize(objc2_app_kit::NSControlSize::Small);
+        unsafe {
+            pause_all.setTarget(Some(&*this));
+            pause_all.setAction(Some(sel!(pauseAll:)));
+            stop_all.setTarget(Some(&*this));
+            stop_all.setAction(Some(sel!(stopAll:)));
+        }
+        summary.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Horizontal);
+        let header = NSStackView::stackViewWithViews(
+            &objc2_foundation::NSArray::from_slice(&[&*summary as &NSView, &pause_all, &stop_all]),
+            mtm,
+        );
+        header.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        header.setSpacing(8.0);
+        header.setHidden(true);
+        stack.addArrangedSubview(&header);
+        header.leadingAnchor().constraintEqualToAnchor_constant(&stack.leadingAnchor(), 10.0).setActive(true);
+        header.trailingAnchor().constraintEqualToAnchor_constant(&stack.trailingAnchor(), -10.0).setActive(true);
+        let _ = this.ivars().header.set(Header { view: header, summary, pause_all });
         let _ = this.ivars().stack.set(stack);
         this
     }
@@ -182,6 +287,10 @@ impl Activity {
         // The bar takes the width; Stop stays at the right.
         row.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
         texts.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Horizontal);
+        // Right-click: reorder, start now, pause, or stop.
+        let menu = NSMenu::new(mtm);
+        menu.setDelegate(Some(ProtocolObject::from_ref(self)));
+        unsafe { row.setMenu(Some(&menu)) };
 
         let stack = self.ivars().stack.get().expect("built");
         stack.addArrangedSubview(&row);
@@ -199,8 +308,8 @@ impl Activity {
         });
         if is_limited(&job) && self.ivars().running.borrow().len() >= self.ivars().limit.get() {
             front.setHidden(false);
-            self.set_detail(id, "Waiting for another transfer to finish\u{2026}");
             self.ivars().waiting.borrow_mut().push_back((id, job, cancel));
+            self.arrange();
             return;
         }
         self.launch(id, job, cancel);
@@ -214,6 +323,7 @@ impl Activity {
         if let Some(front) = self.ivars().rows.borrow().iter().find(|r| r.id == id).and_then(|r| r.front.clone()) {
             front.setHidden(true);
         }
+        self.arrange();
         let on_error = super::current_settings().map(|s| s.transfers.on_error).unwrap_or_default();
         std::thread::Builder::new()
             .name(format!("forkz job {id}"))
@@ -311,6 +421,7 @@ impl Activity {
         };
         if waiting.is_some() {
             self.remove(id);
+            self.arrange();
             return;
         }
         if let Some(row) = self.ivars().rows.borrow().iter().find(|r| r.id == id) {
@@ -321,9 +432,16 @@ impl Activity {
 
     /// Pause and Resume: the job holds at its next chunk or item.
     fn toggle_pause(&self, id: isize) {
+        let paused = self.ivars().rows.borrow().iter().find(|r| r.id == id).map(|r| !r.cancel.is_paused());
+        if let Some(paused) = paused {
+            self.set_paused(id, paused);
+        }
+        self.update_header();
+    }
+
+    fn set_paused(&self, id: isize, paused: bool) {
         let rows = self.ivars().rows.borrow();
         let Some(row) = rows.iter().find(|r| r.id == id) else { return };
-        let paused = !row.cancel.is_paused();
         row.cancel.set_paused(paused);
         if let Some(button) = &row.pause {
             let (name, tip) = if paused { ("play.circle.fill", "Resume") } else { ("pause.circle.fill", "Pause") };
@@ -334,23 +452,178 @@ impl Activity {
         }
         if paused {
             row.detail.setStringValue(&ns("Paused"));
+        } else if self.is_waiting(id) {
+            drop(rows);
+            self.arrange();
         }
     }
 
     /// Start Next: a waiting job goes to the front of the queue.
     fn move_to_front(&self, id: isize) {
+        self.move_in_queue(id, |_, _| 0);
+    }
+
+    /// Moves a waiting job to the place `to` picks (from its place and the
+    /// queue's length).
+    fn move_in_queue(&self, id: isize, to: impl Fn(usize, usize) -> usize) {
         let mut queue = self.ivars().waiting.borrow_mut();
         if let Some(position) = queue.iter().position(|(queued, _, _)| *queued == id)
             && let Some(entry) = queue.remove(position)
         {
-            queue.push_front(entry);
+            let place = to(position, queue.len() + 1).min(queue.len());
+            queue.insert(place, entry);
         }
         drop(queue);
-        // Rows follow the queue's order: the moved one goes first among
-        // the waiting rows.
-        if let Some(row) = self.ivars().rows.borrow().iter().find(|r| r.id == id) {
-            row.detail.setStringValue(&ns("Next in line\u{2026}"));
+        self.arrange();
+    }
+
+    fn is_waiting(&self, id: isize) -> bool {
+        self.ivars().waiting.borrow().iter().any(|(queued, _, _)| *queued == id)
+    }
+
+    /// Start Now: a waiting job runs right away, beyond the limit.
+    fn start_now(&self, id: isize) {
+        let entry = {
+            let mut queue = self.ivars().waiting.borrow_mut();
+            let position = queue.iter().position(|(queued, _, _)| *queued == id);
+            position.and_then(|p| queue.remove(p))
+        };
+        if let Some((id, job, cancel)) = entry {
+            self.launch(id, job, cancel);
         }
+    }
+
+    /// Ids of the rows with a job (transfers and other file work).
+    fn job_ids(&self) -> Vec<isize> {
+        self.ivars().rows.borrow().iter().filter(|r| r.pause.is_some()).map(|r| r.id).collect()
+    }
+
+    fn all_paused(&self) -> bool {
+        let rows = self.ivars().rows.borrow();
+        let mut jobs = rows.iter().filter(|r| r.pause.is_some()).peekable();
+        jobs.peek().is_some() && jobs.all(|r| r.cancel.is_paused())
+    }
+
+    fn pause_all(&self, paused: bool) {
+        for id in self.job_ids() {
+            self.set_paused(id, paused);
+        }
+        self.update_header();
+    }
+
+    fn stop_all(&self) {
+        for id in self.job_ids() {
+            self.stop(id);
+        }
+    }
+
+    fn perform(&self, id: isize, action: QueueAction) {
+        match action {
+            QueueAction::StartNow => self.start_now(id),
+            QueueAction::ToTop => self.move_in_queue(id, |_, _| 0),
+            QueueAction::Up => self.move_in_queue(id, |at, _| at.saturating_sub(1)),
+            QueueAction::Down => self.move_in_queue(id, |at, _| at + 1),
+            QueueAction::ToBottom => self.move_in_queue(id, |_, len| len),
+            QueueAction::Pause => self.toggle_pause(id),
+            QueueAction::Stop => self.stop(id),
+            QueueAction::PauseAll => self.pause_all(true),
+            QueueAction::ResumeAll => self.pause_all(false),
+            QueueAction::StopAll => self.stop_all(),
+        }
+    }
+
+    /// The menu of the row it belongs to.
+    fn fill_row_menu(&self, menu: &NSMenu) {
+        menu.removeAllItems();
+        let id = {
+            let rows = self.ivars().rows.borrow();
+            rows.iter().find(|r| r.view.menu().is_some_and(|m| std::ptr::eq(&*m, menu))).map(|r| r.id)
+        };
+        let Some(id) = id else { return };
+        let mtm = self.mtm();
+        let add = |title: &str, action: QueueAction, enabled: bool| {
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &ns(title),
+                    Some(sel!(queueAction:)),
+                    &ns(""),
+                )
+            };
+            item.setTag(action.tag(id));
+            unsafe { item.setTarget(Some(self)) };
+            item.setEnabled(enabled);
+            menu.addItem(&item);
+        };
+        menu.setAutoenablesItems(false);
+        let place = self.ivars().waiting.borrow().iter().position(|(queued, _, _)| *queued == id);
+        if let Some(place) = place {
+            let last = self.ivars().waiting.borrow().len().saturating_sub(1);
+            add("Start Now", QueueAction::StartNow, true);
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            add("Move to Top", QueueAction::ToTop, place > 0);
+            add("Move Up", QueueAction::Up, place > 0);
+            add("Move Down", QueueAction::Down, place < last);
+            add("Move to Bottom", QueueAction::ToBottom, place < last);
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
+        let paused = self.ivars().rows.borrow().iter().any(|r| r.id == id && r.cancel.is_paused());
+        add(if paused { "Resume" } else { "Pause" }, QueueAction::Pause, true);
+        add("Stop", QueueAction::Stop, true);
+        if self.job_ids().len() > 1 {
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+            add("Pause All", QueueAction::PauseAll, !self.all_paused());
+            add("Resume All", QueueAction::ResumeAll, self.ivars().rows.borrow().iter().any(|r| r.cancel.is_paused()));
+            add("Stop All", QueueAction::StopAll, true);
+        }
+    }
+
+    /// Orders the rows: other work and running jobs first, then the waiting
+    /// ones in queue order (each told its place); updates the header.
+    fn arrange(&self) {
+        let stack = self.ivars().stack.get().expect("built");
+        let waiting: Vec<isize> = self.ivars().waiting.borrow().iter().map(|(id, _, _)| *id).collect();
+        {
+            let rows = self.ivars().rows.borrow();
+            let mut order: Vec<&Row> = rows.iter().filter(|r| !waiting.contains(&r.id)).collect();
+            order.extend(waiting.iter().filter_map(|id| rows.iter().find(|r| r.id == *id)));
+            for row in order {
+                stack.removeArrangedSubview(&row.view);
+                stack.addArrangedSubview(&row.view);
+            }
+        }
+        for (place, id) in waiting.iter().enumerate() {
+            let paused = self.ivars().rows.borrow().iter().any(|r| r.id == *id && r.cancel.is_paused());
+            if !paused {
+                let text = match place {
+                    0 => "Next in line, waiting for a transfer to finish\u{2026}".to_string(),
+                    n => format!("Waiting, number {} in line\u{2026}", n + 1),
+                };
+                self.set_detail(*id, &text);
+            }
+        }
+        self.update_header();
+    }
+
+    /// Shows "3 transfers, 1 waiting" with Pause All and Stop All while
+    /// more than one job is listed.
+    fn update_header(&self) {
+        let Some(header) = self.ivars().header.get() else { return };
+        let jobs = self.job_ids().len();
+        header.view.setHidden(jobs < 2);
+        if jobs < 2 {
+            return;
+        }
+        let waiting = self.ivars().waiting.borrow().len();
+        let mut text = format!("{jobs} jobs");
+        if waiting > 0 {
+            text.push_str(&format!(", {waiting} waiting"));
+        }
+        if self.all_paused() {
+            text.push_str(", paused");
+        }
+        header.summary.setStringValue(&ns(&text));
+        header.pause_all.setTitle(&ns(if self.all_paused() { "Resume All" } else { "Pause All" }));
     }
 
     /// A job ended: frees its slot and starts the next waiting one.
@@ -435,6 +708,8 @@ impl Activity {
         if rows.is_empty() {
             self.ivars().stack.get().expect("built").setHidden(true);
         }
+        drop(rows);
+        self.update_header();
     }
 }
 

@@ -48,6 +48,12 @@ enum Row {
         index: usize,
         name: String,
     },
+    /// A saved rename preset (by its place in the settings): items
+    /// dropped on it, or the selection when clicked, are renamed with it.
+    Preset {
+        index: usize,
+        name: String,
+    },
     /// A Finder color tag.
     Tag {
         name: &'static str,
@@ -76,6 +82,8 @@ impl SiteAction {
 }
 
 pub struct SidebarIvars {
+    /// macOS's own sidebar background (restored without a theme).
+    default_background: OnceCell<Retained<objc2_app_kit::NSColor>>,
     rows: RefCell<Vec<Row>>,
     table: OnceCell<Retained<NSTableView>>,
     scroll: OnceCell<Retained<NSScrollView>>,
@@ -132,6 +140,19 @@ define_class!(
             }
         }
 
+        #[unsafe(method(deletePreset:))]
+        fn delete_preset(&self, _sender: Option<&AnyObject>) {
+            let row = self.ivars().menu_row.take();
+            let name = row.and_then(|r| match self.ivars().rows.borrow().get(r) {
+                Some(Row::Preset { name, .. }) => Some(name.clone()),
+                _ => None,
+            });
+            if let Some(name) = name {
+                super::update_settings(|s| s.rename_presets.retain(|p| p.name != name));
+                super::reload_sidebar();
+            }
+        }
+
         #[unsafe(method(removeFavorite:))]
         fn remove_favorite(&self, _sender: Option<&AnyObject>) {
             let Some(row) = self.ivars().menu_row.take() else { return };
@@ -151,17 +172,19 @@ define_class!(
             self.ivars().rows.borrow().len() as NSInteger
         }
 
-        /// Folders dropped on the sidebar's empty area become favorites.
+        /// Items dropped on a rename preset are renamed with it; folders
+        /// dropped anywhere else become favorites.
         #[unsafe(method(tableView:validateDrop:proposedRow:proposedDropOperation:))]
         fn validate_drop(
             &self,
             table: &NSTableView,
             info: &ProtocolObject<dyn NSDraggingInfo>,
-            _row: NSInteger,
-            _operation: NSTableViewDropOperation,
+            row: NSInteger,
+            operation: NSTableViewDropOperation,
         ) -> NSDragOperation {
-            let paths = super::pane_view::paths_on_pasteboard(&info.draggingPasteboard());
-            if paths.iter().any(|p| p.is_dir()) {
+            if operation == NSTableViewDropOperation::On && self.preset_at(row).is_some() {
+                NSDragOperation::Generic
+            } else if super::pane_view::paths_on_pasteboard(&info.draggingPasteboard()).iter().any(|p| p.is_dir()) {
                 table.setDropRow_dropOperation(-1, NSTableViewDropOperation::On);
                 NSDragOperation::Link
             } else {
@@ -174,12 +197,21 @@ define_class!(
             &self,
             _table: &NSTableView,
             info: &ProtocolObject<dyn NSDraggingInfo>,
-            _row: NSInteger,
-            _operation: NSTableViewDropOperation,
+            row: NSInteger,
+            operation: NSTableViewDropOperation,
         ) -> bool {
-            let paths = super::pane_view::paths_on_pasteboard(&info.draggingPasteboard());
-            for path in paths.into_iter().filter(|p| p.is_dir()) {
-                super::add_favorite(path);
+            match self.preset_at(row).filter(|_| operation == NSTableViewDropOperation::On) {
+                Some(index) => {
+                    let items = super::pane_view::dragged_items(info);
+                    // After the drag ends: the rename window is modal.
+                    dispatch2::DispatchQueue::main().exec_async(move || super::apply_rename_preset(index, items));
+                }
+                None => {
+                    let paths = super::pane_view::paths_on_pasteboard(&info.draggingPasteboard());
+                    for path in paths.into_iter().filter(|p| p.is_dir()) {
+                        super::add_favorite(path);
+                    }
+                }
             }
             true
         }
@@ -224,6 +256,10 @@ define_class!(
                 Some(Row::Synclet { index, .. }) => {
                     self.deselect_soon();
                     super::open_synclet(index);
+                }
+                Some(Row::Preset { index, .. }) => {
+                    self.deselect_soon();
+                    dispatch2::DispatchQueue::main().exec_async(move || super::apply_rename_preset(index, None));
                 }
                 _ => {}
             }
@@ -281,6 +317,19 @@ define_class!(
                     menu.addItem(&item);
                     return;
                 }
+                Some(Row::Preset { .. }) => {
+                    let item = unsafe {
+                        NSMenuItem::initWithTitle_action_keyEquivalent(
+                            NSMenuItem::alloc(self.mtm()),
+                            &ns("Delete Preset"),
+                            Some(sel!(deletePreset:)),
+                            &ns(""),
+                        )
+                    };
+                    unsafe { item.setTarget(Some(self)) };
+                    menu.addItem(&item);
+                    return;
+                }
                 Some(Row::RemoteFavorite { connected: true, .. }) => {
                     add_site_item("Disconnect", SiteAction::Disconnect);
                     menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
@@ -305,6 +354,14 @@ define_class!(
 );
 
 impl Sidebar {
+    fn preset_at(&self, row: NSInteger) -> Option<usize> {
+        let rows = self.ivars().rows.borrow();
+        match usize::try_from(row).ok().and_then(|r| rows.get(r)) {
+            Some(Row::Preset { index, .. }) => Some(*index),
+            _ => None,
+        }
+    }
+
     fn is_header(&self, row: NSInteger) -> bool {
         let rows = self.ivars().rows.borrow();
         matches!(usize::try_from(row).ok().and_then(|r| rows.get(r)), Some(Row::Header(_)))
@@ -319,12 +376,16 @@ impl Sidebar {
             Row::Header(title) => {
                 let field = NSTextField::labelWithString(&ns(title), self.mtm());
                 field.setFont(Some(&NSFont::boldSystemFontOfSize((NSFont::smallSystemFontSize() * zoom).round())));
-                field.setTextColor(Some(&objc2_app_kit::NSColor::secondaryLabelColor()));
+                let color =
+                    super::themed::colors().map_or_else(objc2_app_kit::NSColor::secondaryLabelColor, |c| c.secondary);
+                field.setTextColor(Some(&color));
                 Retained::into_super(Retained::into_super(field))
             }
             Row::Place { title, path, symbol: name, .. } => {
                 let icon = name.and_then(|name| symbol(name, title)).unwrap_or_else(|| icon_for_path(path));
-                let tint = name.is_some().then(objc2_app_kit::NSColor::controlAccentColor);
+                let accent =
+                    super::themed::colors().map_or_else(objc2_app_kit::NSColor::controlAccentColor, |c| c.accent);
+                let tint = name.is_some().then_some(accent);
                 cell(self.mtm(), title, &icon, tint, None, zoom)
             }
             Row::Site { title, detail, connected, .. } | Row::RemoteFavorite { title, detail, connected, .. } => {
@@ -343,12 +404,16 @@ impl Sidebar {
             }
             Row::Synclet { name, .. } => {
                 let icon = symbol("arrow.triangle.2.circlepath", name).unwrap_or_else(super::util::folder_icon);
+                cell(self.mtm(), name, &icon, Some(accent()), Some("Open this sync"), zoom)
+            }
+            Row::Preset { name, .. } => {
+                let icon = symbol("character.cursor.ibeam", name).unwrap_or_else(super::util::folder_icon);
                 cell(
                     self.mtm(),
                     name,
                     &icon,
-                    Some(objc2_app_kit::NSColor::controlAccentColor()),
-                    Some("Open this sync"),
+                    Some(accent()),
+                    Some("Drop items here to rename them with this preset, or click to rename the selection"),
                     zoom,
                 )
             }
@@ -361,6 +426,7 @@ impl Sidebar {
 
     pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(SidebarIvars {
+            default_background: OnceCell::new(),
             rows: RefCell::new(Vec::new()),
             table: OnceCell::new(),
             scroll: OnceCell::new(),
@@ -375,8 +441,12 @@ impl Sidebar {
         table.addTableColumn(&column);
         table.setHeaderView(None);
         table.setStyle(NSTableViewStyle::SourceList);
+        let _ = this.ivars().default_background.set(table.backgroundColor());
         table.setRowHeight(24.0);
-        table.registerForDraggedTypes(&NSArray::from_slice(&[unsafe { NSPasteboardTypeFileURL }]));
+        table.registerForDraggedTypes(&NSArray::from_slice(&[
+            unsafe { NSPasteboardTypeFileURL },
+            &*ns(super::pane_view::ITEMS_TYPE),
+        ]));
         unsafe {
             table.setDataSource(Some(ProtocolObject::from_ref(&*this)));
             table.setDelegate(Some(ProtocolObject::from_ref(&*this)));
@@ -413,9 +483,10 @@ impl Sidebar {
         remote_favorites: &[crate::settings::RemoteFavorite],
         sites: &[crate::sites::Site],
         connected: &[String],
-        synclets: &[String],
+        saved: Saved,
         current: Current,
     ) {
+        let Saved { synclets, presets } = saved;
         let mut rows = vec![Row::Header("Favorites")];
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let standard = [
@@ -470,6 +541,12 @@ impl Sidebar {
                 rows.push(Row::Synclet { index, name: name.clone() });
             }
         }
+        if !presets.is_empty() {
+            rows.push(Row::Header("Rename Presets"));
+            for (index, name) in presets.iter().enumerate() {
+                rows.push(Row::Preset { index, name: name.clone() });
+            }
+        }
         rows.push(Row::Header("Tags"));
         for (name, color) in crate::fs::tags::COLORS {
             rows.push(Row::Tag { name, color });
@@ -518,6 +595,25 @@ impl Sidebar {
         dispatch2::DispatchQueue::main().exec_async(super::refresh_sidebar_highlight);
     }
 
+    /// The theme's sidebar and text colors (or macOS's).
+    pub fn apply_theme(&self) {
+        let scroll = self.ivars().scroll.get().expect("built");
+        match super::themed::colors() {
+            Some(colors) => {
+                self.table().setBackgroundColor(&colors.sidebar);
+                scroll.setBackgroundColor(&colors.sidebar);
+                scroll.setDrawsBackground(true);
+            }
+            None => {
+                if let Some(color) = self.ivars().default_background.get() {
+                    self.table().setBackgroundColor(color);
+                }
+                scroll.setDrawsBackground(false);
+            }
+        }
+        self.table().reloadData();
+    }
+
     /// Scales the rows and their text (1 is normal).
     pub fn set_zoom(&self, zoom: f64) {
         if (self.ivars().zoom.get() - zoom).abs() < 0.01 {
@@ -547,12 +643,23 @@ impl Sidebar {
     }
 }
 
+/// Names of saved synclets and rename presets, in order.
+pub struct Saved<'a> {
+    pub synclets: &'a [String],
+    pub presets: &'a [String],
+}
+
 /// What the active pane shows, to highlight it in the sidebar.
 pub enum Current {
     Local(PathBuf),
     /// A folder on a connection opened from this site (by id).
     Site(String, PathBuf),
     Other,
+}
+
+/// The theme's accent color, or macOS's.
+fn accent() -> Retained<objc2_app_kit::NSColor> {
+    super::themed::colors().map_or_else(objc2_app_kit::NSColor::controlAccentColor, |c| c.accent)
 }
 
 /// Mounted volumes: the startup disk first, then /Volumes.
@@ -615,6 +722,9 @@ fn cell(
     field.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
     if let Some(tooltip) = tooltip {
         field.setToolTip(Some(&ns(tooltip)));
+    }
+    if let Some(colors) = super::themed::colors() {
+        field.setTextColor(Some(&colors.text));
     }
     cell.addSubview(&image);
     cell.addSubview(&field);

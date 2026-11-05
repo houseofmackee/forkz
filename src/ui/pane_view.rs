@@ -499,6 +499,13 @@ define_class!(
             }
         }
 
+        /// Rows in the theme's colors (macOS's own rows without a theme).
+        #[unsafe(method_id(tableView:rowViewForRow:))]
+        fn row_view(&self, _table: &NSTableView, row: NSInteger) -> Option<Retained<objc2_app_kit::NSTableRowView>> {
+            super::themed::colors()
+                .map(|_| Retained::into_super(super::themed::ThemedRowView::new(self.mtm(), row % 2 == 1)))
+        }
+
         #[unsafe(method(tableViewSelectionDidChange:))]
         fn selection_did_change(&self, _notification: &NSNotification) {
             self.update_status();
@@ -657,16 +664,7 @@ impl PaneController {
     /// Where dragged items come from: another pane (any file system) or
     /// Finder (local files).
     fn drag_sources(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> Option<(FsRef, Vec<PathBuf>)> {
-        let pasteboard = info.draggingPasteboard();
-        let types = pasteboard.types().map(|t| t.iter().map(|t| t.to_string()).collect::<Vec<_>>()).unwrap_or_default();
-        // From a pane of this app: what DRAG says (server items are file
-        // promises on the pasteboard, which panes do not need).
-        let from_pane = info.draggingSource().is_some_and(|source| source.downcast_ref::<FileTable>().is_some());
-        if from_pane || types.iter().any(|t| t == ITEMS_TYPE) {
-            return DRAG.with(|d| d.borrow().clone());
-        }
-        let paths = paths_on_pasteboard(&pasteboard);
-        if paths.is_empty() { None } else { Some((vfs::local(), paths)) }
+        dragged_items(info)
     }
 
     fn accept_drop_at(
@@ -1588,7 +1586,13 @@ impl PaneController {
             }
         };
         status.setStringValue(&ns(&text));
-        let color = if self.ivars().active.get() { NSColor::labelColor() } else { NSColor::tertiaryLabelColor() };
+        let active = self.ivars().active.get();
+        let color = match super::themed::colors() {
+            Some(c) if active => c.text,
+            Some(c) => c.secondary,
+            None if active => NSColor::labelColor(),
+            None => NSColor::tertiaryLabelColor(),
+        };
         status.setTextColor(Some(&color));
         drop(state);
         super::selection_changed(self.index());
@@ -1598,7 +1602,21 @@ impl PaneController {
     pub fn apply_appearance(&self, alternating: bool) {
         let table = self.table();
         table.setRowHeight(look().row);
-        table.setUsesAlternatingRowBackgroundColors(alternating);
+        match super::themed::colors() {
+            // The rows draw the theme's stripes.
+            Some(colors) => {
+                table.setUsesAlternatingRowBackgroundColors(false);
+                table.setBackgroundColor(&colors.background);
+            }
+            None => {
+                table.setUsesAlternatingRowBackgroundColors(alternating);
+                table.setBackgroundColor(&NSColor::controlBackgroundColor());
+            }
+        }
+        if let Some(bar) = self.ivars().active_bar.get() {
+            bar.setFillColor(&super::themed::colors().map_or_else(NSColor::controlAccentColor, |c| c.accent));
+        }
+        self.update_status();
         let selected = self.selected_paths();
         table.reloadData();
         self.select_paths(&selected);
@@ -1848,6 +1866,21 @@ fn entry_at(state: &PaneState, row: usize) -> Option<&crate::fs::Entry> {
 }
 
 /// File URLs on a pasteboard (from a drag, or Edit > Copy in Finder).
+/// Where dragged items come from: a pane of this app (any file system) or
+/// Finder (local files).
+pub fn dragged_items(info: &ProtocolObject<dyn NSDraggingInfo>) -> Option<(FsRef, Vec<PathBuf>)> {
+    let pasteboard = info.draggingPasteboard();
+    let types = pasteboard.types().map(|t| t.iter().map(|t| t.to_string()).collect::<Vec<_>>()).unwrap_or_default();
+    // From a pane of this app: what DRAG says (server items are file
+    // promises on the pasteboard, which panes do not need).
+    let from_pane = info.draggingSource().is_some_and(|source| source.downcast_ref::<FileTable>().is_some());
+    if from_pane || types.iter().any(|t| t == ITEMS_TYPE) {
+        return DRAG.with(|d| d.borrow().clone());
+    }
+    let paths = paths_on_pasteboard(&pasteboard);
+    if paths.is_empty() { None } else { Some((vfs::local(), paths)) }
+}
+
 pub fn paths_on_pasteboard(pasteboard: &objc2_app_kit::NSPasteboard) -> Vec<PathBuf> {
     let Some(items) = pasteboard.pasteboardItems() else { return Vec::new() };
     items
@@ -1871,13 +1904,15 @@ fn index_set_rows(set: &NSIndexSet) -> Vec<usize> {
 /// A cell view for a column, reused when the table has one to spare.
 fn reusable_cell(table: &NSTableView, column_id: &str, mtm: MainThreadMarker) -> Retained<NSTableCellView> {
     let look = look();
-    let identifier = ns(&format!("{column_id}-{}", look.version));
+    let identifier = ns(&format!("{column_id}-{}-{}", look.version, super::themed::version()));
     let existing: Option<Retained<NSView>> = unsafe { table.makeViewWithIdentifier_owner(&identifier, None) };
     if let Some(cell) = existing.and_then(|v| v.downcast::<NSTableCellView>().ok()) {
         return cell;
     }
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, look.row));
-    let cell = NSTableCellView::initWithFrame(NSTableCellView::alloc(mtm), frame);
+    let secondary = matches!(column_id, "size" | "modified" | "kind" | "permissions" | "owner" | "group");
+    let themed = super::themed::ThemedCell::new(mtm, frame, secondary);
+    let cell: Retained<NSTableCellView> = Retained::into_super(themed.clone());
     cell.setIdentifier(Some(&identifier));
     let icon = (look.row - 6.0).clamp(16.0, 32.0).floor();
     let text_x = if column_id == "name" { icon + 8.0 } else { 2.0 };
@@ -1893,7 +1928,7 @@ fn reusable_cell(table: &NSTableView, column_id: &str, mtm: MainThreadMarker) ->
     if column_id == "size" {
         field.setAlignment(NSTextAlignment::Right);
     }
-    if matches!(column_id, "size" | "modified" | "kind" | "permissions" | "owner" | "group") {
+    if secondary {
         field.setTextColor(Some(&NSColor::secondaryLabelColor()));
     }
     if column_id == "permissions" {
@@ -1904,6 +1939,7 @@ fn reusable_cell(table: &NSTableView, column_id: &str, mtm: MainThreadMarker) ->
     }
     cell.addSubview(&field);
     unsafe { cell.setTextField(Some(&field)) };
+    themed.recolor(false);
     if column_id == "name" {
         let image = NSImageView::initWithFrame(
             NSImageView::alloc(mtm),

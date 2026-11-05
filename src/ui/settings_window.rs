@@ -48,6 +48,7 @@ struct Controls {
     compare: Retained<NSPopUpButton>,
     compare_tools: Vec<&'static str>,
     auto_updates: Retained<NSButton>,
+    default_viewer: Retained<NSButton>,
     limit: Retained<NSPopUpButton>,
     keep_dates: Retained<NSButton>,
     download: Retained<NSPopUpButton>,
@@ -59,6 +60,8 @@ struct Controls {
     timeout: Retained<NSTextField>,
     key_files: Retained<NSTextField>,
     theme: Retained<NSPopUpButton>,
+    /// The theme ids of the popup's items (by item tag).
+    theme_ids: RefCell<Vec<String>>,
     text_size: Retained<NSPopUpButton>,
     row_spacing: Retained<NSPopUpButton>,
     alternating: Retained<NSButton>,
@@ -81,6 +84,29 @@ define_class!(
         #[unsafe(method(changed:))]
         fn changed(&self, _sender: Option<&AnyObject>) {
             self.save();
+        }
+
+        /// Applied to macOS right away (not a forkz setting).
+        #[unsafe(method(defaultViewer:))]
+        fn default_viewer(&self, sender: &NSButton) {
+            let on = sender.state() == NSControlStateValueOn;
+            if let Err(e) = super::file_viewer::set_default(on) {
+                super::dialogs::show_error("forkz could not change the default folder viewer.".into(), e);
+            }
+            sender.setState(if super::file_viewer::is_default() { NSControlStateValueOn } else { NSControlStateValueOff });
+        }
+
+        #[unsafe(method(customizeTheme:))]
+        fn customize_theme(&self, _sender: Option<&AnyObject>) {
+            self.customize();
+        }
+
+        #[unsafe(method(openThemes:))]
+        fn open_themes(&self, _sender: Option<&AnyObject>) {
+            if let Some(folder) = crate::theme::folder() {
+                let _ = std::fs::create_dir_all(&folder);
+                objc2_app_kit::NSWorkspace::sharedWorkspace().openURL(&file_url(&folder));
+            }
         }
 
         #[unsafe(method(addKeyFile:))]
@@ -246,6 +272,14 @@ impl SettingsWindow {
             compare: popup(&compare_names, self, mtm),
             compare_tools: compare_tools.iter().map(|t| t.0).collect(),
             auto_updates: checkbox("Check for updates automatically", self, mtm),
+            default_viewer: unsafe {
+                NSButton::checkboxWithTitle_target_action(
+                    &ns("Use forkz instead of Finder to show folders"),
+                    Some(self),
+                    Some(sel!(defaultViewer:)),
+                    mtm,
+                )
+            },
             limit: popup(&limit_titles, self, mtm),
             keep_dates: checkbox("Keep modification dates", self, mtm),
             download: popup(&conflict_titles, self, mtm),
@@ -268,7 +302,8 @@ impl SettingsWindow {
                 NSTextField::alloc(mtm),
                 NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(300.0, 60.0)),
             ),
-            theme: popup(&THEMES.iter().map(|t| t.1).collect::<Vec<_>>(), self, mtm),
+            theme: popup(&[], self, mtm),
+            theme_ids: RefCell::new(Vec::new()),
             text_size: popup(
                 &TEXT_SIZES
                     .iter()
@@ -329,6 +364,14 @@ impl SettingsWindow {
                 (label("Open in Terminal uses:", mtm), view(&*controls.terminal)),
                 (label("Compare Files uses:", mtm), view(&*controls.compare)),
                 (label("Updates:", mtm), view(&*controls.auto_updates)),
+                (label("Folders:", mtm), view(&*controls.default_viewer)),
+                (
+                    empty(mtm),
+                    note(
+                        "Opening folders and \u{201c}Show in Finder\u{201d} in other apps use forkz. Only the forkz app can be the default, not a build run from source.",
+                        mtm,
+                    ),
+                ),
             ],
             mtm,
         );
@@ -361,13 +404,36 @@ impl SettingsWindow {
             mtm,
         );
 
+        let customize = unsafe {
+            NSButton::buttonWithTitle_target_action(
+                &ns("Customize\u{2026}"),
+                Some(self),
+                Some(sel!(customizeTheme:)),
+                mtm,
+            )
+        };
+        let themes_folder = unsafe {
+            NSButton::buttonWithTitle_target_action(&ns("Themes Folder"), Some(self), Some(sel!(openThemes:)), mtm)
+        };
+        let theme_row = NSStackView::stackViewWithViews(
+            &NSArray::from_retained_slice(&[view(&*controls.theme), view(&*customize), view(&*themes_folder)]),
+            mtm,
+        );
+        theme_row.setSpacing(8.0);
         let appearance = grid(
             vec![
-                (label("Appearance:", mtm), view(&*controls.theme)),
+                (label("Theme:", mtm), view(&*theme_row)),
+                (
+                    empty(mtm),
+                    note(
+                        "Colors for the file lists and the sidebar; a light or dark theme also sets macOS\u{2019}s appearance for forkz. Your own themes are TOML files in the themes folder.",
+                        mtm,
+                    ),
+                ),
                 (label("Text size:", mtm), view(&*controls.text_size)),
                 (label("Row spacing:", mtm), view(&*controls.row_spacing)),
                 (empty(mtm), view(&*controls.alternating)),
-                (empty(mtm), note("For the file lists. The appearance applies to all of forkz.", mtm)),
+                (empty(mtm), note("For the file lists.", mtm)),
             ],
             mtm,
         );
@@ -405,6 +471,76 @@ impl SettingsWindow {
         let _ = self.ivars().controls.set(controls);
     }
 
+    /// The theme popup: macOS's choices, the built-in themes, then the
+    /// user's, with `selected` chosen.
+    fn fill_themes(&self, selected: &str) {
+        let Some(c) = self.ivars().controls.get() else { return };
+        let mtm = self.mtm();
+        let mut entries: Vec<Option<(String, String)>> =
+            THEMES.iter().map(|(id, title)| Some(((*id).to_string(), (*title).to_string()))).collect();
+        entries.push(None);
+        entries.extend(crate::theme::built_in().into_iter().map(|(id, t)| Some((id, t.name))));
+        let user = crate::theme::user_themes();
+        if !user.is_empty() {
+            entries.push(None);
+            entries.extend(user.into_iter().map(|(id, t)| Some((id, t.name))));
+        }
+        c.theme.removeAllItems();
+        let menu = c.theme.menu().expect("a popup has a menu");
+        let mut ids = Vec::new();
+        for entry in entries {
+            match entry {
+                None => menu.addItem(&objc2_app_kit::NSMenuItem::separatorItem(mtm)),
+                Some((id, title)) => {
+                    let item = unsafe {
+                        objc2_app_kit::NSMenuItem::initWithTitle_action_keyEquivalent(
+                            objc2_app_kit::NSMenuItem::alloc(mtm),
+                            &ns(&title),
+                            None,
+                            &ns(""),
+                        )
+                    };
+                    item.setTag(ids.len() as isize);
+                    menu.addItem(&item);
+                    ids.push(id);
+                }
+            }
+        }
+        let index = ids.iter().position(|id| id == selected).unwrap_or(0);
+        c.theme.selectItemWithTag(index as isize);
+        *c.theme_ids.borrow_mut() = ids;
+    }
+
+    /// Customize…: edits the chosen theme (a built-in one or macOS's colors
+    /// start a new theme of the user's own) and switches to it.
+    fn customize(&self) {
+        let Some(current) = super::current_settings().map(|s| s.appearance.theme) else { return };
+        let mut start = crate::theme::find(&current).unwrap_or_else(|| {
+            let dark = objc2_app_kit::NSApplication::sharedApplication(self.mtm())
+                .effectiveAppearance()
+                .name()
+                .to_string()
+                .contains("Dark");
+            crate::theme::find(if dark { "one-dark" } else { "github-light" }).expect("built in")
+        });
+        if !current.starts_with("user:") {
+            start.name = format!(
+                "{} Custom",
+                if crate::theme::find(&current).is_some() { start.name.as_str() } else { "My Theme" }
+            );
+        }
+        let Some(theme) = super::theme_editor::edit(&start) else { return };
+        match crate::theme::save_user(&theme) {
+            Ok(id) => {
+                super::update_settings(|s| s.appearance.theme = id.clone());
+                // Edited in place: the same id, new colors.
+                super::refresh_appearance();
+                self.fill_themes(&id);
+            }
+            Err(e) => super::dialogs::show_error("The theme could not be saved.".into(), e.to_string()),
+        }
+    }
+
     /// Puts the current settings into the controls.
     fn load(&self) {
         let Some(c) = self.ivars().controls.get() else { return };
@@ -417,6 +553,8 @@ impl SettingsWindow {
         let compare = c.compare_tools.iter().position(|k| *k == settings.general.compare_tool).unwrap_or(0);
         c.compare.selectItemAtIndex(compare as isize);
         set(&c.auto_updates, crate::updates::checks_automatically());
+        set(&c.default_viewer, super::file_viewer::is_default());
+        c.default_viewer.setEnabled(super::file_viewer::available());
         c.auto_updates.setEnabled(crate::updates::available());
         let limit = TRANSFER_LIMITS.iter().position(|n| *n == settings.transfers.max_transfers).unwrap_or(1);
         c.limit.selectItemAtIndex(limit as isize);
@@ -435,7 +573,7 @@ impl SettingsWindow {
         let keys: Vec<String> = settings.sftp.key_files.iter().map(|k| k.display().to_string()).collect();
         c.key_files.setStringValue(&ns(&keys.join("\n")));
         let a = &settings.appearance;
-        c.theme.selectItemAtIndex(THEMES.iter().position(|t| t.0 == a.theme).unwrap_or(0) as isize);
+        self.fill_themes(&a.theme);
         let size = TEXT_SIZES.iter().position(|s| (*s - a.text_size).abs() < 0.1).unwrap_or(2);
         c.text_size.selectItemAtIndex(size as isize);
         c.row_spacing.selectItemAtIndex(ROW_SPACINGS.iter().position(|r| r.0 == a.row_spacing).unwrap_or(1) as isize);
@@ -485,8 +623,9 @@ impl SettingsWindow {
                 s.sftp.timeout_seconds = timeout;
             }
             s.sftp.key_files = key_files;
-            if let Some(theme) = THEMES.get(index(&c.theme)) {
-                s.appearance.theme = theme.0.to_string();
+            let tag = c.theme.selectedItem().map_or(0, |item| item.tag());
+            if let Some(theme) = usize::try_from(tag).ok().and_then(|t| c.theme_ids.borrow().get(t).cloned()) {
+                s.appearance.theme = theme;
             }
             if let Some(size) = TEXT_SIZES.get(index(&c.text_size)) {
                 s.appearance.text_size = *size;

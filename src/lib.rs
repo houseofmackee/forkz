@@ -5,6 +5,7 @@ pub mod pane;
 pub mod rename;
 pub mod settings;
 pub mod sites;
+pub mod theme;
 pub mod ui;
 pub mod updates;
 pub mod vfs;

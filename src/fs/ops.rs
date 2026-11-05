@@ -271,6 +271,16 @@ struct Runner<'a> {
     file_answer: Option<Resolution>,
     folder_answer: Option<Resolution>,
     outcome: Outcome,
+    fxp: Fxp,
+}
+
+/// Copying straight from one FTP server to another (FXP), for this job.
+enum Fxp {
+    /// Both ends are FTP servers; not tried yet.
+    Untried(Box<(vfs::fxp::Endpoint, vfs::fxp::Endpoint)>),
+    Ready(Box<vfs::fxp::Pair>),
+    /// Not FTP to FTP, refused, or failed: files stream through the Mac.
+    Off,
 }
 
 /// Runs a job to the end (or until cancelled or stopped). Remote ends get
@@ -293,6 +303,10 @@ pub fn run(job: &Job, observer: &mut dyn Observer, cancel: CancelToken) -> Outco
         }
     };
     let both_local = src.is_local() && dst.is_local();
+    let fxp = match (src.fxp_endpoint(), dst.fxp_endpoint()) {
+        (Some(from), Some(to)) => Fxp::Untried(Box::new((from, to))),
+        _ => Fxp::Off,
+    };
     let mut runner = Runner {
         src,
         dst,
@@ -304,6 +318,7 @@ pub fn run(job: &Job, observer: &mut dyn Observer, cancel: CancelToken) -> Outco
         file_answer: job.on_conflict,
         folder_answer: job.on_conflict,
         outcome: Outcome::default(),
+        fxp,
     };
     let result = match job.kind {
         JobKind::Trash => runner.trash_all(&job.sources),
@@ -647,7 +662,10 @@ impl Runner<'_> {
             } else {
                 // A streamed copy keeps its partial file when it fails or is
                 // stopped: the next attempt resumes it.
-                runner.copy_stream(entry, &temporary, target, start, size)
+                match runner.copy_fxp(entry, &temporary, target, start, size) {
+                    Some(result) => result,
+                    None => runner.copy_stream(entry, &temporary, target, start, size),
+                }
             }
         })?;
         self.progress.done_bytes = start + size;
@@ -714,6 +732,66 @@ impl Runner<'_> {
         writer.flush()?;
         drop(writer);
         drop(reader);
+        self.finish_transfer(entry, temporary, target)
+    }
+
+    /// Copies a file from one FTP server straight to another, if they
+    /// allow it (FXP). None when they do not, or it failed: the file is
+    /// then streamed through the Mac (resuming what FXP copied).
+    fn copy_fxp(
+        &mut self,
+        entry: &Entry,
+        temporary: &Path,
+        target: &Path,
+        start: u64,
+        size: u64,
+    ) -> Option<io::Result<()>> {
+        let mut pair = match std::mem::replace(&mut self.fxp, Fxp::Off) {
+            Fxp::Off => return None,
+            Fxp::Ready(pair) => pair,
+            Fxp::Untried(ends) => match vfs::fxp::Pair::connect(&ends.0, &ends.1) {
+                Ok(pair) => {
+                    tracing::info!("FXP: {} to {} directly", ends.0.params.host, ends.1.params.host);
+                    Box::new(pair)
+                }
+                Err(e) => {
+                    tracing::info!("FXP not used: {e}");
+                    return None;
+                }
+            },
+        };
+        let offset = self.resumable(entry, temporary).unwrap_or(0);
+        let label = format!("{} (server to server)", entry.name);
+        let cancel = self.cancel.clone();
+        let dst = self.dst.clone();
+        let progress = &mut self.progress;
+        let observer = &mut *self.observer;
+        // The servers do not report progress: the target file's size does.
+        let mut tick = || {
+            progress.current.clone_from(&label);
+            if let Ok(partial) = dst.stat(temporary) {
+                progress.done_bytes = start + partial.size.min(size);
+                observer.progress(progress);
+            }
+        };
+        let result = pair.copy(&entry.path, temporary, offset, &|| cancel.is_cancelled(), &mut tick);
+        self.progress.current = entry.name.clone();
+        match result {
+            Ok(()) => {
+                self.fxp = Fxp::Ready(pair);
+                Some(self.finish_transfer(entry, temporary, target))
+            }
+            Err(vfs::fxp::Error::Cancelled) => Some(Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled"))),
+            Err(e) => {
+                tracing::info!("FXP stopped for this job ({e}); streaming {} instead", entry.name);
+                None
+            }
+        }
+    }
+
+    /// A copied file's last steps: its date, then the temporary name
+    /// becomes the real one.
+    fn finish_transfer(&mut self, entry: &Entry, temporary: &Path, target: &Path) -> io::Result<()> {
         if self.keep_dates {
             let _ = self.dst.set_attributes(temporary, entry.modified, None);
         }

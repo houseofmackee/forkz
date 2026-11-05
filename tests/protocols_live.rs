@@ -2,8 +2,9 @@
 //! purpose; `scripts/test_protocols.sh` starts throwaway local servers
 //! (pyftpdlib, WsgiDAV, and moto) and runs these:
 //!
-//!   FORKZ_TEST_FTP=127.0.0.1:2121 FORKZ_TEST_DAV=127.0.0.1:8080 \
-//!   FORKZ_TEST_S3=127.0.0.1:9555 \
+//!   FORKZ_TEST_FTP=127.0.0.1:2121 FORKZ_TEST_FTP2=127.0.0.1:2122 \
+//!   FORKZ_TEST_FTP_NO_FXP=127.0.0.1:2123 \
+//!   FORKZ_TEST_DAV=127.0.0.1:8080 FORKZ_TEST_S3=127.0.0.1:9555 \
 //!     cargo test --test protocols_live -- --ignored --test-threads=1
 //!
 //! Every server has the user "forkz" with the password "secret" (any keys
@@ -222,6 +223,123 @@ fn ftp_and_ftps() {
     }
     let error = ftp::connect(ftp_params(&host, port, ftp::Security::Plain, Some("wrong")), &Wrong).err().unwrap();
     assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+}
+
+/// Notes whether any file went straight between servers (FXP).
+#[derive(Default)]
+struct WatchFxp {
+    direct: bool,
+}
+
+impl Observer for WatchFxp {
+    fn progress(&mut self, progress: &Progress) {
+        self.direct |= progress.current.ends_with("(server to server)");
+    }
+    fn conflict(&mut self, _conflict: &Conflict) -> Answer {
+        Answer { resolution: Resolution::Replace, apply_to_all: true }
+    }
+    fn error(&mut self, path: &Path, error: &io::Error) -> ErrorAnswer {
+        panic!("{}: {error}", path.display())
+    }
+}
+
+/// Copies `folder` from one server to another; returns whether FXP did it.
+fn server_to_server(kind: JobKind, from: &FsRef, folder: &Path, to: &FsRef, into: &Path) -> bool {
+    let mut watch = WatchFxp::default();
+    let job = Job::between(kind, from.clone(), vec![folder.to_path_buf()], to.clone(), into.to_path_buf());
+    let outcome = ops::run(&job, &mut watch, CancelToken::default());
+    assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+    watch.direct
+}
+
+#[test]
+#[ignore = "needs three FTP servers (scripts/test_protocols.sh)"]
+fn fxp_between_ftp_servers() {
+    let (Some((host, port)), Some((_, port2)), Some((_, port3))) =
+        (address("FORKZ_TEST_FTP"), address("FORKZ_TEST_FTP2"), address("FORKZ_TEST_FTP_NO_FXP"))
+    else {
+        return;
+    };
+    let _trust = isolated_trust();
+    let plain = |port| -> FsRef {
+        ftp::connect(ftp_params(&host, port, ftp::Security::Plain, Some("secret")), &answers()).unwrap()
+    };
+    let (a, b, c) = (plain(port), plain(port2), plain(port3));
+
+    // Something to copy, on the first server.
+    let local = tempfile::tempdir().unwrap();
+    let src = local.path().join("fxp-set");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    let big: Vec<u8> = (0..4_000_000u32).map(|i| (i % 253) as u8).collect();
+    std::fs::write(src.join("big.bin"), &big).unwrap();
+    std::fs::write(src.join("sub/\u{e4} note.txt"), "fxp").unwrap();
+    let _ = a.create_dir(Path::new("/fxp"));
+    run(&Job::between(JobKind::Copy, vfs::local(), vec![src.clone()], a.clone(), "/fxp".into()));
+    let set = Path::new("/fxp/fxp-set");
+
+    // Straight from server to server, keeping contents and dates.
+    let _ = b.create_dir(Path::new("/in"));
+    assert!(server_to_server(JobKind::Copy, &a, set, &b, Path::new("/in")), "FXP was not used");
+    assert_eq!(read_all(&b, Path::new("/in/fxp-set/big.bin")), big);
+    assert_eq!(read_all(&b, Path::new("/in/fxp-set/sub/\u{e4} note.txt")), b"fxp");
+    let names_in = names(&b, Path::new("/in/fxp-set"));
+    assert!(!names_in.iter().any(|(n, _)| n.contains("forkz-partial")), "{names_in:?}");
+    let original = a.stat(&set.join("big.bin")).unwrap().modified.unwrap();
+    let copied = b.stat(Path::new("/in/fxp-set/big.bin")).unwrap().modified.unwrap();
+    let apart = original.duration_since(copied).unwrap_or_else(|e| e.duration());
+    assert!(apart < Duration::from_secs(61), "dates {original:?} and {copied:?}");
+
+    // Within one server (to itself), and moving (the source goes).
+    let _ = a.create_dir(Path::new("/fxp-copy"));
+    assert!(server_to_server(JobKind::Copy, &a, set, &a, Path::new("/fxp-copy")));
+    assert_eq!(read_all(&a, Path::new("/fxp-copy/fxp-set/big.bin")), big);
+    let _ = b.create_dir(Path::new("/moved"));
+    assert!(server_to_server(JobKind::Move, &a, Path::new("/fxp-copy/fxp-set"), &b, Path::new("/moved")));
+    assert_eq!(read_all(&b, Path::new("/moved/fxp-set/big.bin")), big);
+    assert!(a.stat(Path::new("/fxp-copy/fxp-set")).is_err(), "moved away");
+
+    // A server that refuses PORT can still receive (it only listens)...
+    let _ = c.create_dir(Path::new("/in"));
+    assert!(server_to_server(JobKind::Copy, &a, set, &c, Path::new("/in")), "FXP to it");
+    // ...but not send: copied through the Mac instead.
+    let _ = b.create_dir(Path::new("/back"));
+    assert!(!server_to_server(JobKind::Copy, &c, Path::new("/in/fxp-set"), &b, Path::new("/back")), "refused");
+    assert_eq!(read_all(&b, Path::new("/back/fxp-set/big.bin")), big);
+
+    // Stop while the servers transfer: both are told to abort, the job
+    // ends as stopped, nothing appears under the real name, and the
+    // servers still work afterwards.
+    struct StopWhenDirect(CancelToken);
+    impl Observer for StopWhenDirect {
+        fn progress(&mut self, progress: &Progress) {
+            if progress.current.ends_with("(server to server)") {
+                self.0.cancel();
+            }
+        }
+        fn conflict(&mut self, _conflict: &Conflict) -> Answer {
+            Answer { resolution: Resolution::Replace, apply_to_all: true }
+        }
+        fn error(&mut self, path: &Path, error: &io::Error) -> ErrorAnswer {
+            panic!("{}: {error}", path.display())
+        }
+    }
+    let cancel = CancelToken::default();
+    let _ = b.create_dir(Path::new("/stopped"));
+    let job = Job::between(JobKind::Copy, a.clone(), vec![set.join("big.bin")], b.clone(), "/stopped".into());
+    let outcome = ops::run(&job, &mut StopWhenDirect(cancel.clone()), cancel);
+    assert!(outcome.cancelled, "{outcome:?}");
+    assert!(b.stat(Path::new("/stopped/big.bin")).is_err(), "not under its real name");
+    assert!(server_to_server(JobKind::Copy, &a, &set.join("big.bin"), &b, Path::new("/stopped")));
+    assert_eq!(read_all(&b, Path::new("/stopped/big.bin")), big);
+
+    // Encrypted ends need SSCN, which pyftpdlib does not have: streamed.
+    let tls = |port| -> FsRef {
+        ftp::connect(ftp_params(&host, port, ftp::Security::Tls, Some("secret")), &answers()).unwrap()
+    };
+    let (ta, tb) = (tls(port), tls(port2));
+    let _ = tb.create_dir(Path::new("/tls"));
+    assert!(!server_to_server(JobKind::Copy, &ta, set, &tb, Path::new("/tls")), "no SSCN");
+    assert_eq!(read_all(&tb, Path::new("/tls/fxp-set/big.bin")), big);
 }
 
 #[test]

@@ -582,6 +582,7 @@ impl RenameWindow {
             }
         });
         self.fill_presets(Some(&name));
+        super::reload_sidebar();
     }
 
     fn delete_preset(&self) {
@@ -592,6 +593,7 @@ impl RenameWindow {
         }
         super::update_settings(|settings| settings.rename_presets.retain(|p| p.name != preset.name));
         self.fill_presets(None);
+        super::reload_sidebar();
     }
 
     fn finish(&self, accept: bool) {

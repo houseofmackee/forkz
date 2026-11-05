@@ -481,6 +481,10 @@ impl Vfs for FtpFs {
         }))
     }
 
+    fn fxp_endpoint(&self) -> Option<super::fxp::Endpoint> {
+        Some(super::fxp::Endpoint { params: self.params.clone(), password: self.secret.clone(), secure: self.secure })
+    }
+
     fn display_path(&self, path: &Path) -> String {
         let scheme = if self.secure { "ftps" } else { "ftp" };
         let port = if self.params.port == 21 { String::new() } else { format!(":{}", self.params.port) };

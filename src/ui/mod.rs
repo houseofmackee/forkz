@@ -4,6 +4,7 @@
 mod activity;
 pub mod commands;
 mod dialogs;
+mod file_viewer;
 mod multi_rename;
 mod oplog;
 mod palette;
@@ -17,6 +18,8 @@ mod settings_window;
 mod sidebar;
 mod site_form;
 mod sync_window;
+mod theme_editor;
+mod themed;
 mod tools;
 mod util;
 mod workspaces;
@@ -135,6 +138,12 @@ define_class!(
         fn volumes_changed(&self, _notification: &NSNotification) {
             reload_sidebar();
         }
+
+        /// "Show in Finder" in another app, when forkz is the folder viewer.
+        #[unsafe(method(handleReveal:withReplyEvent:))]
+        fn handle_reveal(&self, event: &objc2_foundation::NSAppleEventDescriptor, _reply: &AnyObject) {
+            show_paths(&file_viewer::paths_of(event), true);
+        }
     }
 
     unsafe impl NSObjectProtocol for AppDelegate {}
@@ -143,6 +152,14 @@ define_class!(
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window_closed(&self, _app: &NSApplication) -> bool {
             true
+        }
+
+        /// Folders opened with forkz (it can be the default folder app),
+        /// and files: shown in their folder.
+        #[unsafe(method(application:openURLs:))]
+        fn open_urls(&self, _app: &NSApplication, urls: &NSArray<objc2_foundation::NSURL>) {
+            let paths: Vec<PathBuf> = urls.iter().filter_map(|u| util::url_path(&u)).collect();
+            show_paths(&paths, false);
         }
 
         #[unsafe(method(applicationWillTerminate:))]
@@ -410,6 +427,7 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     ns_app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let delegate: Retained<AppDelegate> = unsafe { msg_send![AppDelegate::alloc(mtm), init] };
     ns_app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+    file_viewer::install(&delegate);
     // No macOS window tabs (forkz has tabs in each pane): this also
     // drops Show Tab Bar and Show All Tabs from the View menu.
     NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
@@ -1178,6 +1196,13 @@ fn apply_speed_limits(app: &App) {
     ops::set_speed_limits(transfers.upload_limit_kbps * 1024, transfers.download_limit_kbps * 1024);
 }
 
+/// Applies the appearance again (after a theme file changed).
+pub fn refresh_appearance() {
+    if let Some(app) = app() {
+        apply_appearance(&app);
+    }
+}
+
 /// Theme, text size, row spacing, and alternating rows (from settings).
 fn apply_appearance(app: &App) {
     use crate::settings::ROW_SPACINGS;
@@ -1187,14 +1212,22 @@ fn apply_appearance(app: &App) {
     // Bigger text needs taller rows.
     let row = (base + (text - 13.0) * 1.5).round().max(16.0);
     pane_view::set_look(text, row);
+    // A color theme, or macOS's colors (system, light, dark).
+    let theme = crate::theme::find(&appearance.theme);
+    themed::set(theme.as_ref(), appearance.alternating_rows);
     app.sidebar.set_zoom(text / 13.0);
+    app.sidebar.apply_theme();
     app.preview.set_zoom(text / 13.0);
     for pane in &app.panes {
         pane.apply_appearance(appearance.alternating_rows);
     }
-    let name = match appearance.theme.as_str() {
-        "light" => Some(unsafe { objc2_app_kit::NSAppearanceNameAqua }),
-        "dark" => Some(unsafe { objc2_app_kit::NSAppearanceNameDarkAqua }),
+    let background = themed::colors().map_or_else(objc2_app_kit::NSColor::windowBackgroundColor, |c| c.background);
+    app.window.setBackgroundColor(Some(&background));
+    let name = match (appearance.theme.as_str(), &theme) {
+        (_, Some(theme)) if theme.dark => Some(unsafe { objc2_app_kit::NSAppearanceNameDarkAqua }),
+        (_, Some(_)) => Some(unsafe { objc2_app_kit::NSAppearanceNameAqua }),
+        ("light", None) => Some(unsafe { objc2_app_kit::NSAppearanceNameAqua }),
+        ("dark", None) => Some(unsafe { objc2_app_kit::NSAppearanceNameDarkAqua }),
         _ => None,
     };
     let chosen = name.and_then(objc2_app_kit::NSAppearance::appearanceNamed);
@@ -1559,9 +1592,52 @@ fn multi_rename_with(pane: &PaneController, initial: Option<Vec<crate::rename::S
     if paths.is_empty() {
         return;
     }
-    let local = pane.is_local();
-    let items: Vec<crate::rename::Item> = pane
-        .entries_for(&paths)
+    rename_entries(pane.fs(), pane.location(), pane.entries_for(&paths), pane.all_names(), initial);
+}
+
+/// A rename preset applied to items dropped on it in the sidebar (or the
+/// active pane's selection when it is clicked): Rename Multiple Items opens
+/// with its rules, to check and confirm.
+pub fn apply_rename_preset(index: usize, items: Option<(FsRef, Vec<PathBuf>)>) {
+    let Some(app) = app() else { return };
+    let steps = current_settings().and_then(|s| s.rename_presets.get(index).map(|p| p.steps.clone()));
+    let Some(steps) = steps else { return };
+    let Some((fs, paths)) = items else {
+        let pane = app.panes[app.active.get()].clone();
+        if pane.target_paths().is_empty() {
+            dialogs::show_error("Select the items to rename first.".into(), "Or drag them onto the preset.".into());
+        } else {
+            multi_rename_with(&pane, Some(steps));
+        }
+        return;
+    };
+    let Some(dir) = paths.first().and_then(|p| p.parent()).map(Path::to_path_buf) else { return };
+    if paths.iter().any(|p| p.parent() != Some(dir.as_path())) {
+        dialogs::show_error(
+            "Drop items from one folder at a time.".into(),
+            "A preset renames items within their folder.".into(),
+        );
+        return;
+    }
+    let entries: Vec<crate::fs::Entry> = paths.iter().filter_map(|p| fs.stat(p).ok()).collect();
+    let existing = fs.list(&dir).map(|list| list.into_iter().map(|e| e.name).collect()).unwrap_or_default();
+    rename_entries(fs, dir, entries, existing, Some(steps));
+}
+
+/// Rename Multiple Items for entries of one folder; panes showing it are
+/// reloaded with the renamed items selected.
+fn rename_entries(
+    fs: FsRef,
+    dir: PathBuf,
+    entries: Vec<crate::fs::Entry>,
+    existing: Vec<String>,
+    initial: Option<Vec<crate::rename::Step>>,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let local = fs.is_local();
+    let items: Vec<crate::rename::Item> = entries
         .into_iter()
         .map(|e| crate::rename::Item {
             folder: e.kind == crate::fs::EntryKind::Folder && !e.package,
@@ -1570,14 +1646,17 @@ fn multi_rename_with(pane: &PaneController, initial: Option<Vec<crate::rename::S
             modified: e.modified,
         })
         .collect();
-    let Some(planned) = multi_rename::show(items, pane.all_names(), initial) else { return };
-    let (fs, dir, index) = (pane.fs(), pane.location(), pane.index());
+    let Some(planned) = multi_rename::show(items, existing, initial) else { return };
     let changed = planned.iter().filter(|p| p.changes()).count();
     std::thread::spawn(move || {
         let (done, failed) = crate::rename::apply(&fs, &dir, &planned);
         DispatchQueue::main().exec_async(move || {
             let Some(app) = app() else { return };
-            app.panes[index].reload_selecting(&done);
+            for pane in &app.panes {
+                if vfs::same(&pane.fs(), &fs) && pane.location() == dir {
+                    pane.reload_selecting(&done);
+                }
+            }
             let place = if fs.is_local() { dir.display().to_string() } else { fs.display_path(&dir) };
             let detail = failed.iter().map(|(name, e)| format!("{name}: {e}")).collect::<Vec<_>>().join("\n");
             let kind = if failed.is_empty() { oplog::Kind::Change } else { oplog::Kind::Problem };
@@ -2893,7 +2972,7 @@ pub fn refresh_sidebar_highlight() {
     }
 }
 
-fn reload_sidebar() {
+pub fn reload_sidebar() {
     let Some(app) = app() else { return };
     let (favorites, remote) = {
         let settings = app.settings.borrow();
@@ -2902,7 +2981,9 @@ fn reload_sidebar() {
     let sites = app.sites.borrow().sites.clone();
     let connected: Vec<String> = app.connections.borrow().iter().map(|(id, _)| id.clone()).collect();
     let synclets: Vec<String> = app.settings.borrow().synclets.iter().map(|s| s.name.clone()).collect();
-    app.sidebar.reload(&favorites, &remote, &sites, &connected, &synclets, current_place(&app));
+    let presets: Vec<String> = app.settings.borrow().rename_presets.iter().map(|p| p.name.clone()).collect();
+    let saved = sidebar::Saved { synclets: &synclets, presets: &presets };
+    app.sidebar.reload(&favorites, &remote, &sites, &connected, saved, current_place(&app));
 }
 
 // Sites and connections.
@@ -3173,6 +3254,26 @@ fn show_site(site: &crate::sites::Site, fs: FsRef, pane_index: usize) {
         app.panes[1 - pane_index].navigate_to(vfs::local(), local.clone());
     }
     update_title(&app);
+}
+
+/// Shows folders and files sent to forkz (opened with it, or revealed as
+/// the folder viewer) in the active pane and new tabs; files are selected.
+fn show_paths(paths: &[PathBuf], reveal: bool) {
+    let Some(app) = app() else { return };
+    let pane = app.panes[app.active.get()].clone();
+    for (index, show) in file_viewer::plan(paths, |p| p.is_dir(), reveal).into_iter().enumerate() {
+        if index > 0 {
+            pane.new_tab(vfs::local(), pane.location());
+        }
+        match show {
+            file_viewer::Show::Folder(folder) => pane.navigate_to(vfs::local(), folder),
+            file_viewer::Show::Select(folder, files) => pane.navigate_selecting(vfs::local(), folder, &files),
+        }
+    }
+    if !paths.is_empty() {
+        NSApplication::sharedApplication(mtm()).activate();
+        app.window.makeKeyAndOrderFront(None);
+    }
 }
 
 /// Opens a folder or a server address (sftp://, ftp://, ftps://, dav://,

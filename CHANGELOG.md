@@ -7,6 +7,16 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-05
+
+### Added
+
+- Color themes (Settings > Appearance): built-in themes in the manner of a code editor (GitHub Light, Solarized Light and Dark, Catppuccin Latte and Mocha, Dracula, Nord, One Dark, Monokai, Gruvbox Dark, and Tokyo Night) for the file lists and the sidebar, alongside macOS's own colors. Customize… makes a theme of your own with a color well for each color; themes are TOML files in the themes folder, which Themes Folder opens.
+- The transfer queue can be managed: right-click a transfer to start it now, move it to the top, up, down, or to the bottom, pause it, or stop it. With several transfers, a line above them shows how many are waiting, with Pause All (or Resume All) and Stop All. Waiting transfers show their place in line.
+- forkz can be the default folder viewer instead of Finder (Settings > General): folders opened from other apps, and "Show in Finder", open in forkz, with the file selected.
+- Rename presets appear in the sidebar: drop items on a preset to rename them with it, or click it to rename the selection (Rename Multiple Items opens with its rules, to check first).
+- FXP: copies and moves between two FTP servers go directly from one server to the other when both allow it, instead of through your Mac. forkz checks once per pair of servers and copies through the Mac as before when they refuse; Stop works as usual. Encrypted connections need a server with SSCN, and FXP is not used when only one connection is encrypted.
+
 ## [0.9.2] - 2026-11-05
 
 ### Added
@@ -182,7 +192,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/houseofmackee/forkz/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/houseofmackee/forkz/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/houseofmackee/forkz/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/houseofmackee/forkz/compare/v0.8.1...v0.9.0

@@ -20,8 +20,9 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - Quick Look, a hidden files toggle, and live updates when folders change
 - Folder sizes, SHA-256 and MD5 checksums, Compare Files in your diff tool, and Open in Terminal with your terminal app
 - Workspaces: saved sets of tabs for both panes, including server folders
-- Transfer speed limits, Pause and Resume, and rules for errors
-- Zoom (Command-= and Command-minus) and a Settings window (Command-comma) with light and dark appearance, text size, row spacing, and your own keyboard shortcuts
+- A transfer queue: speed limits, Pause and Resume, Pause All and Stop All, and waiting transfers that can be started now or moved up and down (right-click a transfer), plus rules for errors
+- Zoom (Command-= and Command-minus) and a Settings window (Command-comma) with color themes, text size, row spacing, and your own keyboard shortcuts
+- Optionally the default folder viewer instead of Finder (Settings > General): opening folders and "Show in Finder" in other apps go to forkz
 
 ### Preview pane and archives
 
@@ -35,7 +36,7 @@ Archives (zip, tar, 7z, rar, iso, and more) open like folders, read-only: copy i
 
 ![Rename Multiple Items replacing a prefix and lowercasing extensions, with a live preview](docs/images/rename.png)
 
-Select several items and press Return (or Option-Command-R). Rules (replace, regular expressions, insert, remove, case, numbers, and dates) stack, the preview shows every new name and any problems before anything changes, and presets keep rule sets for next time.
+Select several items and press Return (or Option-Command-R). Rules (replace, regular expressions, insert, remove, case, numbers, and dates) stack, the preview shows every new name and any problems before anything changes, and presets keep rule sets for next time. Saved presets also appear in the sidebar: drop files on one, or click it, to rename the selection with it.
 
 ### Search
 
@@ -51,11 +52,40 @@ Sync Folders (Shift-Command-S) compares the two panes' folders, on the Mac or on
 
 A sync can be saved as a synclet in the sidebar: clicking it connects to its sites if needed and compares right away. Sync Browsing (Shift-Command-B) keeps the other pane in the matching folder while you browse.
 
+### Transfer queue
+
+![Five uploads to a server: two running, three waiting with their place in line, and Pause All and Stop All above them](docs/images/queue.png)
+
+Transfers beyond the simultaneous limit (Commands menu, default 2) wait in a queue, each showing its place in line. Right-click a transfer to start it now, move it to the top, up, down, or to the bottom, pause it, or stop it. With several transfers, a line above them shows how many are waiting, with Pause All (or Resume All) and Stop All. Speed limits for uploads and downloads, and what to do on errors, are in Settings > Transfers.
+
 ### Command palette
 
 ![The command palette showing commands and saved sites that match "on"](docs/images/palette.png)
 
 The command palette (Option-Command-P) runs any command and goes anywhere: places, favorites, devices, sites, server folders, synclets, and workspaces. It also applies rename presets to the selection and opens the selected file with any app that can open it.
+
+### Color themes
+
+![forkz in the Dracula theme, with rename presets in the sidebar](docs/images/themes.png)
+
+Settings > Appearance has a theme for the file lists and the sidebar: macOS's own colors (light, dark, or following macOS), or one of the built-in themes, such as GitHub Light, Solarized, Catppuccin, Dracula, Nord, One Dark, Monokai, Gruvbox, and Tokyo Night. Customize… turns the chosen theme into one of your own, with a color well for each color.
+
+<img src="docs/images/theme-editor.png" alt="The Customize Theme editor with a color well for each of a theme's colors" width="380">
+
+Your themes are TOML files in the themes folder (`~/Library/Application Support/forkz/themes`), so they can also be written by hand or shared:
+
+```toml
+name = "Sunrise"
+dark = false
+background = "#fdf6e3"
+alternate = "#eee8d5"
+text = "#586e75"
+secondary = "#93a1a1"
+selection = "#268bd2"
+selection_text = "#fdf6e3"
+accent = "#b58900"
+sidebar = "#eee8d5"
+```
 
 ### Finder tags and Select Matching
 
@@ -73,7 +103,7 @@ The command palette (Option-Command-P) runs any command and goes anywhere: place
 - **`~/.ssh/config`** hosts work anywhere a server name goes (HostName, User, Port, IdentityFile, IdentitiesOnly, ProxyCommand, ProxyJump, wildcards, Include); the Connect form lists them. ProxyJump uses the system `ssh` for the jump hosts (key or agent login).
 - **Permissions, Owner, and Group** columns; Permissions… (Command-I) changes permissions, optionally for everything inside a folder.
 - **Columns** are chosen by right-clicking the column titles or with View > Columns, separately for the Mac and for servers.
-- **Simultaneous transfers** (Commands menu, default 2): more uploads and downloads wait their turn, and Start Next moves one to the front.
+- **Simultaneous transfers** (Commands menu, default 2): more uploads and downloads wait their turn. Right-click a transfer to start it now or move it up or down the queue; with several, Pause All and Stop All appear above them.
 - Dropped connections reconnect by themselves.
 - **Interrupted transfers resume** from their partial file, if the original has not changed since.
 - **Drag to Finder:** files and folders dragged from a server pane download where you drop them.
@@ -83,6 +113,7 @@ The command palette (Option-Command-P) runs any command and goes anywhere: place
 Choose the protocol in Connect to Server; sites keep it.
 
 - **FTP and FTPS:** encrypted with TLS when the server offers it (the default), TLS required, or plain FTP. Certificates are checked by macOS; a self-signed one shows its fingerprint to trust once. Passive mode, MLSD listings where available, and resumed transfers.
+- **FXP:** copies between two FTP servers go straight from one server to the other when both allow it, without passing through your Mac (the activity shows "server to server"). Many servers refuse this; forkz checks once per pair of servers and otherwise copies through the Mac as usual. With FTPS, one of the servers must support SSCN; FXP is never used when only one of the two connections is encrypted.
 - **WebDAV** over HTTPS or HTTP, with Basic login. Put the server's WebDAV path in Remote folder (for Nextcloud, `/remote.php/dav/files/USER`).
 - **S3 and S3-compatible storage:** the access key ID goes in User and the secret key in Password (kept in the Keychain). The top level lists your buckets. The region comes from an AWS server name (`s3.eu-west-1.amazonaws.com`); for other providers, set it in Region (Cloudflare R2 uses `auto`). Files up to 5 GB; folders can be created and deleted, files renamed.
 - **SMB, AFP, and NFS** shares are mounted by macOS, as in Finder (its sign-in and share-picker dialogs included), and browsed like folders on the Mac. Put the share in Remote folder (for example `Public` or `Public/Photos`), or leave it empty to choose. A share that is already mounted is used as it is. Disconnect (Command-E) unmounts the share.

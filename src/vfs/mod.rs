@@ -3,6 +3,7 @@
 
 pub mod archive;
 pub mod ftp;
+pub mod fxp;
 pub mod http;
 pub mod known_hosts;
 pub mod mount;
@@ -118,6 +119,11 @@ pub trait Vfs: Send + Sync {
 
     /// A link to show or copy: a path, or "sftp://user@host/path".
     fn display_path(&self, path: &Path) -> String;
+
+    /// How to reach this server for FXP (FTP servers only).
+    fn fxp_endpoint(&self) -> Option<fxp::Endpoint> {
+        None
+    }
 }
 
 impl fmt::Debug for dyn Vfs {
