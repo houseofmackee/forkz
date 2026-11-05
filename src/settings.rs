@@ -35,6 +35,9 @@ pub struct Settings {
     pub toolbar_version: u32,
     /// Saved sets of tabs for both panes.
     pub workspaces: Vec<Workspace>,
+    /// Hidden with Hide Sidebar, and its width when shown.
+    pub sidebar_hidden: bool,
+    pub sidebar_width: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -90,7 +93,7 @@ impl Default for AppearanceSettings {
 pub const THEMES: &[(&str, &str)] = &[("system", "Same as macOS"), ("light", "Light"), ("dark", "Dark")];
 pub const ROW_SPACINGS: &[(&str, &str, f64)] =
     &[("compact", "Compact", 18.0), ("normal", "Normal", 22.0), ("roomy", "Roomy", 28.0)];
-pub const TEXT_SIZES: &[f64] = &[11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0];
+pub const TEXT_SIZES: &[f64] = &[10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -285,6 +288,8 @@ impl Default for Settings {
             preview: PreviewSettings::default(),
             toolbar_version: 0,
             workspaces: Vec::new(),
+            sidebar_hidden: false,
+            sidebar_width: 180.0,
         }
     }
 }

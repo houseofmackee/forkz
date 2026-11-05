@@ -274,6 +274,17 @@ fn validate_menu_item(item: &NSMenuItem) -> bool {
 
 fn validate_toolbar_item(item: &NSToolbarItem) -> bool {
     let Some(command) = Command::from_tag(item.tag()) else { return true };
+    // The hidden files button shows the state: an eye when they show.
+    if command == Command::ToggleHidden
+        && let Some(app) = app()
+    {
+        let shown = app.settings.borrow().show_hidden;
+        let (name, tip) =
+            if shown { ("eye", "Hidden files are shown") } else { ("eye.slash", "Hidden files are hidden") };
+        if let Some(image) = symbol(name, tip) {
+            item.setImage(Some(&image));
+        }
+    }
     if let Some(app) = app() {
         item.setToolTip(Some(&ns(&command_title(command, app.active.get()))));
     }
@@ -309,6 +320,7 @@ pub fn command_title(command: Command, pane: usize) -> String {
         Command::TogglePreview if !app.preview.view().isHidden() => "Hide Preview Pane",
         Command::Disconnect if app.panes[pane].fs().outside().is_some() => "Close Archive",
         Command::ToggleLeftPane if app.panes[0].view().isHidden() => "Show Left Pane",
+        Command::ToggleSidebar if app.sidebar.view().isHidden() => "Show Sidebar",
         Command::ToggleRightPane if app.panes[1].view().isHidden() => "Show Right Pane",
         _ => command.title(),
     };
@@ -332,11 +344,18 @@ const TOOLBAR: &[Command] = &[
     Command::ToggleLeftPane,
     Command::ToggleRightPane,
     Command::TogglePreview,
+    Command::ToggleSidebar,
 ];
 
-/// Toolbar items added in later versions, by `toolbar_version`.
-const NEW_TOOLBAR_ITEMS: &[(u32, &[Command])] =
-    &[(1, &[Command::ToggleLeftPane, Command::ToggleRightPane, Command::TogglePreview])];
+/// Toolbar items added in later versions, by `toolbar_version`, with
+/// where they go (None: at the end).
+/// A toolbar item and where it goes (None: at the end).
+type NewItem = (Command, Option<isize>);
+
+const NEW_TOOLBAR_ITEMS: &[(u32, &[NewItem])] = &[
+    (1, &[(Command::ToggleLeftPane, None), (Command::ToggleRightPane, None), (Command::TogglePreview, None)]),
+    (2, &[(Command::ToggleSidebar, Some(0))]),
+];
 
 fn toolbar_id(command: Command) -> String {
     format!("forkz.{command:?}")
@@ -348,6 +367,7 @@ fn toolbar_identifiers(default: bool) -> Retained<NSArray<NSString>> {
     let id = |c: Command| ns(&toolbar_id(c));
     let ids: Vec<Retained<NSString>> = if default {
         vec![
+            id(Command::ToggleSidebar),
             id(Command::Connect),
             space.clone(),
             id(Command::Back),
@@ -444,8 +464,12 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     first_launch_layout(&app.window);
     add_new_toolbar_items(&app);
     // The split view restores its own idea of what is hidden: settings win.
-    let preview_visible = app.settings.borrow().preview.visible;
+    let (preview_visible, sidebar_hidden) = {
+        let s = app.settings.borrow();
+        (s.preview.visible, s.sidebar_hidden)
+    };
     app.preview.view().setHidden(!preview_visible);
+    app.sidebar.view().setHidden(sidebar_hidden);
     if let Some(split) = app.window.contentView().and_then(|v| v.downcast::<NSSplitView>().ok()) {
         split.adjustSubviews();
     }
@@ -685,7 +709,11 @@ fn main_menu(
         command(&view, c);
     }
     separator(&view);
-    for c in [Command::ToggleLeftPane, Command::ToggleRightPane, Command::TogglePreview] {
+    for c in [Command::ToggleSidebar, Command::ToggleLeftPane, Command::ToggleRightPane, Command::TogglePreview] {
+        command(&view, c);
+    }
+    separator(&view);
+    for c in [Command::ZoomIn, Command::ZoomOut, Command::ActualSize] {
         command(&view, c);
     }
     separator(&view);
@@ -858,6 +886,11 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         }
         Command::Disconnect => !local,
         Command::OpenWithApp => has_selection,
+        Command::ZoomIn => {
+            app.settings.borrow().appearance.text_size < *crate::settings::TEXT_SIZES.last().unwrap_or(&24.0)
+        }
+        Command::ZoomOut => app.settings.borrow().appearance.text_size > crate::settings::TEXT_SIZES[0],
+        Command::ActualSize => (app.settings.borrow().appearance.text_size - 13.0).abs() > 0.01,
         Command::Compress => has_selection && local && !pane.fs().read_only(),
         Command::EditTags => has_selection && local,
         // One pane always stays.
@@ -894,6 +927,10 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::SelectMatching => select_matching(&pane),
         Command::Search => search::run(&pane),
         Command::SaveWorkspace => workspaces::save(),
+        Command::ToggleSidebar => toggle_sidebar(),
+        Command::ZoomIn => zoom(1),
+        Command::ZoomOut => zoom(-1),
+        Command::ActualSize => zoom(0),
         Command::ToggleLeftPane => toggle_pane(0),
         Command::ToggleRightPane => toggle_pane(1),
         Command::Duplicate => {
@@ -1096,6 +1133,7 @@ fn apply_appearance(app: &App) {
     // Bigger text needs taller rows.
     let row = (base + (text - 13.0) * 1.5).round().max(16.0);
     pane_view::set_look(text, row);
+    app.sidebar.set_zoom(text / 13.0);
     for pane in &app.panes {
         pane.apply_appearance(appearance.alternating_rows);
     }
@@ -1852,6 +1890,83 @@ pub fn selection_changed(index: usize) {
     app.preview.set_selection(pane.fs(), pane.location(), entries, pane.item_count());
 }
 
+/// Hides or shows the sidebar.
+fn toggle_sidebar() {
+    let Some(app) = app() else { return };
+    let view = app.sidebar.view();
+    let show = view.isHidden();
+    if !show {
+        let width = view.frame().size.width;
+        update_settings(|s| s.sidebar_width = width);
+    }
+    view.setHidden(!show);
+    if let Some(split) = app.window.contentView().and_then(|v| v.downcast::<NSSplitView>().ok()) {
+        split.adjustSubviews();
+        if show {
+            let width = app.settings.borrow().sidebar_width.clamp(130.0, 320.0);
+            split.layoutSubtreeIfNeeded();
+            split.setPosition_ofDividerAtIndex(width, 0);
+        }
+    }
+    for pane in &app.panes {
+        pane.fit_columns();
+    }
+    update_settings(|s| s.sidebar_hidden = !show);
+}
+
+/// Makes the file lists and sidebar bigger (1), smaller (-1), or normal (0).
+fn zoom(step: i32) {
+    use crate::settings::TEXT_SIZES;
+    let Some(app) = app() else { return };
+    let current = app.settings.borrow().appearance.text_size;
+    let size = match step {
+        0 => 13.0,
+        s if s > 0 => TEXT_SIZES.iter().copied().find(|t| *t > current + 0.01).unwrap_or(current),
+        _ => TEXT_SIZES.iter().rev().copied().find(|t| *t < current - 0.01).unwrap_or(current),
+    };
+    update_settings(|s| s.appearance.text_size = size);
+    for pane in &app.panes {
+        pane.fit_columns();
+    }
+}
+
+/// Everything with a Finder tag (that Spotlight knows), in the active pane.
+pub fn show_tag(name: &'static str) {
+    let Some(app) = app() else { return };
+    let note = app.activity.begin_note(&format!("Finding items tagged \u{201c}{name}\u{201d}\u{2026}"));
+    let index = app.active.get();
+    std::thread::spawn(move || {
+        let result = crate::fs::search::spotlight_tag(name);
+        DispatchQueue::main().exec_async(move || {
+            let Some(app) = self::app() else { return };
+            app.activity.remove(note);
+            let paths = match result {
+                Ok(paths) => paths,
+                Err(e) => {
+                    dialogs::show_error(
+                        format!("Items tagged \u{201c}{name}\u{201d} could not be found."),
+                        e.to_string(),
+                    );
+                    return;
+                }
+            };
+            let local = vfs::local();
+            let entries: Vec<crate::fs::Entry> = paths.iter().filter_map(|p| local.stat(p).ok()).collect();
+            if entries.is_empty() {
+                dialogs::show_info(
+                    format!("Nothing is tagged \u{201c}{name}\u{201d}."),
+                    "Items are found through Spotlight, in the folders it indexes.".into(),
+                );
+                return;
+            }
+            let title = format!("Tagged \u{201c}{name}\u{201d} ({})", entries.len());
+            let results = vfs::results::ResultsFs::new(local, PathBuf::from("/"), title, entries);
+            app.panes[index].navigate_to(results, PathBuf::from("/"));
+            app.panes[index].focus();
+        });
+    });
+}
+
 /// Hides a pane (the other fills the window) or shows it again.
 fn toggle_pane(index: usize) {
     let Some(app) = app() else { return };
@@ -1892,9 +2007,9 @@ fn add_new_toolbar_items(app: &App) {
     let mut latest = seen;
     for (version, commands) in NEW_TOOLBAR_ITEMS.iter().filter(|(v, _)| *v > seen) {
         let present: Vec<String> = toolbar.items().iter().map(|i| i.itemIdentifier().to_string()).collect();
-        for command in *commands {
+        for (command, at) in *commands {
             if !present.contains(&toolbar_id(*command)) {
-                let at = toolbar.items().count() as isize;
+                let at = at.unwrap_or(toolbar.items().count() as isize);
                 toolbar.insertItemWithItemIdentifier_atIndex(&ns(&toolbar_id(*command)), at);
             }
         }
@@ -1964,6 +2079,10 @@ fn update_title(app: &App) {
 fn current_place(app: &App) -> sidebar::Current {
     let pane = &app.panes[app.active.get()];
     let fs = pane.fs();
+    // Search and tag results are not the folder they are listed in.
+    if fs.title_for(&pane.location()).is_some() {
+        return sidebar::Current::Other;
+    }
     if fs.is_local() {
         return sidebar::Current::Local(pane.location());
     }

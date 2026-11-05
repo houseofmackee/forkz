@@ -104,6 +104,21 @@ pub fn spotlight_query(query: &Query) -> String {
     }
 }
 
+/// Everything Spotlight knows with this Finder tag, on every volume.
+pub fn spotlight_tag(tag: &str) -> io::Result<Vec<PathBuf>> {
+    let query = format!("kMDItemUserTags == \"{}\"cd", tag.replace('\\', "\\\\").replace('"', "\\\""));
+    let output = Command::new("/usr/bin/mdfind").arg(query).output()?;
+    if !output.status.success() {
+        return Err(io::Error::other(String::from_utf8_lossy(&output.stderr).trim().to_string()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(PathBuf::from)
+        .take(LIMIT)
+        .collect())
+}
+
 /// Searches with Spotlight (only what it has indexed). Returns paths.
 pub fn spotlight(root: &Path, query: &Query) -> io::Result<Vec<PathBuf>> {
     let output = Command::new("/usr/bin/mdfind").arg("-onlyin").arg(root).arg(spotlight_query(query)).output()?;

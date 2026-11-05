@@ -1,5 +1,6 @@
-//! The sidebar: standard places, the user's favorites, and mounted volumes.
-//! Clicking an item opens it in the active pane.
+//! The sidebar: standard places, the user's favorites, mounted volumes,
+//! sites, and Finder's color tags. Clicking an item opens it in the active
+//! pane (a tag: everything with it).
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
@@ -40,6 +41,11 @@ enum Row {
         title: String,
         detail: String,
     },
+    /// A Finder color tag.
+    Tag {
+        name: &'static str,
+        color: u8,
+    },
 }
 
 /// Actions in the Sites context menu (menu item tags).
@@ -68,6 +74,8 @@ pub struct SidebarIvars {
     /// Selection changed by code (to follow the active pane), not a click.
     updating: Cell<bool>,
     menu_row: Cell<Option<usize>>,
+    /// Row and text scale (View > Zoom In and Zoom Out).
+    zoom: Cell<f64>,
 }
 
 define_class!(
@@ -178,6 +186,7 @@ define_class!(
                 Some(Row::Place { path, .. }) => super::open_in_active_pane(path),
                 Some(Row::Site { id, .. }) => super::site_action(SiteAction::Connect, Some(id)),
                 Some(Row::RemoteFavorite { site_id, path, .. }) => super::open_remote_favorite(&site_id, &path),
+                Some(Row::Tag { name, .. }) => super::show_tag(name),
                 _ => {}
             }
         }
@@ -243,18 +252,29 @@ impl Sidebar {
     }
 
     fn cell_for(&self, row: NSInteger) -> Option<Retained<NSView>> {
+        let zoom = self.ivars().zoom.get();
         let rows = self.ivars().rows.borrow();
         let row = rows.get(usize::try_from(row).ok()?)?;
         Some(match row {
             Row::Header(title) => {
                 let field = NSTextField::labelWithString(&ns(title), self.mtm());
-                field.setFont(Some(&NSFont::boldSystemFontOfSize(NSFont::smallSystemFontSize())));
+                field.setFont(Some(&NSFont::boldSystemFontOfSize((NSFont::smallSystemFontSize() * zoom).round())));
                 field.setTextColor(Some(&objc2_app_kit::NSColor::secondaryLabelColor()));
                 Retained::into_super(Retained::into_super(field))
             }
-            Row::Place { title, path, symbol: name, .. } => place_cell(self.mtm(), title, path, *name),
-            Row::Site { title, detail, .. } => site_cell(self.mtm(), title, detail),
-            Row::RemoteFavorite { title, detail, .. } => site_cell(self.mtm(), title, detail),
+            Row::Place { title, path, symbol: name, .. } => {
+                let icon = name.and_then(|name| symbol(name, title)).unwrap_or_else(|| icon_for_path(path));
+                let tint = name.is_some().then(objc2_app_kit::NSColor::controlAccentColor);
+                cell(self.mtm(), title, &icon, tint, None, zoom)
+            }
+            Row::Site { title, detail, .. } | Row::RemoteFavorite { title, detail, .. } => {
+                let icon = symbol("server.rack", title).unwrap_or_else(super::util::folder_icon);
+                cell(self.mtm(), title, &icon, Some(objc2_app_kit::NSColor::systemTealColor()), Some(detail), zoom)
+            }
+            Row::Tag { name, color } => {
+                let icon = symbol("circle.fill", name).unwrap_or_else(super::util::folder_icon);
+                cell(self.mtm(), name, &icon, super::util::tag_color(*color), None, zoom)
+            }
         })
     }
 
@@ -265,6 +285,7 @@ impl Sidebar {
             scroll: OnceCell::new(),
             updating: Cell::new(false),
             menu_row: Cell::new(None),
+            zoom: Cell::new(1.0),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
 
@@ -354,9 +375,23 @@ impl Sidebar {
             };
             rows.push(Row::Site { id: site.id.clone(), title, detail: site.address() });
         }
+        rows.push(Row::Header("Tags"));
+        for (name, color) in crate::fs::tags::COLORS {
+            rows.push(Row::Tag { name, color });
+        }
         *self.ivars().rows.borrow_mut() = rows;
         self.table().reloadData();
         self.highlight(current);
+    }
+
+    /// Scales the rows and their text (1 is normal).
+    pub fn set_zoom(&self, zoom: f64) {
+        if (self.ivars().zoom.get() - zoom).abs() < 0.01 {
+            return;
+        }
+        self.ivars().zoom.set(zoom);
+        self.table().setRowHeight((24.0 * zoom).round());
+        self.table().reloadData();
     }
 
     /// Selects the row of the active pane's folder or site, if there is one.
@@ -386,31 +421,6 @@ pub enum Current {
     Other,
 }
 
-fn site_cell(mtm: MainThreadMarker, title: &str, detail: &str) -> Retained<NSView> {
-    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 24.0));
-    let cell = NSTableCellView::initWithFrame(NSTableCellView::alloc(mtm), frame);
-    let image = NSImageView::initWithFrame(
-        NSImageView::alloc(mtm),
-        NSRect::new(NSPoint::new(2.0, 4.0), NSSize::new(16.0, 16.0)),
-    );
-    if let Some(icon) = symbol("server.rack", title) {
-        image.setImage(Some(&icon));
-    }
-    image.setContentTintColor(Some(&objc2_app_kit::NSColor::systemTealColor()));
-    let field = NSTextField::labelWithString(&ns(title), mtm);
-    field.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
-    field.setFrame(NSRect::new(NSPoint::new(24.0, 4.0), NSSize::new(150.0, 16.0)));
-    field.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
-    field.setToolTip(Some(&ns(detail)));
-    cell.addSubview(&image);
-    cell.addSubview(&field);
-    unsafe {
-        cell.setImageView(Some(&image));
-        cell.setTextField(Some(&field));
-    }
-    Retained::into_super(cell)
-}
-
 /// Mounted volumes: the startup disk first, then /Volumes.
 fn volumes() -> Vec<(String, PathBuf)> {
     let mut found = Vec::new();
@@ -437,22 +447,41 @@ fn volumes() -> Vec<(String, PathBuf)> {
     found
 }
 
-fn place_cell(mtm: MainThreadMarker, title: &str, path: &Path, symbol_name: Option<&str>) -> Retained<NSView> {
-    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, 24.0));
+/// A row: an icon (tinted if asked) and a title, scaled by `zoom`.
+fn cell(
+    mtm: MainThreadMarker,
+    title: &str,
+    icon: &objc2_app_kit::NSImage,
+    tint: Option<Retained<objc2_app_kit::NSColor>>,
+    tooltip: Option<&str>,
+    zoom: f64,
+) -> Retained<NSView> {
+    let height = (24.0 * zoom).round();
+    let side = (16.0 * zoom).round();
+    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(180.0, height));
     let cell = NSTableCellView::initWithFrame(NSTableCellView::alloc(mtm), frame);
     let image = NSImageView::initWithFrame(
         NSImageView::alloc(mtm),
-        NSRect::new(NSPoint::new(2.0, 4.0), NSSize::new(16.0, 16.0)),
+        NSRect::new(NSPoint::new(2.0, ((height - side) / 2.0).floor()), NSSize::new(side, side)),
     );
-    let icon = symbol_name.and_then(|name| symbol(name, title)).unwrap_or_else(|| icon_for_path(path));
-    image.setImage(Some(&icon));
-    if symbol_name.is_some() {
-        image.setContentTintColor(Some(&objc2_app_kit::NSColor::controlAccentColor()));
+    image.setImage(Some(icon));
+    image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
+    if let Some(tint) = &tint {
+        image.setContentTintColor(Some(tint));
     }
     let field = NSTextField::labelWithString(&ns(title), mtm);
+    let size = (13.0 * zoom).round();
+    field.setFont(Some(&NSFont::systemFontOfSize(size)));
     field.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingTail);
-    field.setFrame(NSRect::new(NSPoint::new(24.0, 4.0), NSSize::new(150.0, 16.0)));
+    let text_height = (size * 1.25).ceil() + 1.0;
+    field.setFrame(NSRect::new(
+        NSPoint::new(side + 8.0, ((height - text_height) / 2.0).floor()),
+        NSSize::new(180.0 - side - 12.0, text_height),
+    ));
     field.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewWidthSizable);
+    if let Some(tooltip) = tooltip {
+        field.setToolTip(Some(&ns(tooltip)));
+    }
     cell.addSubview(&image);
     cell.addSubview(&field);
     unsafe {

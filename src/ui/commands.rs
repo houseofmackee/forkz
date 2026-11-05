@@ -64,6 +64,10 @@ pub enum Command {
     SelectMatching,
     Search,
     SaveWorkspace,
+    ToggleSidebar,
+    ZoomIn,
+    ZoomOut,
+    ActualSize,
 }
 
 impl Command {
@@ -124,6 +128,10 @@ impl Command {
         Command::SelectMatching,
         Command::Search,
         Command::SaveWorkspace,
+        Command::ToggleSidebar,
+        Command::ZoomIn,
+        Command::ZoomOut,
+        Command::ActualSize,
     ];
 
     pub fn tag(self) -> isize {
@@ -211,6 +219,10 @@ impl Command {
             Command::SelectMatching => "Select Matching\u{2026}",
             Command::Search => "Search\u{2026}",
             Command::SaveWorkspace => "Save Workspace\u{2026}",
+            Command::ToggleSidebar => "Hide Sidebar",
+            Command::ZoomIn => "Zoom In",
+            Command::ZoomOut => "Zoom Out",
+            Command::ActualSize => "Actual Size",
         }
     }
 
@@ -249,7 +261,7 @@ impl Command {
             Command::GoToFolder => ("g", shift_cmd),
             Command::SwitchPane => ("", cmd),
             Command::SwapPanes => ("u", cmd),
-            Command::SameFolderInOther => ("=", cmd),
+            Command::SameFolderInOther => ("=", opt_cmd),
             Command::Connect => ("k", cmd),
             Command::Disconnect => ("e", cmd),
             Command::ImportFileZilla => ("", cmd),
@@ -279,7 +291,12 @@ impl Command {
             Command::CommandPalette => ("p", opt_cmd),
             Command::SelectMatching => ("a", opt_cmd),
             Command::Search => ("f", shift_cmd),
-            Command::SaveWorkspace => ("s", cmd | NSEventModifierFlags::Control),
+            Command::SaveWorkspace => ("s", shift_cmd | NSEventModifierFlags::Control),
+            // The macOS standard for sidebars.
+            Command::ToggleSidebar => ("s", cmd | NSEventModifierFlags::Control),
+            Command::ZoomIn => ("=", cmd),
+            Command::ZoomOut => ("-", cmd),
+            Command::ActualSize => ("0", cmd),
         }
     }
 
@@ -301,6 +318,7 @@ impl Command {
             Command::ToggleLeftPane => "rectangle.lefthalf.inset.filled",
             Command::ToggleRightPane => "rectangle.righthalf.inset.filled",
             Command::TogglePreview => "sidebar.right",
+            Command::ToggleSidebar => "sidebar.left",
             _ => "questionmark",
         }
     }
@@ -318,6 +336,7 @@ impl Command {
             Command::ToggleLeftPane => "Left Pane",
             Command::ToggleRightPane => "Right Pane",
             Command::TogglePreview => "Preview",
+            Command::ToggleSidebar => "Sidebar",
             other => other.title(),
         }
     }

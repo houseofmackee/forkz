@@ -19,7 +19,8 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - Archives (zip, tar, 7z, rar, iso, and more) browsed like folders, read-only: copy items out to extract them; Compress makes zip, tar.gz, 7z, and other archives
 - Search by name or contents (Spotlight on the Mac, and on servers and in archives too), with the results in a pane
 - Workspaces: saved sets of tabs for both panes, including server folders
-- Finder tags, a command palette, and Select Matching
+- Finder tags (colors on icons, and in the sidebar to find everything tagged), a command palette, and Select Matching
+- Zoom (Command-= and Command-minus) and a sidebar that can be hidden
 - A Settings window (Command-comma), with light and dark appearance, text size and row spacing, and your own keyboard shortcuts
 
 ## SFTP
@@ -77,11 +78,13 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 | Option-Command-A | Select matching items |
 | Shift-Command-F | Search |
 | Option-Command-P | Command palette |
-| Control-Command-S, Control-Command-1 to 9 | Save a workspace, open a workspace |
+| Control-Shift-Command-S, Control-Command-1 to 9 | Save a workspace, open a workspace |
+| Control-Command-S | Show or hide the sidebar |
+| Command-=, Command-minus, Command-0 | Zoom in, zoom out, actual size |
 | Shift-Command-. | Show or hide hidden files |
 | Shift-Command-G | Go to folder |
 | Command-U | Swap panes |
-| Command-= | Same folder in the other pane |
+| Option-Command-= | Same folder in the other pane |
 | Command-K | Connect to a server |
 | Command-E | Disconnect |
 | Command-I | Permissions |

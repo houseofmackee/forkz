@@ -13,27 +13,60 @@ use objc2_uniform_type_identifiers::UTType;
 
 use crate::fs::{Entry, EntryKind};
 
-/// A file's Finder tags (on the Mac).
+/// A file's Finder tag names (on the Mac).
 pub fn tags_of(path: &Path) -> Vec<String> {
-    let url = file_url(path);
-    let mut value: Option<Retained<objc2::runtime::AnyObject>> = None;
-    let key = unsafe { objc2_foundation::NSURLTagNamesKey };
-    if unsafe { url.getResourceValue_forKey_error(&mut value, key) }.is_err() {
-        return Vec::new();
-    }
-    value
-        .and_then(|v| v.downcast::<objc2_foundation::NSArray>().ok())
-        .map(|tags| tags.iter().filter_map(|t| t.downcast::<NSString>().ok()).map(|t| t.to_string()).collect())
-        .unwrap_or_default()
+    crate::fs::tags::read(path).into_iter().map(|t| t.name).collect()
 }
 
 /// Replaces a file's Finder tags.
 pub fn set_tags(path: &Path, tags: &[String]) -> Result<(), String> {
-    let url = file_url(path);
-    let names: Vec<Retained<NSString>> = tags.iter().map(|t| ns(t)).collect();
-    let array = objc2_foundation::NSArray::from_retained_slice(&names);
-    let key = unsafe { objc2_foundation::NSURLTagNamesKey };
-    unsafe { url.setResourceValue_forKey_error(Some(&array), key) }.map_err(|e| e.localizedDescription().to_string())
+    crate::fs::tags::set(path, tags)
+}
+
+/// The color of a Finder tag color number (None for no color).
+pub fn tag_color(color: u8) -> Option<Retained<objc2_app_kit::NSColor>> {
+    use objc2_app_kit::NSColor;
+    Some(match color {
+        1 => NSColor::systemGrayColor(),
+        2 => NSColor::systemGreenColor(),
+        3 => NSColor::systemPurpleColor(),
+        4 => NSColor::systemBlueColor(),
+        5 => NSColor::systemYellowColor(),
+        6 => NSColor::systemRedColor(),
+        7 => NSColor::systemOrangeColor(),
+        _ => return None,
+    })
+}
+
+/// An icon with dots in its tags' colors at the bottom right (up to three).
+pub fn icon_with_tags(icon: &NSImage, colors: &[u8]) -> Retained<NSImage> {
+    let colors: Vec<Retained<objc2_app_kit::NSColor>> = colors.iter().filter_map(|c| tag_color(*c)).take(3).collect();
+    if colors.is_empty() {
+        return icon.retain();
+    }
+    let base = icon.retain();
+    let size = objc2_foundation::NSSize::new(32.0, 32.0);
+    let draw = block2::RcBlock::new(move |rect: objc2_foundation::NSRect| -> objc2::runtime::Bool {
+        base.drawInRect(rect);
+        let dot = rect.size.width * 0.46;
+        let step = rect.size.width * 0.28;
+        // The last color on top, at the corner.
+        for (i, color) in colors.iter().enumerate() {
+            let offset = (colors.len() - 1 - i) as f64 * step;
+            let oval = objc2_foundation::NSRect::new(
+                objc2_foundation::NSPoint::new(rect.size.width - dot - offset, 0.0),
+                objc2_foundation::NSSize::new(dot, dot),
+            );
+            let path = objc2_app_kit::NSBezierPath::bezierPathWithOvalInRect(oval);
+            color.setFill();
+            path.fill();
+            objc2_app_kit::NSColor::windowBackgroundColor().setStroke();
+            path.setLineWidth(dot * 0.14);
+            path.stroke();
+        }
+        objc2::runtime::Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(size, false, &draw)
 }
 
 pub fn mtm() -> MainThreadMarker {

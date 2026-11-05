@@ -7,6 +7,20 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-05
+
+### Added
+
+- Tags in the sidebar: Finder's color tags, each showing everything with that tag (through Spotlight) in the active pane.
+- Tag colors on file icons, as dots in the corner (custom tags with a color too).
+- Hide Sidebar (Control-Command-S, the macOS standard) and a toolbar button for it.
+- Zoom In, Zoom Out, and Actual Size (Command-=, Command-minus, Command-0): the file lists and the sidebar get bigger or smaller.
+
+### Changed
+
+- The hidden files button shows the state: an eye when hidden files show, a crossed-out eye when they do not.
+- Save Workspace is now Control-Shift-Command-S, and Same Folder in Other Pane is Option-Command-= (their shortcuts went to Hide Sidebar and Zoom In).
+
 ## [0.5.0] - 2026-11-04
 
 ### Added
@@ -101,7 +115,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/houseofmackee/forkz/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/houseofmackee/forkz/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/houseofmackee/forkz/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/houseofmackee/forkz/compare/v0.2.1...v0.3.0

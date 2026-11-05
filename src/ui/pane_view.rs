@@ -671,7 +671,15 @@ impl PaneController {
         let text = match column_id.as_str() {
             "name" => {
                 if let Some(image) = &image_view {
-                    image.setImage(Some(&icon_of(entry, state.is_local())));
+                    let icon = icon_of(entry, state.is_local());
+                    // Tag colors on the icon, like Finder's dots.
+                    let colors: Vec<u8> = if state.is_local() {
+                        crate::fs::tags::read(&entry.path).iter().map(|t| t.color).filter(|c| *c > 0).collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let icon = if colors.is_empty() { icon } else { super::util::icon_with_tags(&icon, &colors) };
+                    image.setImage(Some(&icon));
                 }
                 entry.name.clone()
             }
@@ -1741,7 +1749,7 @@ fn reusable_cell(table: &NSTableView, column_id: &str, mtm: MainThreadMarker) ->
     let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(200.0, look.row));
     let cell = NSTableCellView::initWithFrame(NSTableCellView::alloc(mtm), frame);
     cell.setIdentifier(Some(&identifier));
-    let icon = if look.row >= 26.0 { 20.0 } else { 16.0 };
+    let icon = (look.row - 6.0).clamp(16.0, 32.0).floor();
     let text_x = if column_id == "name" { icon + 8.0 } else { 2.0 };
     let field = NSTextField::labelWithString(&ns(""), mtm);
     field.setFont(Some(&objc2_app_kit::NSFont::systemFontOfSize(look.text)));

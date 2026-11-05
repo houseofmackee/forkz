@@ -5,6 +5,7 @@ pub mod checksum;
 pub mod glob;
 pub mod ops;
 pub mod search;
+pub mod tags;
 
 use std::cmp::Ordering;
 use std::ffi::CString;
