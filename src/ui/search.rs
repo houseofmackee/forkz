@@ -18,7 +18,7 @@ use super::oplog;
 use super::pane_view::PaneController;
 use super::util::{mtm, ns};
 use crate::fs::ops::CancelToken;
-use crate::fs::search::{self, Mode, Query};
+use crate::fs::search::{self, Kind, Mode, Query};
 use crate::pane::title_of;
 use crate::vfs::{self, FsRef};
 
@@ -29,13 +29,29 @@ struct Last {
 
 thread_local! {
     static LAST: RefCell<Last> = const { RefCell::new(Last {
-        query: Query { text: String::new(), mode: Mode::Name, include_hidden: false },
+        query: Query { text: String::new(), mode: Mode::Name, include_hidden: false, kind: Kind::Any, tag: None },
         spotlight: true,
     }) };
 }
 
 fn view<T: objc2::Message + AsRef<NSView>>(v: &T) -> Retained<NSView> {
     v.as_ref().retain()
+}
+
+/// What a search looks for, in words: "“report”", "images tagged Red".
+fn describe(query: &Query) -> String {
+    let mut parts = Vec::new();
+    if !query.text.trim().is_empty() {
+        parts.push(format!("\u{201c}{}\u{201d}", query.text.trim()));
+    }
+    if query.kind != Kind::Any {
+        let kind = Kind::ALL.iter().find(|k| k.0 == query.kind).map_or("", |k| k.1).to_lowercase();
+        parts.push(kind);
+    }
+    if let Some(tag) = &query.tag {
+        parts.push(format!("tagged {tag}"));
+    }
+    parts.join(", ")
 }
 
 /// Asks what to search for. `local`: Spotlight can be used.
@@ -54,7 +70,7 @@ fn ask(folder: &str, local: bool) -> Option<(Query, bool)> {
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(300.0, 24.0)),
     );
     field.setStringValue(&ns(&last_query.text));
-    field.setPlaceholderString(Some(&ns("report, *.pdf, or text in files")));
+    field.setPlaceholderString(Some(&ns("report, *.pdf, or text (empty: just the kind or tag)")));
     field.widthAnchor().constraintEqualToConstant(300.0).setActive(true);
     let mode = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, false);
     let titles: Vec<Retained<NSString>> = ["Names", "Contents of files"].iter().map(|t| ns(t)).collect();
@@ -65,6 +81,19 @@ fn ask(folder: &str, local: bool) -> Option<(Query, bool)> {
         button.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
         button
     };
+    let popup = |titles: &[&str], selected: usize| {
+        let popup = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, false);
+        let titles: Vec<Retained<NSString>> = titles.iter().map(|t| ns(t)).collect();
+        popup.addItemsWithTitles(&NSArray::from_retained_slice(&titles));
+        popup.selectItemAtIndex(selected as isize);
+        popup
+    };
+    let kinds: Vec<&str> = Kind::ALL.iter().map(|k| k.1).collect();
+    let kind = popup(&kinds, Kind::ALL.iter().position(|k| k.0 == last_query.kind).unwrap_or(0));
+    let mut tags = vec!["Any tag"];
+    tags.extend(crate::fs::tags::COLORS.iter().map(|c| c.0));
+    let tag_index = last_query.tag.as_deref().and_then(|t| tags.iter().position(|x| *x == t)).unwrap_or(0);
+    let tag = popup(&tags, tag_index);
     let hidden = checkbox("Include hidden items", last_query.include_hidden);
     let spotlight = checkbox("Use Spotlight (fast, for indexed folders)", local && last_spotlight);
     spotlight.setEnabled(local);
@@ -72,6 +101,8 @@ fn ask(folder: &str, local: bool) -> Option<(Query, bool)> {
     let rows: Vec<Retained<NSArray<NSView>>> = [
         (label("Find:"), view(&*field)),
         (label("Look in:"), view(&*mode)),
+        (label("Kind:"), view(&*kind)),
+        (label("Tag:"), view(&*tag)),
         (label(""), view(&*hidden)),
         (label(""), view(&*spotlight)),
     ]
@@ -91,14 +122,18 @@ fn ask(folder: &str, local: bool) -> Option<(Query, bool)> {
         return None;
     }
     let text = field.stringValue().to_string().trim().to_string();
-    if text.is_empty() {
-        return None;
-    }
+    let tag_index = tag.indexOfSelectedItem().max(0) as usize;
     let query = Query {
         text,
         mode: if mode.indexOfSelectedItem() == 1 { Mode::Contents } else { Mode::Name },
         include_hidden: hidden.state() == NSControlStateValueOn,
+        kind: Kind::ALL.get(kind.indexOfSelectedItem().max(0) as usize).map_or(Kind::Any, |k| k.0),
+        tag: (tag_index > 0).then(|| tags[tag_index].to_string()),
     };
+    // Some text, or a kind or tag.
+    if query.is_empty() {
+        return None;
+    }
     let use_spotlight = local && spotlight.state() == NSControlStateValueOn;
     LAST.with(|l| {
         *l.borrow_mut() =
@@ -117,7 +152,7 @@ pub fn run(pane: &PaneController) {
     let Some((query, use_spotlight)) = ask(&folder, fs.is_local()) else { return };
     let Some(activity) = super::activity_view() else { return };
     let (note, cancel) =
-        activity.begin_task(&format!("Searching \u{201c}{folder}\u{201d} for \u{201c}{}\u{201d}\u{2026}", query.text));
+        activity.begin_task(&format!("Searching \u{201c}{folder}\u{201d} for {}\u{2026}", describe(&query)));
     let index = pane.index();
     std::thread::spawn(move || {
         let result = find(&fs, &root, &query, use_spotlight, &cancel);
@@ -169,13 +204,12 @@ fn show(
             return;
         }
     };
-    let what = if query.mode == Mode::Contents { "containing" } else { "named" };
     let count = entries.len();
     oplog::record(
         oplog::Kind::Change,
         format!(
-            "Searched \u{201c}{folder}\u{201d} for items {what} \u{201c}{}\u{201d}: {count} found{}",
-            query.text,
+            "Searched \u{201c}{folder}\u{201d} for {}: {count} found{}",
+            describe(&query),
             if stopped { " (stopped)" } else { "" }
         ),
         "",
@@ -186,14 +220,13 @@ fn show(
     }
     if count == 0 {
         super::dialogs::show_info(
-            format!("Nothing {what} \u{201c}{}\u{201d} was found.", query.text),
+            format!("Nothing was found for {}.", describe(&query)),
             format!("Searched \u{201c}{folder}\u{201d} and everything in it."),
         );
         return;
     }
     let more = if count >= search::LIMIT || stopped { "+" } else { "" };
-    let title =
-        format!("\u{201c}{}\u{201d} in {folder} ({count}{more}){}", query.text, if stopped { ", stopped" } else { "" });
+    let title = format!("{} in {folder} ({count}{more}){}", describe(&query), if stopped { ", stopped" } else { "" });
     let results = vfs::results::ResultsFs::new(fs, root.clone(), title, entries);
     if let Some(pane) = super::pane(index) {
         pane.navigate_to(results, root);

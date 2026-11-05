@@ -671,14 +671,16 @@ impl RenameWindow {
 
 /// Shows the window for these items (in the pane's order) among the names
 /// in their folder. Returns the plan if Rename was chosen.
-pub fn show(items: Vec<Item>, existing: Vec<String>) -> Option<Vec<Planned>> {
+/// `initial`: rules to start with (a preset chosen in the command palette)
+/// instead of the last ones used.
+pub fn show(items: Vec<Item>, existing: Vec<String>, initial: Option<Vec<Step>>) -> Option<Vec<Planned>> {
     let mtm = mtm();
     let count = items.len();
     let this = RenameWindow::alloc(mtm)
         .set_ivars(Ivars { ui: OnceCell::new(), state: RefCell::new(State { items, existing, ..State::default() }) });
     let this: Retained<RenameWindow> = unsafe { msg_send![super(this), init] };
     this.build(count);
-    let last = LAST.with(|l| l.borrow().clone());
+    let last = initial.unwrap_or_else(|| LAST.with(|l| l.borrow().clone()));
     if last.is_empty() {
         this.add_row(None);
     } else {

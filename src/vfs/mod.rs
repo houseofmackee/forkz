@@ -5,6 +5,7 @@ pub mod archive;
 pub mod ftp;
 pub mod http;
 pub mod known_hosts;
+pub mod mount;
 pub mod results;
 pub mod s3;
 pub mod sftp;
@@ -81,6 +82,12 @@ pub trait Vfs: Send + Sync {
     /// system, where browsing beyond the view's top continues.
     fn browse_fs(&self) -> Option<FsRef> {
         None
+    }
+
+    /// Whether a path belongs here (a mounted share: only its folder);
+    /// going elsewhere switches to the Mac.
+    fn contains(&self, _path: &Path) -> bool {
+        true
     }
 
     /// A title for a place, instead of the folder's name.

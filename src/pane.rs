@@ -229,6 +229,8 @@ impl PaneState {
         // Leaving search results for a folder in them: the real one.
         let fs = match self.fs.browse_fs() {
             Some(inner) if path != self.fs.home() => inner,
+            // Leaving a mounted share's folder: the Mac.
+            _ if !self.fs.contains(&path) => vfs::local(),
             _ => self.fs.clone(),
         };
         self.navigate_to(fs, path);

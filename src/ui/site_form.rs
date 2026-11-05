@@ -114,6 +114,7 @@ impl FormTarget {
         let sftp = protocol.is_sftp();
         let s3 = matches!(protocol, Protocol::S3 | Protocol::S3Http);
         let webdav = matches!(protocol, Protocol::Webdav | Protocol::Webdavs);
+        let share = protocol.is_share();
         let auth = if sftp {
             AUTH_CHOICES.get(fields.auth.indexOfSelectedItem().max(0) as usize).map(|c| c.1)
         } else {
@@ -136,12 +137,14 @@ impl FormTarget {
         let user_hint = match protocol {
             _ if s3 => "Access key ID".to_string(),
             Protocol::Ftp | Protocol::Ftps | Protocol::FtpPlain => "anonymous".to_string(),
-            _ if webdav => "Optional".to_string(),
+            _ if webdav || share => "Optional (asked for if needed)".to_string(),
             _ => std::env::var("USER").unwrap_or_default(),
         };
         fields.user.setPlaceholderString(Some(&ns(&user_hint)));
         let remote_hint = match () {
             _ if webdav => "WebDAV path, for example /remote.php/dav/files/me",
+            _ if protocol == Protocol::Nfs => "Export, for example /exports/media",
+            _ if share => "Share (or Share/folder); empty to choose",
             _ if s3 => "Optional: /bucket/folder",
             _ => "Login folder",
         };

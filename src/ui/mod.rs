@@ -913,7 +913,8 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
             let here = pane.selected_paths().len();
             here == 2 || (here == 1 && app.panes[1 - index].selected_paths().len() == 1)
         }
-        Command::Disconnect => !local,
+        // Servers, and mounted shares (which count as local).
+        Command::Disconnect => !local || pane.fs().key().starts_with("mount:"),
         Command::OpenWithApp => has_selection,
         Command::NewFile => !pane.fs().read_only() && !pane.showing_results(),
         Command::NewFolderWithSelection => has_selection && !pane.fs().read_only() && !pane.showing_results(),
@@ -1542,6 +1543,18 @@ fn rename(pane: &PaneController) {
 
 /// Renames the selected items with rules (see `multi_rename`).
 fn multi_rename(pane: &PaneController) {
+    multi_rename_with(pane, None);
+}
+
+/// Rename Multiple Items starting from a saved preset.
+fn rename_with_preset(pane: &PaneController, index: usize) {
+    let steps = current_settings().and_then(|s| s.rename_presets.get(index).map(|p| p.steps.clone()));
+    if let Some(steps) = steps {
+        multi_rename_with(pane, Some(steps));
+    }
+}
+
+fn multi_rename_with(pane: &PaneController, initial: Option<Vec<crate::rename::Step>>) {
     let paths = pane.target_paths();
     if paths.is_empty() {
         return;
@@ -1557,7 +1570,7 @@ fn multi_rename(pane: &PaneController) {
             modified: e.modified,
         })
         .collect();
-    let Some(planned) = multi_rename::show(items, pane.all_names()) else { return };
+    let Some(planned) = multi_rename::show(items, pane.all_names(), initial) else { return };
     let (fs, dir, index) = (pane.fs(), pane.location(), pane.index());
     let changed = planned.iter().filter(|p| p.changes()).count();
     std::thread::spawn(move || {
@@ -1625,6 +1638,13 @@ fn go_to_folder(pane: &PaneController) {
         return;
     };
     let text = text.trim();
+    // A server address (sftp://, smb://, and so on) connects.
+    if let Some((scheme, _)) = text.split_once("://")
+        && crate::sites::Protocol::from_scheme(scheme).is_some()
+    {
+        open_target(text);
+        return;
+    }
     let path = match text.strip_prefix('~') {
         Some(rest) => fs.home().join(rest.trim_start_matches('/')),
         None if Path::new(text).is_absolute() => PathBuf::from(text),
@@ -1789,12 +1809,15 @@ fn sync_side(pane: &PaneController) -> sync_window::Side {
     let fs = pane.fs();
     let fs = fs.browse_fs().unwrap_or(fs);
     let path = pane.location();
+    // A mounted share is kept as its site (it may not be mounted later).
     let saved = if fs.read_only() {
         None
+    } else if let Some(site) = site_of(&fs) {
+        Some(crate::settings::WorkspaceTab { site: Some(site), path: path.clone() })
     } else if fs.is_local() {
         Some(crate::settings::WorkspaceTab { site: None, path: path.clone() })
     } else {
-        site_of(&fs).map(|site| crate::settings::WorkspaceTab { site: Some(site), path: path.clone() })
+        None
     };
     sync_window::Side { fs, path, saved }
 }
@@ -2110,6 +2133,18 @@ fn open_with_app(pane: &PaneController) {
     }
 }
 
+/// Opens a file in a chosen app.
+fn open_with(file: &Path, app: &Path) {
+    let configuration = objc2_app_kit::NSWorkspaceOpenConfiguration::configuration();
+    let urls = NSArray::from_retained_slice(&[file_url(file)]);
+    NSWorkspace::sharedWorkspace().openURLs_withApplicationAtURL_configuration_completionHandler(
+        &urls,
+        &file_url(app),
+        &configuration,
+        None,
+    );
+}
+
 /// Compresses the selection into an archive beside it (the name chosen
 /// picks the format). On a server, the items are downloaded to a temporary
 /// folder, compressed, and the archive is uploaded beside them.
@@ -2347,17 +2382,18 @@ fn select_matching(pane: &PaneController) {
         static LAST: RefCell<String> = const { RefCell::new(String::new()) };
     }
     let last = LAST.with(|l| l.borrow().clone());
-    let Some(text) = dialogs::prompt(
+    let Some((text, choice)) = dialogs::prompt_with_choice(
         "Select Matching",
         "Names matching: * is any text, ? one character, [a-z] one of these. Separate several with ; (plain text matches names containing it).",
         "Select",
         &last,
-        None,
+        &["Select only these", "Add them to the selection", "Remove them from the selection"],
+        0,
     ) else {
         return;
     };
     LAST.with(|l| *l.borrow_mut() = text.clone());
-    if pane.select_matching(&crate::fs::glob::Patterns::new(&text)) == 0 {
+    if pane.select_matching(&crate::fs::glob::Patterns::new(&text), choice == 1, choice == 2) == 0 {
         objc2_app_kit::NSBeep();
     }
 }
@@ -2366,11 +2402,18 @@ fn select_matching(pane: &PaneController) {
 fn command_palette() {
     let Some(app) = app() else { return };
     let active = app.active.get();
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     enum Action {
         Run(Command),
         Workspace(usize),
+        Place(PathBuf),
+        Site(String),
+        RemoteFolder(String, PathBuf),
+        Synclet(usize),
+        Preset(usize),
+        OpenWith(PathBuf, PathBuf),
     }
+    let item = |title: String, detail: &str, value: Action| palette::Item { title, detail: detail.to_string(), value };
     let overrides = app.settings.borrow().shortcuts.clone();
     let mut items: Vec<palette::Item<Action>> = Command::ALL
         .iter()
@@ -2387,17 +2430,88 @@ fn command_palette() {
             }
         })
         .collect();
-    let names: Vec<String> = app.settings.borrow().workspaces.iter().map(|w| w.name.clone()).collect();
-    items.extend(names.into_iter().enumerate().map(|(i, name)| palette::Item {
-        title: format!("Open Workspace \u{201c}{name}\u{201d}"),
-        detail: if i < 9 { format!("\u{2303}\u{2318}{}", i + 1) } else { String::new() },
+    let settings = app.settings.borrow().clone();
+    items.extend(settings.workspaces.iter().enumerate().map(|(i, w)| palette::Item {
+        title: format!("Open Workspace \u{201c}{}\u{201d}", w.name),
+        detail: if i < 9 { format!("\u{2303}\u{2318}{}", i + 1) } else { "Workspace".into() },
         value: Action::Workspace(i),
     }));
+    // Places, favorites, and devices.
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    let mut places: Vec<(String, PathBuf, &str)> = vec![(title_of(&home), home.clone(), "Folder")];
+    for (dir, name) in
+        [(dirs::desktop_dir(), "Desktop"), (dirs::document_dir(), "Documents"), (dirs::download_dir(), "Downloads")]
+    {
+        if let Some(dir) = dir {
+            places.push((name.to_string(), dir, "Folder"));
+        }
+    }
+    places.push(("Applications".into(), PathBuf::from("/Applications"), "Folder"));
+    places.extend(settings.favorites.iter().map(|f| (title_of(f), f.clone(), "Favorite")));
+    places.push(("Macintosh HD".into(), PathBuf::from("/"), "Device"));
+    if let Ok(read) = std::fs::read_dir("/Volumes") {
+        for entry in read.flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && std::fs::read_link(&path).is_err()
+                && !entry.file_name().to_string_lossy().starts_with('.')
+            {
+                places.push((entry.file_name().to_string_lossy().into_owned(), path, "Device"));
+            }
+        }
+    }
+    items.extend(places.into_iter().map(|(name, path, kind)| item(format!("Go to {name}"), kind, Action::Place(path))));
+    let sites = app.sites.borrow().sites.clone();
+    items.extend(sites.iter().map(|s| item(format!("Connect to {}", s.name), "Site", Action::Site(s.id.clone()))));
+    items.extend(settings.remote_favorites.iter().filter_map(|f| {
+        let site = sites.iter().find(|s| s.id == f.site_id)?;
+        let title = format!("Go to {} on {}", title_of(&f.path), site.name);
+        Some(item(title, "Server folder", Action::RemoteFolder(f.site_id.clone(), f.path.clone())))
+    }));
+    items.extend(
+        settings
+            .synclets
+            .iter()
+            .enumerate()
+            .map(|(i, s)| item(format!("Sync \u{201c}{}\u{201d}", s.name), "Synclet", Action::Synclet(i))),
+    );
+    // Presets and apps need a selection.
+    let pane = app.panes[active].clone();
+    let selection = pane.target_paths();
+    if !selection.is_empty() && !pane.fs().read_only() {
+        items.extend(
+            settings.rename_presets.iter().enumerate().map(|(i, p)| {
+                item(format!("Rename with \u{201c}{}\u{201d}", p.name), "Rename preset", Action::Preset(i))
+            }),
+        );
+    }
+    if let [file] = selection.as_slice()
+        && pane.is_local()
+        && !file.is_dir()
+    {
+        let apps = NSWorkspace::sharedWorkspace().URLsForApplicationsToOpenURL(&file_url(file));
+        let mut seen = std::collections::HashSet::new();
+        for app_url in apps.iter() {
+            let Some(app_path) = util::url_path(&app_url) else { continue };
+            let name = app_path.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            // Two copies of an app: the first (the one macOS prefers).
+            if !seen.insert(name.clone()) || seen.len() > 15 {
+                continue;
+            }
+            items.push(item(format!("Open with {name}"), "App", Action::OpenWith(file.clone(), app_path)));
+        }
+    }
     let window = app.window.clone();
     drop(app);
     match palette::show(items, Some(&window)) {
         Some(Action::Run(command)) => run_command(command, Some(active)),
         Some(Action::Workspace(index)) => workspaces::open(index),
+        Some(Action::Place(path)) => open_in_active_pane(path),
+        Some(Action::Site(id)) => site_action(sidebar::SiteAction::Connect, Some(id)),
+        Some(Action::RemoteFolder(site, path)) => open_remote_favorite(&site, &path),
+        Some(Action::Synclet(index)) => open_synclet(index),
+        Some(Action::Preset(index)) => rename_with_preset(&pane, index),
+        Some(Action::OpenWith(file, app)) => open_with(&file, &app),
         None => {}
     }
 }
@@ -2943,6 +3057,24 @@ fn connect_site(site: crate::sites::Site, pane_index: usize, password: Option<St
     });
 }
 
+/// What to mount for a share site: the server and the share (the first
+/// part of the remote folder).
+fn share_params(site: &crate::sites::Site, password: Option<String>) -> vfs::mount::ShareParams {
+    let scheme = site.protocol.scheme();
+    let share = site.remote_dir.clone().unwrap_or_default();
+    // NFS exports are paths; SMB and AFP mount the share, not a folder in it.
+    let share =
+        if scheme == "nfs" { share } else { share.trim_matches('/').split('/').next().unwrap_or("").to_string() };
+    vfs::mount::ShareParams {
+        scheme,
+        host: site.host.clone(),
+        port: (site.port != site.protocol.default_port()).then_some(site.port),
+        user: site.user.clone(),
+        password,
+        share,
+    }
+}
+
 /// Connects to a site with its protocol (off the main thread). Returns the
 /// file system and the password or key that worked.
 fn open_connection(
@@ -2996,6 +3128,12 @@ fn open_connection(
             let secret = fs.secret().map(str::to_string);
             Ok((fs, secret))
         }
+        Protocol::Smb | Protocol::Afp | Protocol::Nfs => {
+            let params = share_params(site, password);
+            let mountpoint = vfs::mount::mount(&params)?;
+            let fs: FsRef = vfs::mount::MountFs::new(mountpoint, &params);
+            Ok((fs, params.password))
+        }
         Protocol::S3 | Protocol::S3Http => {
             let params = vfs::s3::S3Params {
                 host: site.host.clone(),
@@ -3018,7 +3156,16 @@ fn show_site(site: &crate::sites::Site, fs: FsRef, pane_index: usize) {
     // For WebDAV the remote folder is the server's WebDAV root (see
     // open_connection), so the site opens at the top of it.
     let webdav = matches!(site.protocol, crate::sites::Protocol::Webdav | crate::sites::Protocol::Webdavs);
-    let folder = site.remote_dir.as_ref().filter(|_| !webdav).map(PathBuf::from).unwrap_or_else(|| fs.home());
+    let folder = if site.protocol.is_share() && site.protocol != crate::sites::Protocol::Nfs {
+        // The share is mounted; the rest of the remote folder is inside it.
+        let inside: PathBuf = site.remote_dir.as_deref().unwrap_or("").trim_matches('/').split('/').skip(1).collect();
+        let folder = fs.home().join(inside);
+        if folder.is_dir() { folder } else { fs.home() }
+    } else if site.protocol.is_share() {
+        fs.home()
+    } else {
+        site.remote_dir.as_ref().filter(|_| !webdav).map(PathBuf::from).unwrap_or_else(|| fs.home())
+    };
     let pane = app.panes[pane_index].clone();
     pane.navigate_to(fs, folder);
     pane.focus();
@@ -3140,6 +3287,20 @@ fn disconnect(key: &str) {
     }
     update_title(&app);
     reload_sidebar();
+    // A mounted share is unmounted (once nothing shows it).
+    if let Some(mountpoint) = key.strip_prefix("mount:").map(PathBuf::from) {
+        std::thread::spawn(move || {
+            let result = vfs::mount::unmount(&mountpoint);
+            DispatchQueue::main().exec_async(move || {
+                if let Err(e) = result {
+                    dialogs::show_error(
+                        format!("\u{201c}{}\u{201d} could not be unmounted.", title_of(&mountpoint)),
+                        e.to_string(),
+                    );
+                }
+            });
+        });
+    }
 }
 
 /// Imports sites, passwords, trusted host keys, and settings from FileZilla.
@@ -3326,7 +3487,12 @@ fn folder_changed(paths: &[PathBuf]) {
             continue;
         }
         let location = pane.location();
-        let affected = paths.iter().any(|p| p == &location || p.parent() == Some(location.as_path()));
+        // Events name real paths (/private/tmp/... for /tmp/...): compare
+        // those too.
+        let real = std::fs::canonicalize(&location).unwrap_or_else(|_| location.clone());
+        let affected = paths.iter().any(|p| {
+            p == &location || p.parent() == Some(location.as_path()) || p == &real || p.parent() == Some(real.as_path())
+        });
         if !affected || app.reload_pending[index].replace(true) {
             continue;
         }

@@ -55,10 +55,14 @@ pub enum Protocol {
     S3,
     /// S3 over plain HTTP (local MinIO and test servers).
     S3Http,
+    /// Network shares, mounted by macOS.
+    Smb,
+    Afp,
+    Nfs,
 }
 
 impl Protocol {
-    pub const ALL: [Protocol; 8] = [
+    pub const ALL: [Protocol; 11] = [
         Protocol::Sftp,
         Protocol::Ftp,
         Protocol::Ftps,
@@ -67,6 +71,9 @@ impl Protocol {
         Protocol::Webdav,
         Protocol::S3,
         Protocol::S3Http,
+        Protocol::Smb,
+        Protocol::Afp,
+        Protocol::Nfs,
     ];
 
     pub fn title(self) -> &'static str {
@@ -79,6 +86,9 @@ impl Protocol {
             Protocol::Webdavs => "WebDAV (HTTPS)",
             Protocol::S3 => "Amazon S3 or compatible",
             Protocol::S3Http => "S3 (HTTP, unencrypted)",
+            Protocol::Smb => "SMB (Windows and Mac sharing)",
+            Protocol::Afp => "AFP (older Mac sharing)",
+            Protocol::Nfs => "NFS",
         }
     }
 
@@ -91,6 +101,9 @@ impl Protocol {
             Protocol::Webdav => "dav",
             Protocol::Webdavs => "davs",
             Protocol::S3 | Protocol::S3Http => "s3",
+            Protocol::Smb => "smb",
+            Protocol::Afp => "afp",
+            Protocol::Nfs => "nfs",
         }
     }
 
@@ -102,6 +115,9 @@ impl Protocol {
             "dav" | "webdav" | "http" => Protocol::Webdav,
             "davs" | "webdavs" | "https" => Protocol::Webdavs,
             "s3" => Protocol::S3,
+            "smb" | "cifs" => Protocol::Smb,
+            "afp" => Protocol::Afp,
+            "nfs" => Protocol::Nfs,
             _ => return None,
         })
     }
@@ -112,11 +128,19 @@ impl Protocol {
             Protocol::Ftp | Protocol::Ftps | Protocol::FtpPlain => 21,
             Protocol::Webdav | Protocol::S3Http => 80,
             Protocol::Webdavs | Protocol::S3 => 443,
+            Protocol::Smb => 445,
+            Protocol::Afp => 548,
+            Protocol::Nfs => 2049,
         }
     }
 
     pub fn is_sftp(self) -> bool {
         self == Protocol::Sftp
+    }
+
+    /// A network share that macOS mounts (SMB, AFP, NFS).
+    pub fn is_share(self) -> bool {
+        matches!(self, Protocol::Smb | Protocol::Afp | Protocol::Nfs)
     }
 }
 

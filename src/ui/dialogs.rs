@@ -132,6 +132,52 @@ pub fn prompt(message: &str, informative: &str, ok: &str, initial: &str, select:
     prompt_text(message, informative, ok, initial, select).filter(|t| !t.trim().is_empty())
 }
 
+/// A text prompt with a choice under the field (a popup). Returns the text
+/// and the choice's index.
+pub fn prompt_with_choice(
+    message: &str,
+    informative: &str,
+    ok: &str,
+    initial: &str,
+    choices: &[&str],
+    selected: usize,
+) -> Option<(String, usize)> {
+    let mtm = mtm();
+    let alert = alert(mtm, message, informative);
+    alert.addButtonWithTitle(&ns(ok));
+    alert.addButtonWithTitle(&ns("Cancel"));
+    let field = NSTextField::initWithFrame(
+        NSTextField::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 32.0), NSSize::new(320.0, 24.0)),
+    );
+    field.setStringValue(&ns(initial));
+    let popup = objc2_app_kit::NSPopUpButton::initWithFrame_pullsDown(
+        objc2_app_kit::NSPopUpButton::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(320.0, 26.0)),
+        false,
+    );
+    for choice in choices {
+        popup.addItemWithTitle(&ns(choice));
+    }
+    popup.selectItemAtIndex(selected as isize);
+    let container = objc2_app_kit::NSView::initWithFrame(
+        objc2_app_kit::NSView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(320.0, 58.0)),
+    );
+    container.addSubview(&field);
+    container.addSubview(&popup);
+    alert.setAccessoryView(Some(&container));
+    alert.layout();
+    let window = alert.window();
+    window.setInitialFirstResponder(Some(&field));
+    window.makeFirstResponder(Some(&field));
+    if run(&alert) != 0 {
+        return None;
+    }
+    let text = field.stringValue().to_string();
+    if text.trim().is_empty() { None } else { Some((text, popup.indexOfSelectedItem().max(0) as usize)) }
+}
+
 /// Like `prompt`, but an empty answer is an answer (None only if cancelled).
 pub fn prompt_allow_empty(message: &str, informative: &str, ok: &str, initial: &str) -> Option<String> {
     prompt_text(message, informative, ok, initial, None)

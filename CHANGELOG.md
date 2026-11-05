@@ -7,6 +7,20 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-05
+
+### Added
+
+- SMB, AFP, and NFS: connect to network shares from Connect to Server, a site, or Go to Folder (`smb://server/share`). They are mounted the way Finder mounts them (with macOS's sign-in and share-picker dialogs, and shares already mounted are used), then browsed like folders on the Mac; Disconnect unmounts them. The Remote folder of a site is the share, optionally with a folder in it.
+- The command palette finds places, favorites, devices, sites, server folders, synclets, and workspaces; applies rename presets to the selection; and opens the selected file with any app that can open it.
+- Search can look for a kind (folders, files, images, movies, audio, documents, archives, source code) and a Finder tag, with or without a name or text.
+- Select Matching can add the matching items to the selection or remove them from it.
+- Go to Folder takes server addresses (`sftp://`, `ftp://`, `smb://`, and the others) as well as paths.
+
+### Fixed
+
+- Folders under /tmp (and other places reached through a link) now refresh when files change in them.
+
 ## [0.8.1] - 2026-11-05
 
 ### Added
@@ -152,7 +166,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/houseofmackee/forkz/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/houseofmackee/forkz/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/houseofmackee/forkz/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/houseofmackee/forkz/compare/v0.6.0...v0.7.0

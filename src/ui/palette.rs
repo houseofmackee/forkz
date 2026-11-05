@@ -1,6 +1,7 @@
 //! The command palette (Option-Command-P): type part of a command's name,
-//! pick it with the arrow keys, and Return runs it. Saved workspaces are
-//! in it too.
+//! pick it with the arrow keys, and Return runs it. Places, sites, server
+//! folders, synclets, workspaces, rename presets, and the apps that can
+//! open the selected file are in it too.
 
 use std::cell::{OnceCell, RefCell};
 

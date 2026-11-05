@@ -1497,7 +1497,10 @@ impl PaneController {
     }
 
     /// Selects the items whose names match; returns how many.
-    pub fn select_matching(&self, patterns: &crate::fs::glob::Patterns) -> usize {
+    /// Selects the items whose names match: only them (`add` false,
+    /// `remove` false), adding them to the selection, or removing them from
+    /// it. Returns how many matched.
+    pub fn select_matching(&self, patterns: &crate::fs::glob::Patterns, add: bool, remove: bool) -> usize {
         let rows: Vec<usize> = {
             let state = self.ivars().state.borrow();
             let offset = parent_offset(&state);
@@ -1510,11 +1513,20 @@ impl PaneController {
                 .collect()
         };
         let set = NSMutableIndexSet::new();
+        if add || remove {
+            for row in index_set_rows(&self.table().selectedRowIndexes()) {
+                set.addIndex(row);
+            }
+        }
         for row in &rows {
-            set.addIndex(*row);
+            if remove {
+                set.removeIndex(*row);
+            } else {
+                set.addIndex(*row);
+            }
         }
         self.table().selectRowIndexes_byExtendingSelection(&set, false);
-        if let Some(first) = rows.first() {
+        if let (Some(first), false) = (rows.first(), remove) {
             self.table().scrollRowToVisible(*first as NSInteger);
         }
         rows.len()

@@ -38,11 +38,14 @@ fn capture(name: &str) -> Option<Workspace> {
             .filter_map(|(fs, path)| {
                 // Search results are kept as the folder searched.
                 let fs = fs.browse_fs().unwrap_or(fs);
-                if fs.is_local() {
+                // Saved sites (mounted shares too); archives and unsaved
+                // servers are left out.
+                if let Some(site) = super::site_of(&fs) {
+                    Some(WorkspaceTab { site: Some(site), path })
+                } else if fs.is_local() {
                     Some(WorkspaceTab { site: None, path })
                 } else {
-                    // Saved sites only (archives and unsaved servers are left out).
-                    super::site_of(&fs).map(|site| WorkspaceTab { site: Some(site), path })
+                    None
                 }
             })
             .collect();
@@ -156,7 +159,11 @@ fn next() {
     }
     let mut site = pending.site;
     // (For WebDAV the remote folder is the server's WebDAV root.)
-    if !matches!(site.protocol, crate::sites::Protocol::Webdav | crate::sites::Protocol::Webdavs) {
+    // (For WebDAV the remote folder is the server's WebDAV root; for shares,
+    // the share, and the tab's path is where it is mounted.)
+    if !site.protocol.is_share()
+        && !matches!(site.protocol, crate::sites::Protocol::Webdav | crate::sites::Protocol::Webdavs)
+    {
         site.remote_dir = Some(pending.path.to_string_lossy().into_owned());
     }
     BUSY.with(|b| b.set(true));
