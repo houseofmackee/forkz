@@ -328,6 +328,12 @@ define_class!(
     pub struct PaneController;
 
     impl PaneController {
+        /// The filter field's action (its clear button too).
+        #[unsafe(method(filterAction:))]
+        fn filter_action(&self, _sender: Option<&AnyObject>) {
+            self.filter_changed();
+        }
+
         #[unsafe(method(rowDoubleClicked:))]
         fn row_double_clicked(&self, _sender: Option<&AnyObject>) {
             let clicked = self.table().clickedRow();
@@ -980,7 +986,11 @@ impl PaneController {
         filter.widthAnchor().constraintEqualToConstant(150.0).setActive(true);
         filter.setControlSize(objc2_app_kit::NSControlSize::Small);
         filter.setFont(Some(&objc2_app_kit::NSFont::systemFontOfSize(objc2_app_kit::NSFont::smallSystemFontSize())));
-        unsafe { filter.setDelegate(Some(ProtocolObject::from_ref(self))) };
+        unsafe {
+            filter.setDelegate(Some(ProtocolObject::from_ref(self)));
+            filter.setTarget(Some(self));
+            filter.setAction(Some(sel!(filterAction:)));
+        }
         let path_row = NSStackView::stackViewWithViews(
             &NSArray::from_slice(&[&*path_control as &NSView, &*filter as &NSView]),
             mtm,
@@ -1700,6 +1710,9 @@ impl PaneController {
                 self.refresh(Some(&[]));
             }
         }
+        // The icon and column views show the filtered items too.
+        self.sync_columns();
+        self.sync_icons();
         self.update_status();
     }
 

@@ -7,6 +7,12 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-11-05
+
+### Fixed
+
+- In icon view (and column view), changing or clearing the filter did not update the items shown while the selected item still matched; the clear button of the filter field also clears the filter right away.
+
 ## [0.12.0] - 2026-11-05
 
 ### Added
@@ -244,7 +250,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.12.1...HEAD
+[0.12.1]: https://github.com/houseofmackee/forkz/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/houseofmackee/forkz/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/houseofmackee/forkz/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/houseofmackee/forkz/compare/v0.10.1...v0.11.0
