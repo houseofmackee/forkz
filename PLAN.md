@@ -28,7 +28,7 @@ A native dual-pane file manager and file transfer client for macOS on Apple sili
 | `ui::promises` | File promises for dragging server items to Finder | Yes |
 | `ui::palette` | The command palette | Yes |
 | `ui::themed`, `ui::theme_editor` | Drawing lists in theme colors; the Customize Theme editor | Yes |
-| `ui::file_viewer` | Being the default folder viewer: the system settings, opened folders, and reveal requests | Yes |
+| `ui::file_viewer` | "Show in Finder" in other apps (NSFileViewer), opened folders, and reveal requests | Yes |
 | `ui::search` | The Search dialog, and showing its results in a pane | Yes |
 | `ui::sync_window` | The Sync Folders window and synclets | Yes |
 | `ui::workspaces` | Saving and opening workspaces | Yes |
@@ -101,7 +101,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Folder sizes; server folder bookmarks
 - [x] Shortcut editor; appearance, text size, row spacing, alternating rows
 - [x] Color themes: built-in ones and the user's own (TOML files, a Customize editor)
-- [x] Default folder viewer instead of Finder (NSFileViewer and the folder handler)
+- [x] forkz for "Show in Finder" in other apps (NSFileViewer); macOS refuses other apps as the folder handler
 - [x] Transfer queue management (reorder, start now, pause all, stop all)
 
 ## Phase 4: extras

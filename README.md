@@ -22,7 +22,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - Workspaces: saved sets of tabs for both panes, including server folders
 - A transfer queue: speed limits, Pause and Resume, Pause All and Stop All, and waiting transfers that can be started now or moved up and down (right-click a transfer), plus rules for errors
 - Zoom (Command-= and Command-minus) and a Settings window (Command-comma) with color themes, text size, row spacing, and your own keyboard shortcuts
-- Optionally the default folder viewer instead of Finder (Settings > General): opening folders and "Show in Finder" in other apps go to forkz
+- Optionally used for "Show in Finder" in other apps (Settings > General): the file opens selected in forkz. macOS keeps Finder as the app that opens folders, but forkz can open them with Open With
 
 ### Preview pane and archives
 

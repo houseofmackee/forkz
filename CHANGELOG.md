@@ -7,6 +7,12 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-05
+
+### Fixed
+
+- The setting in Settings > General could not be turned on: macOS does not let apps replace Finder as the app that opens folders. It is now "Use forkz for “Show in Finder” in other apps", which works: files that other apps show in Finder open selected in forkz.
+
 ### Changed
 
 - Updated the checksum and signing libraries (sha2 0.11, hmac 0.13, and md-5 0.11).
@@ -196,7 +202,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/houseofmackee/forkz/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/houseofmackee/forkz/compare/v0.9.2...v0.10.0
 [0.9.2]: https://github.com/houseofmackee/forkz/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/houseofmackee/forkz/compare/v0.9.0...v0.9.1

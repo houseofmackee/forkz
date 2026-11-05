@@ -91,7 +91,7 @@ define_class!(
         fn default_viewer(&self, sender: &NSButton) {
             let on = sender.state() == NSControlStateValueOn;
             if let Err(e) = super::file_viewer::set_default(on) {
-                super::dialogs::show_error("forkz could not change the default folder viewer.".into(), e);
+                super::dialogs::show_error("forkz could not change what \u{201c}Show in Finder\u{201d} opens.".into(), e);
             }
             sender.setState(if super::file_viewer::is_default() { NSControlStateValueOn } else { NSControlStateValueOff });
         }
@@ -274,7 +274,7 @@ impl SettingsWindow {
             auto_updates: checkbox("Check for updates automatically", self, mtm),
             default_viewer: unsafe {
                 NSButton::checkboxWithTitle_target_action(
-                    &ns("Use forkz instead of Finder to show folders"),
+                    &ns("Use forkz for \u{201c}Show in Finder\u{201d} in other apps"),
                     Some(self),
                     Some(sel!(defaultViewer:)),
                     mtm,
@@ -368,7 +368,7 @@ impl SettingsWindow {
                 (
                     empty(mtm),
                     note(
-                        "Opening folders and \u{201c}Show in Finder\u{201d} in other apps use forkz. Only the forkz app can be the default, not a build run from source.",
+                        "Files and folders that other apps show \u{201c}in Finder\u{201d} open in forkz instead. macOS keeps Finder as the app that opens folders. Only the forkz app can be used, not a build run from source.",
                         mtm,
                     ),
                 ),

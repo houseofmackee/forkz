@@ -1,24 +1,24 @@
-//! forkz as the default folder viewer instead of Finder (Settings >
-//! General), set up the way ForkLift does it: macOS's `NSFileViewer`
-//! preference, which "Show in Finder" in other apps follows, and the default
-//! app for opening folders. forkz then opens the folders it is sent, and
-//! shows files it is asked to reveal, selected in their folder.
+//! forkz in place of Finder for "Show in Finder" (Settings > General):
+//! macOS's `NSFileViewer` preference names the app that other apps' "Show
+//! in Finder" and "Reveal" open. forkz then shows those files, selected in
+//! their folder, and opens folders it is sent ("Open With" forkz).
 //!
-//! Only the app bundle can be the default (`cargo run` has no bundle).
+//! macOS keeps Finder as the default app for opening folders: it refuses
+//! to change the handler of `public.folder` (both NSWorkspace's
+//! setDefaultApplication and LaunchServices answer paramErr), so that part
+//! is not offered.
+//!
+//! Only the app bundle can be named (`cargo run` has no bundle).
 
 use std::path::PathBuf;
 use std::process::Command;
 
-use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{msg_send, sel};
-use objc2_app_kit::NSWorkspace;
-use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSBundle, NSError, NSURL};
+use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSBundle, NSURL};
 
-use super::util::{ns, url_path};
-
-const FINDER: &str = "com.apple.finder";
+use super::util::url_path;
 
 /// Finder's "reveal" event ('misc' 'mvis'), which `NSFileViewer` apps get.
 const REVEAL_CLASS: u32 = u32::from_be_bytes(*b"misc");
@@ -32,51 +32,35 @@ fn bundle() -> Option<(String, Retained<NSURL>)> {
     bundle.bundlePath().to_string().ends_with(".app").then(|| (id, bundle.bundleURL()))
 }
 
-/// Whether this copy of forkz can be made the default (it is an app).
+/// Whether this copy of forkz can be named (it is an app).
 pub fn available() -> bool {
     bundle().is_some()
 }
 
-/// Whether forkz is the default folder viewer now.
+/// Whether "Show in Finder" in other apps opens forkz now.
 pub fn is_default() -> bool {
-    let Some((id, url)) = bundle() else { return false };
+    let Some((id, _)) = bundle() else { return false };
     let viewer = Command::new("/usr/bin/defaults")
         .args(["read", "-g", "NSFileViewer"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
-    let folder_app = NSWorkspace::sharedWorkspace()
-        .URLForApplicationToOpenContentType(unsafe { objc2_uniform_type_identifiers::UTTypeFolder })
-        .and_then(|u| url_path(&u));
-    viewer == id && folder_app == url_path(&url)
+    viewer == id
 }
 
-/// Makes forkz the default folder viewer, or gives the job back to Finder.
+/// Makes "Show in Finder" open forkz, or Finder again.
 pub fn set_default(on: bool) -> Result<(), String> {
-    let workspace = NSWorkspace::sharedWorkspace();
-    let app = if on {
-        bundle().map(|(_, url)| url).ok_or("Only the forkz app can be the default folder viewer.")?
-    } else {
-        workspace.URLForApplicationWithBundleIdentifier(&ns(FINDER)).ok_or("Finder was not found.")?
-    };
-    let done = RcBlock::new(|error: *mut NSError| {
-        if let Some(error) = unsafe { error.as_ref() } {
-            tracing::warn!("default folder app: {}", error.localizedDescription());
-        }
-    });
-    workspace.setDefaultApplicationAtURL_toOpenContentType_completionHandler(
-        &app,
-        unsafe { objc2_uniform_type_identifiers::UTTypeFolder },
-        Some(&done),
-    );
-    let viewer = match (on, bundle()) {
+    let status = match (on, bundle()) {
         (true, Some((id, _))) => {
             Command::new("/usr/bin/defaults").args(["write", "-g", "NSFileViewer", "-string", &id]).status()
         }
-        _ => Command::new("/usr/bin/defaults").args(["delete", "-g", "NSFileViewer"]).status(),
+        (true, None) => return Err("Only the forkz app can be used for \u{201c}Show in Finder\u{201d}.".into()),
+        (false, _) => Command::new("/usr/bin/defaults").args(["delete", "-g", "NSFileViewer"]).status(),
     };
-    match viewer {
-        Ok(_) => Ok(()),
+    match status {
+        // Deleting a preference that is not set fails harmlessly.
+        Ok(status) if status.success() || !on => Ok(()),
+        Ok(status) => Err(format!("The NSFileViewer preference could not be changed ({status}).")),
         Err(e) => Err(format!("The NSFileViewer preference could not be changed: {e}")),
     }
 }
