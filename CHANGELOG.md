@@ -7,6 +7,12 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-05
+
+### Fixed
+
+- Select All (Command-A) no longer selects "..", and Shift-click or Command-click leaves it out too, so a selection is only items. Clicking ".." on its own still selects it.
+
 ## [0.9.0] - 2026-11-05
 
 ### Added
@@ -166,7 +172,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/houseofmackee/forkz/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/houseofmackee/forkz/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/houseofmackee/forkz/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/houseofmackee/forkz/compare/v0.7.0...v0.8.0

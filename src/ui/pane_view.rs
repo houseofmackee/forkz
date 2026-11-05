@@ -125,6 +125,18 @@ define_class!(
             }
         }
 
+        /// Select All: every item, but not "..", which is not an item.
+        #[unsafe(method(selectAll:))]
+        fn select_all(&self, _sender: Option<&AnyObject>) {
+            let offset = self.controller().map_or(0, |c| parent_offset(&c.ivars().state.borrow()));
+            let rows = usize::try_from(self.numberOfRows()).unwrap_or(0);
+            let set = NSMutableIndexSet::new();
+            if rows > offset {
+                set.addIndexesInRange(objc2_foundation::NSRange::new(offset, rows - offset));
+            }
+            self.selectRowIndexes_byExtendingSelection(&set, false);
+        }
+
         #[unsafe(method(paste:))]
         fn paste(&self, _sender: Option<&AnyObject>) {
             if let Some(c) = self.controller() {
@@ -448,6 +460,21 @@ define_class!(
             row: NSInteger,
         ) -> Option<Retained<NSView>> {
             self.cell_for(table, column, row)
+        }
+
+        /// ".." can be selected on its own (to open it), but is left out
+        /// when other rows are selected too (Shift-click, Command-click),
+        /// so a selection is only items.
+        #[unsafe(method_id(tableView:selectionIndexesForProposedSelection:))]
+        fn proposed_selection(&self, _table: &NSTableView, proposed: &NSIndexSet) -> Retained<NSIndexSet> {
+            if proposed.count() > 1 && proposed.containsIndex(0) && is_parent_row(&self.ivars().state.borrow(), 0) {
+                let set = NSMutableIndexSet::new();
+                set.addIndexes(proposed);
+                set.removeIndex(0);
+                Retained::into_super(set)
+            } else {
+                proposed.retain()
+            }
         }
 
         #[unsafe(method(tableViewSelectionDidChange:))]
