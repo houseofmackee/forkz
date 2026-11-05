@@ -13,6 +13,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 ### Two panes, on the Mac and on servers
 
 - Two panes side by side, each with tabs, and a sidebar with favorites, volumes, saved sites, synclets, and Finder tags. The sidebar, either pane, and the preview pane can each be hidden.
+- A line in your accent color along the top of the active pane shows where commands, new connections, and Go to Folder will open. Tabs show a close button when the pointer is over them.
 - A sortable list (name, date modified, size, kind, and more) with ".." on top to go up, a clickable path bar, a filter field, and a status line with the selection size and free space
 - Copy, move, duplicate, trash, rename, new file, and new folder, with progress, Stop, Pause, and a conflict dialog (Replace, Replace if Older, Keep Both, Skip, Merge, and "Apply to all")
 - Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files
@@ -119,6 +120,7 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 | F8 or Command-Delete | Move to Trash |
 | Option-Command-Delete | Delete immediately |
 | Option-Command-R | Rename multiple items |
+| Command-A | Select all items |
 | Option-Command-A | Select matching items |
 | Command-F | Filter the list |
 | Shift-Command-F | Search |

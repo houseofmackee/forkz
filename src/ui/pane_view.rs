@@ -290,6 +290,12 @@ pub struct PaneIvars {
     active_tab: Cell<usize>,
     /// The tab buttons, above the path bar (hidden with one tab).
     tab_bar: OnceCell<Retained<NSStackView>>,
+    /// A thin accent-colored line along the top, shown while this is the
+    /// active pane (where commands, connections, and Go to Folder go).
+    active_bar: OnceCell<Retained<objc2_app_kit::NSBox>>,
+    /// Each tab button's hover area and its close button (shown while the
+    /// mouse is over the tab).
+    tab_close: RefCell<Vec<(Retained<objc2_app_kit::NSTrackingArea>, Retained<NSButton>)>>,
 }
 
 /// The pasteboard type of items dragged from a remote pane (between panes
@@ -339,6 +345,22 @@ define_class!(
         #[unsafe(method(closeTabFromMenu:))]
         fn close_tab_from_menu(&self, sender: &NSMenuItem) {
             self.close_tab(sender.tag() as usize);
+        }
+
+        #[unsafe(method(closeTabButton:))]
+        fn close_tab_button(&self, sender: &NSButton) {
+            self.close_tab(sender.tag() as usize);
+        }
+
+        /// The mouse moved onto a tab: show its close button.
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, event: &NSEvent) {
+            self.show_tab_close(event, true);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, event: &NSEvent) {
+            self.show_tab_close(event, false);
         }
 
         #[unsafe(method(toggleColumn:))]
@@ -770,6 +792,8 @@ impl PaneController {
             tab_selections: RefCell::new(vec![Vec::new()]),
             active_tab: Cell::new(0),
             tab_bar: OnceCell::new(),
+            active_bar: OnceCell::new(),
+            tab_close: RefCell::new(Vec::new()),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.build();
@@ -902,6 +926,20 @@ impl PaneController {
             view.trailingAnchor().constraintEqualToAnchor_constant(&container.trailingAnchor(), -6.0).setActive(true);
         }
 
+        // In the container's top inset, over the full width of the pane.
+        let bar = objc2_app_kit::NSBox::new(mtm);
+        bar.setBoxType(objc2_app_kit::NSBoxType::Custom);
+        bar.setBorderWidth(0.0);
+        bar.setFillColor(&NSColor::controlAccentColor());
+        bar.setTranslatesAutoresizingMaskIntoConstraints(false);
+        container.addSubview(&bar);
+        bar.topAnchor().constraintEqualToAnchor(&container.topAnchor()).setActive(true);
+        bar.leadingAnchor().constraintEqualToAnchor(&container.leadingAnchor()).setActive(true);
+        bar.trailingAnchor().constraintEqualToAnchor(&container.trailingAnchor()).setActive(true);
+        bar.heightAnchor().constraintEqualToConstant(2.0).setActive(true);
+        bar.setHidden(!self.ivars().active.get());
+        let _ = self.ivars().active_bar.set(bar);
+
         let _ = self.ivars().path_control.set(path_control);
         let _ = self.ivars().status.set(status);
         let _ = self.ivars().container.set(container);
@@ -1023,6 +1061,7 @@ impl PaneController {
         for view in bar.arrangedSubviews().iter() {
             view.removeFromSuperview();
         }
+        self.ivars().tab_close.borrow_mut().clear();
         let count = self.tab_count();
         bar.setHidden(count <= 1);
         if count <= 1 {
@@ -1079,6 +1118,7 @@ impl PaneController {
             button
                 .setContentCompressionResistancePriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
             bar.addArrangedSubview(&button);
+            self.add_tab_close(&button, index, index == active);
         }
         let add =
             unsafe { NSButton::buttonWithTitle_target_action(&ns(""), Some(self), Some(sel!(newTabButton:)), mtm) };
@@ -1097,6 +1137,54 @@ impl PaneController {
         if let Some(first) = first {
             for other in buttons.iter().skip(1).take(buttons.count().saturating_sub(2)) {
                 other.widthAnchor().constraintEqualToAnchor(&first.widthAnchor()).setActive(true);
+            }
+        }
+    }
+
+    /// A close button at the tab's leading edge (as in Safari), hidden
+    /// until the mouse is over the tab.
+    fn add_tab_close(&self, tab: &NSButton, index: usize, active: bool) {
+        use objc2_app_kit::{NSTrackingArea, NSTrackingAreaOptions as O};
+        let mtm = self.mtm();
+        let close =
+            unsafe { NSButton::buttonWithTitle_target_action(&ns(""), Some(self), Some(sel!(closeTabButton:)), mtm) };
+        if let Some(image) = super::util::symbol("xmark", "Close Tab") {
+            let config = objc2_app_kit::NSImageSymbolConfiguration::configurationWithPointSize_weight(9.0, unsafe {
+                objc2_app_kit::NSFontWeightSemibold
+            });
+            close.setImage(Some(&image.imageWithSymbolConfiguration(&config).unwrap_or(image)));
+        }
+        close.setBordered(false);
+        // Readable on the active tab's accent color, quiet on the others.
+        let tint = if active { NSColor::alternateSelectedControlTextColor() } else { NSColor::secondaryLabelColor() };
+        close.setContentTintColor(Some(&tint));
+        close.setTag(index as isize);
+        close.setToolTip(Some(&ns("Close Tab")));
+        close.setHidden(true);
+        close.setTranslatesAutoresizingMaskIntoConstraints(false);
+        tab.addSubview(&close);
+        close.leadingAnchor().constraintEqualToAnchor_constant(&tab.leadingAnchor(), 6.0).setActive(true);
+        close.centerYAnchor().constraintEqualToAnchor(&tab.centerYAnchor()).setActive(true);
+        close.widthAnchor().constraintEqualToConstant(16.0).setActive(true);
+        close.heightAnchor().constraintEqualToConstant(16.0).setActive(true);
+        let area = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                <NSTrackingArea as objc2::AnyThread>::alloc(),
+                NSRect::ZERO,
+                O::MouseEnteredAndExited | O::ActiveInActiveApp | O::InVisibleRect,
+                Some(self),
+                None,
+            )
+        };
+        tab.addTrackingArea(&area);
+        self.ivars().tab_close.borrow_mut().push((area, close));
+    }
+
+    fn show_tab_close(&self, event: &NSEvent, show: bool) {
+        let Some(area) = event.trackingArea() else { return };
+        for (tab_area, close) in self.ivars().tab_close.borrow().iter() {
+            if std::ptr::eq(&**tab_area, &*area) {
+                close.setHidden(!show);
             }
         }
     }
@@ -1210,6 +1298,9 @@ impl PaneController {
 
     pub fn set_active(&self, active: bool) {
         self.ivars().active.set(active);
+        if let Some(bar) = self.ivars().active_bar.get() {
+            bar.setHidden(!active);
+        }
         self.update_status();
     }
 

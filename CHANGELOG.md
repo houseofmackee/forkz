@@ -7,6 +7,16 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-05
+
+### Added
+
+- Tabs show a close button when the mouse is over them.
+
+### Changed
+
+- The active pane (where commands, connections, and Go to Folder open) has a thin line in your accent color along its top.
+
 ## [0.9.1] - 2026-11-05
 
 ### Fixed
@@ -172,7 +182,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/houseofmackee/forkz/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/houseofmackee/forkz/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/houseofmackee/forkz/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/houseofmackee/forkz/compare/v0.8.0...v0.8.1
