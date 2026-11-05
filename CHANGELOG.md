@@ -7,6 +7,10 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+### Fixed
+
+- A tag named after one of Finder's colors (Red, Blue, and so on) shows that color even when no color was stored with it, as happens with tags set by other tools.
+
 ## [0.6.0] - 2026-11-05
 
 ### Added

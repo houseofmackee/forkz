@@ -62,11 +62,14 @@ fn parse(bytes: &[u8]) -> Vec<Tag> {
         .filter_map(|item| item.downcast::<NSString>().ok())
         .map(|text| {
             let text = text.to_string();
-            match text.rsplit_once('\n') {
-                Some((name, color)) => Tag { name: name.to_string(), color: color.trim().parse().unwrap_or(0) },
-                // A color tag without its number still has its color.
-                None => Tag { color: COLORS.iter().find(|(n, _)| *n == text).map_or(0, |c| c.1), name: text },
-            }
+            let (name, color) = match text.rsplit_once('\n') {
+                Some((name, color)) => (name.to_string(), color.trim().parse().unwrap_or(0)),
+                None => (text, 0),
+            };
+            // A color tag stored without its color (set by another tool, or
+            // on a Mac whose Finder has not set up its tags) still has it.
+            let color = if color == 0 { COLORS.iter().find(|(n, _)| *n == name).map_or(0, |c| c.1) } else { color };
+            Tag { name, color }
         })
         .collect()
 }
@@ -84,6 +87,26 @@ pub fn set(path: &Path, names: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_names_without_a_stored_color() {
+        let list = |items: &[&str]| {
+            let strings: Vec<Retained<NSString>> = items.iter().map(|t| NSString::from_str(t)).collect();
+            let array = NSArray::from_retained_slice(&strings);
+            let data = unsafe {
+                NSPropertyListSerialization::dataWithPropertyList_format_options_error(
+                    &array,
+                    NSPropertyListFormat::BinaryFormat_v1_0,
+                    0,
+                )
+            }
+            .unwrap();
+            data.to_vec()
+        };
+        let tags = parse(&list(&["Red\n0", "Blue", "Work\n4", "Custom\n0"]));
+        let summary: Vec<(&str, u8)> = tags.iter().map(|t| (t.name.as_str(), t.color)).collect();
+        assert_eq!(summary, [("Red", 6), ("Blue", 4), ("Work", 4), ("Custom", 0)]);
+    }
 
     #[test]
     fn set_and_read_with_colors() {
