@@ -133,6 +133,9 @@ impl Activity {
             NSStackView::stackViewWithViews(&objc2_foundation::NSArray::from_slice(&[&*texts as &NSView, &stop]), mtm);
         row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         row.setSpacing(8.0);
+        // The bar takes the width; Stop stays at the right.
+        row.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
+        texts.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Horizontal);
 
         let stack = self.ivars().stack.get().expect("built");
         stack.addArrangedSubview(&row);
@@ -163,7 +166,69 @@ impl Activity {
             .expect("starting a job thread");
     }
 
-    fn set_detail(&self, id: isize, text: &str) {
+    /// A row for work that is not a job (searching, compressing): a title,
+    /// a spinning bar, a line for `set_detail`, and Stop, which cancels the
+    /// token returned. Remove it with `remove`.
+    pub fn begin_task(&self, text: &str) -> (isize, CancelToken) {
+        let mtm = self.mtm();
+        let id = self.ivars().next_id.get();
+        self.ivars().next_id.set(id + 1);
+        let cancel = CancelToken::default();
+        let title = label(text, mtm);
+        let bar = NSProgressIndicator::new(mtm);
+        bar.setStyle(NSProgressIndicatorStyle::Bar);
+        bar.setIndeterminate(true);
+        unsafe { bar.startAnimation(None) };
+        let detail = small_label("", mtm);
+        detail.setTextColor(Some(&objc2_app_kit::NSColor::secondaryLabelColor()));
+        let stop = NSButton::new(mtm);
+        stop.setBezelStyle(NSBezelStyle::Circular);
+        stop.setBordered(false);
+        if let Some(image) = symbol("xmark.circle.fill", "Stop") {
+            stop.setImage(Some(&image));
+        } else {
+            stop.setTitle(&ns("Stop"));
+        }
+        stop.setToolTip(Some(&ns("Stop")));
+        stop.setTag(id);
+        unsafe {
+            stop.setTarget(Some(self));
+            stop.setAction(Some(sel!(stopJob:)));
+        }
+        let texts = NSStackView::stackViewWithViews(
+            &objc2_foundation::NSArray::from_slice(&[&*title as &NSView, &bar, &detail]),
+            mtm,
+        );
+        texts.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+        texts.setAlignment(objc2_app_kit::NSLayoutAttribute::Leading);
+        texts.setSpacing(2.0);
+        bar.leadingAnchor().constraintEqualToAnchor(&texts.leadingAnchor()).setActive(true);
+        bar.trailingAnchor().constraintEqualToAnchor(&texts.trailingAnchor()).setActive(true);
+        let row =
+            NSStackView::stackViewWithViews(&objc2_foundation::NSArray::from_slice(&[&*texts as &NSView, &stop]), mtm);
+        row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        row.setSpacing(8.0);
+        // The bar takes the width; Stop stays at the right.
+        row.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
+        texts.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Horizontal);
+        let stack = self.ivars().stack.get().expect("built");
+        stack.addArrangedSubview(&row);
+        row.leadingAnchor().constraintEqualToAnchor_constant(&stack.leadingAnchor(), 10.0).setActive(true);
+        row.trailingAnchor().constraintEqualToAnchor_constant(&stack.trailingAnchor(), -10.0).setActive(true);
+        stack.setHidden(false);
+        self.ivars().rows.borrow_mut().push(Row { id, view: row, detail, bar, cancel: cancel.clone() });
+        (id, cancel)
+    }
+
+    /// The line under a row's bar (ignored once Stop was clicked).
+    pub fn set_detail(&self, id: isize, text: &str) {
+        if self.ivars().rows.borrow().iter().any(|r| r.id == id && r.cancel.is_cancelled()) {
+            return;
+        }
+        self.set_detail_always(id, text);
+    }
+
+    fn set_detail_always(&self, id: isize, text: &str) {
         if let Some(row) = self.ivars().rows.borrow().iter().find(|r| r.id == id) {
             row.detail.setStringValue(&ns(text));
         }
@@ -183,8 +248,8 @@ impl Activity {
         }
         if let Some(row) = self.ivars().rows.borrow().iter().find(|r| r.id == id) {
             row.cancel.cancel();
-            row.detail.setStringValue(&ns("Stopping\u{2026}"));
         }
+        self.set_detail_always(id, "Stopping\u{2026}");
     }
 
     /// A job ended: frees its slot and starts the next waiting one.

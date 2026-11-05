@@ -55,6 +55,7 @@ unsafe extern "C" {
     fn archive_write_finish_entry(a: *mut RawArchive) -> c_int;
     fn archive_write_close(a: *mut RawArchive) -> c_int;
     fn archive_write_free(a: *mut RawArchive) -> c_int;
+    fn archive_write_fail(a: *mut RawArchive) -> c_int;
     fn archive_entry_new() -> *mut RawEntry;
     fn archive_entry_free(e: *mut RawEntry);
     fn archive_entry_set_pathname_utf8(e: *mut RawEntry, name: *const c_char);
@@ -411,12 +412,19 @@ impl Format {
     }
 }
 
-/// Writes an archive in progress; freed (and closed) when dropped.
-struct Writer(*mut RawArchive);
+/// Writes an archive in progress; freed when dropped. Unless it was closed
+/// properly, it is marked failed first, so freeing does not finish it (7z
+/// compresses everything when closing, which can take minutes).
+struct Writer(*mut RawArchive, std::cell::Cell<bool>);
 
 impl Drop for Writer {
     fn drop(&mut self) {
-        unsafe { archive_write_free(self.0) };
+        unsafe {
+            if !self.1.get() {
+                archive_write_fail(self.0);
+            }
+            archive_write_free(self.0);
+        }
     }
 }
 
@@ -462,7 +470,7 @@ fn write_archive(
     format: Format,
     progress: &mut dyn FnMut(u64) -> bool,
 ) -> io::Result<()> {
-    let writer = Writer(unsafe { archive_write_new() });
+    let writer = Writer(unsafe { archive_write_new() }, std::cell::Cell::new(false));
     unsafe {
         let a = writer.0;
         let set = match format {
@@ -546,7 +554,17 @@ fn write_archive(
             }
         }
     }
-    writer.check(unsafe { archive_write_close(writer.0) })
+    // Stopped while 7z compresses on closing: it checks only at the end.
+    if !progress(written) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
+    }
+    writer.check(unsafe { archive_write_close(writer.0) })?;
+    writer.1.set(true);
+    // Stopped while closing (which cannot be interrupted): not kept.
+    if !progress(written) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

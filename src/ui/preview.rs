@@ -168,16 +168,30 @@ fn view<T: Message + AsRef<NSView>>(v: &T) -> Retained<NSView> {
     v.as_ref().retain()
 }
 
+thread_local! {
+    /// The text scale (View > Zoom In and Zoom Out; 1 is normal).
+    static ZOOM: Cell<f64> = const { Cell::new(1.0) };
+}
+
+/// A size at the current zoom.
+fn z(size: f64) -> f64 {
+    (size * ZOOM.with(Cell::get) * 2.0).round() / 2.0
+}
+
+fn small() -> f64 {
+    z(NSFont::smallSystemFontSize())
+}
+
 fn wrapping(text: &str, mtm: MainThreadMarker) -> Retained<NSTextField> {
     let field = NSTextField::wrappingLabelWithString(&ns(text), mtm);
     field.setSelectable(true);
-    field.setFont(Some(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize())));
+    field.setFont(Some(&NSFont::systemFontOfSize(small())));
     field
 }
 
 fn secondary(text: &str, mtm: MainThreadMarker) -> Retained<NSTextField> {
     let field = NSTextField::labelWithString(&ns(text), mtm);
-    field.setFont(Some(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize())));
+    field.setFont(Some(&NSFont::systemFontOfSize(small())));
     field.setTextColor(Some(&NSColor::secondaryLabelColor()));
     field
 }
@@ -354,7 +368,7 @@ impl PreviewPane {
             .and_then(|v| v.downcast::<NSTextView>().ok())
             .expect("a scrollable text view holds a text view");
         log_text.setEditable(false);
-        log_text.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(10.5, unsafe {
+        log_text.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(z(10.5), unsafe {
             objc2_app_kit::NSFontWeightRegular
         })));
         log_text.setTextContainerInset(NSSize::new(6.0, 6.0));
@@ -430,6 +444,27 @@ impl PreviewPane {
             log_text,
         });
         self.select_tab(0);
+    }
+
+    /// Scales the text (1 is normal); Quick Look previews keep their size.
+    pub fn set_zoom(&self, zoom: f64) {
+        if (ZOOM.with(Cell::get) - zoom).abs() < 0.01 {
+            return;
+        }
+        ZOOM.with(|z| z.set(zoom));
+        let views = self.views();
+        views.activity_table.setRowHeight(z(44.0));
+        views.archive_table.setRowHeight(z(17.0));
+        views.log_text.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(z(10.5), unsafe {
+            objc2_app_kit::NSFontWeightRegular
+        })));
+        views.archive_summary.setFont(Some(&NSFont::systemFontOfSize(small())));
+        views.preview_note.setFont(Some(&NSFont::systemFontOfSize(small())));
+        views.archive_table.reloadData();
+        views.activity_table.reloadData();
+        // Info is made again at the new size.
+        self.ivars().shown.borrow_mut().clear();
+        self.refresh();
     }
 
     pub fn select_tab_named(&self, id: &str) {
@@ -547,10 +582,11 @@ impl PreviewPane {
             }
         };
         let image = NSImageView::imageViewWithImage(&icon, mtm);
-        image.widthAnchor().constraintEqualToConstant(64.0).setActive(true);
-        image.heightAnchor().constraintEqualToConstant(64.0).setActive(true);
+        image.widthAnchor().constraintEqualToConstant(z(64.0)).setActive(true);
+        image.heightAnchor().constraintEqualToConstant(z(64.0)).setActive(true);
+        image.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyUpOrDown);
         let name = NSTextField::wrappingLabelWithString(&ns(&title), mtm);
-        name.setFont(Some(&NSFont::boldSystemFontOfSize(13.0)));
+        name.setFont(Some(&NSFont::boldSystemFontOfSize(z(13.0))));
         name.setAlignment(objc2_app_kit::NSTextAlignment::Center);
         name.setSelectable(true);
         let rows: Vec<Retained<NSArray<NSView>>> = facts
@@ -660,7 +696,7 @@ impl PreviewPane {
             }
         };
         let field = NSTextField::labelWithString(&ns(&text), self.mtm());
-        field.setFont(Some(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize())));
+        field.setFont(Some(&NSFont::systemFontOfSize(small())));
         if size_column {
             field.setAlignment(objc2_app_kit::NSTextAlignment::Right);
             field.setTextColor(Some(&NSColor::secondaryLabelColor()));
@@ -751,7 +787,7 @@ impl PreviewPane {
         let mtm = self.mtm();
         let title = NSTextField::labelWithString(&ns(&entry.text), mtm);
         title.setLineBreakMode(NSLineBreakMode::ByTruncatingMiddle);
-        title.setFont(Some(&NSFont::systemFontOfSize(12.0)));
+        title.setFont(Some(&NSFont::systemFontOfSize(z(12.0))));
         if entry.failed {
             title.setTextColor(Some(&NSColor::systemRedColor()));
         }

@@ -6,11 +6,11 @@ use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use super::Entry;
 use super::glob::Patterns;
+use super::ops::CancelToken;
 use crate::vfs::FsRef;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,14 +36,14 @@ const CONTENT_LIMIT: u64 = 20 * 1024 * 1024;
 
 /// Searches by walking the folders. `cancel` stops it early (with what
 /// was found so far).
-pub fn walk(fs: &FsRef, root: &Path, query: &Query, cancel: &Arc<AtomicBool>) -> io::Result<Vec<Entry>> {
+pub fn walk(fs: &FsRef, root: &Path, query: &Query, cancel: &CancelToken) -> io::Result<Vec<Entry>> {
     let patterns = Patterns::new(&query.text);
     let needle = query.text.to_lowercase();
     let mut found = Vec::new();
     let mut folders = VecDeque::from([root.to_path_buf()]);
     let mut first = true;
     while let Some(folder) = folders.pop_front() {
-        if cancel.load(Ordering::Relaxed) || found.len() >= LIMIT {
+        if cancel.is_cancelled() || found.len() >= LIMIT {
             break;
         }
         let entries = match fs.list(&folder) {
@@ -56,6 +56,9 @@ pub fn walk(fs: &FsRef, root: &Path, query: &Query, cancel: &Arc<AtomicBool>) ->
         for entry in entries {
             if entry.hidden && !query.include_hidden {
                 continue;
+            }
+            if cancel.is_cancelled() {
+                break;
             }
             let hit = match query.mode {
                 Mode::Name => patterns.matches(&entry.name),
@@ -105,27 +108,51 @@ pub fn spotlight_query(query: &Query) -> String {
 }
 
 /// Everything Spotlight knows with this Finder tag, on every volume.
-pub fn spotlight_tag(tag: &str) -> io::Result<Vec<PathBuf>> {
+pub fn spotlight_tag(tag: &str, cancel: &CancelToken) -> io::Result<Vec<PathBuf>> {
     let query = format!("kMDItemUserTags == \"{}\"cd", tag.replace('\\', "\\\\").replace('"', "\\\""));
-    let output = Command::new("/usr/bin/mdfind").arg(query).output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(String::from_utf8_lossy(&output.stderr).trim().to_string()));
+    let text = mdfind(&[query], cancel)?;
+    Ok(text.lines().filter(|l| !l.is_empty()).map(PathBuf::from).take(LIMIT).collect())
+}
+
+/// Runs mdfind; `cancel` stops it (an Interrupted error).
+fn mdfind(args: &[String], cancel: &CancelToken) -> io::Result<String> {
+    let mut child = Command::new("/usr/bin/mdfind")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    // Read as it comes (a full pipe would block mdfind).
+    let mut stdout = child.stdout.take().ok_or_else(|| io::Error::other("no output from mdfind"))?;
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        stdout.read_to_string(&mut text).map(|_| text)
+    });
+    loop {
+        if let Some(status) = child.try_wait()? {
+            let text = reader.join().map_err(|_| io::Error::other("mdfind output"))??;
+            if !status.success() {
+                let mut error = String::new();
+                if let Some(mut stderr) = child.stderr.take() {
+                    let _ = stderr.read_to_string(&mut error);
+                }
+                return Err(io::Error::other(error.trim().to_string()));
+            }
+            return Ok(text);
+        }
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "Stopped"));
+        }
+        std::thread::sleep(Duration::from_millis(30));
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(PathBuf::from)
-        .take(LIMIT)
-        .collect())
 }
 
 /// Searches with Spotlight (only what it has indexed). Returns paths.
-pub fn spotlight(root: &Path, query: &Query) -> io::Result<Vec<PathBuf>> {
-    let output = Command::new("/usr/bin/mdfind").arg("-onlyin").arg(root).arg(spotlight_query(query)).output()?;
-    if !output.status.success() {
-        return Err(io::Error::other(String::from_utf8_lossy(&output.stderr).trim().to_string()));
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
+pub fn spotlight(root: &Path, query: &Query, cancel: &CancelToken) -> io::Result<Vec<PathBuf>> {
+    let args = ["-onlyin".to_string(), root.to_string_lossy().into_owned(), spotlight_query(query)];
+    let text = mdfind(&args, cancel)?;
     Ok(text
         .lines()
         .filter(|l| !l.is_empty())
@@ -169,7 +196,7 @@ mod tests {
     fn walks_by_name_and_contents() {
         let dir = tree();
         let fs = crate::vfs::local();
-        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel = CancelToken::default();
         let by_name = Query { text: "notes".into(), mode: Mode::Name, include_hidden: false };
         assert_eq!(names(&walk(&fs, dir.path(), &by_name, &cancel).unwrap()), ["Notes 2.md", "notes.txt"]);
         let hidden = Query { include_hidden: true, ..by_name.clone() };
@@ -179,7 +206,7 @@ mod tests {
         let contents = Query { text: "MILK".into(), mode: Mode::Contents, include_hidden: false };
         assert_eq!(names(&walk(&fs, dir.path(), &contents, &cancel).unwrap()), ["notes.txt"]);
         assert!(walk(&fs, &dir.path().join("missing"), &by_name, &cancel).is_err());
-        cancel.store(true, Ordering::Relaxed);
+        cancel.cancel();
         assert!(walk(&fs, dir.path(), &by_name, &cancel).unwrap().is_empty());
     }
 

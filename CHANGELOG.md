@@ -7,7 +7,18 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-05
+
+### Added
+
+- Stop buttons for searches, finding tagged items, and compressing. A stopped search shows what it found so far; a stopped archive is not kept.
+- Compressing shows how much is done ("120 MB of 600 MB").
+- Compress works on servers too: the items are downloaded, compressed, and the archive is uploaded beside them, with progress for each step.
+- The preview pane follows Zoom In and Zoom Out.
+
 ### Fixed
+
+- Rows in the activity area use the full width, with Stop at the right.
 
 - A tag named after one of Finder's colors (Red, Blue, and so on) shows that color even when no color was stored with it, as happens with tags set by other tools.
 
@@ -119,7 +130,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/houseofmackee/forkz/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/houseofmackee/forkz/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/houseofmackee/forkz/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/houseofmackee/forkz/compare/v0.3.0...v0.4.0

@@ -891,7 +891,7 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         }
         Command::ZoomOut => app.settings.borrow().appearance.text_size > crate::settings::TEXT_SIZES[0],
         Command::ActualSize => (app.settings.borrow().appearance.text_size - 13.0).abs() > 0.01,
-        Command::Compress => has_selection && local && !pane.fs().read_only(),
+        Command::Compress => has_selection && !pane.fs().read_only(),
         Command::EditTags => has_selection && local,
         // One pane always stays.
         Command::ToggleLeftPane => app.panes[0].view().isHidden() || !app.panes[1].view().isHidden(),
@@ -1134,6 +1134,7 @@ fn apply_appearance(app: &App) {
     let row = (base + (text - 13.0) * 1.5).round().max(16.0);
     pane_view::set_look(text, row);
     app.sidebar.set_zoom(text / 13.0);
+    app.preview.set_zoom(text / 13.0);
     for pane in &app.panes {
         pane.apply_appearance(appearance.alternating_rows);
     }
@@ -1705,10 +1706,14 @@ fn open_with_app(pane: &PaneController) {
 }
 
 /// Compresses the selection into an archive beside it (the name chosen
-/// picks the format).
+/// picks the format). On a server, the items are downloaded to a temporary
+/// folder, compressed, and the archive is uploaded beside them.
 fn compress(pane: &PaneController) {
     let paths = pane.target_paths();
     let Some(first) = paths.first() else { return };
+    let fs = pane.fs();
+    // Search results: the items' real file system.
+    let fs = fs.browse_fs().unwrap_or(fs);
     let folder = pane.location();
     let suggested = if paths.len() == 1 { format!("{}.zip", title_of(first)) } else { "Archive.zip".to_string() };
     let stem = suggested.len() - ".zip".len();
@@ -1730,31 +1735,36 @@ fn compress(pane: &PaneController) {
         return;
     }
     let destination = folder.join(&name);
-    if destination.exists() {
+    let taken = if fs.is_local() { destination.exists() } else { fs.stat(&destination).is_ok() };
+    if taken {
         dialogs::show_error(format!("\u{201c}{name}\u{201d} already exists."), "Choose another name.".into());
         return;
     }
     let Some(app) = app() else { return };
-    let note = app.activity.begin_note(&format!("Compressing into \u{201c}{name}\u{201d}\u{2026}"));
+    let (note, cancel) = app.activity.begin_task(&format!("Compressing into \u{201c}{name}\u{201d}\u{2026}"));
     let index = pane.index();
     std::thread::spawn(move || {
-        let result = vfs::archive::compress(&paths, &destination, &mut |_| true);
+        let result = if fs.is_local() {
+            compress_local(&paths, &destination, note, &cancel)
+        } else {
+            compress_remote(&fs, &paths, &folder, &name, note, &cancel)
+        };
         DispatchQueue::main().exec_async(move || {
             let Some(app) = self::app() else { return };
             app.activity.remove(note);
+            let what = if paths.len() == 1 {
+                format!("\u{201c}{}\u{201d}", title_of(&paths[0]))
+            } else {
+                format!("{} items", paths.len())
+            };
+            let place = if fs.is_local() { folder.display().to_string() } else { fs.display_path(&folder) };
             match result {
                 Ok(()) => {
-                    let what = if paths.len() == 1 {
-                        format!("\u{201c}{}\u{201d}", title_of(&paths[0]))
-                    } else {
-                        format!("{} items", paths.len())
-                    };
-                    oplog::record(
-                        oplog::Kind::Change,
-                        format!("Compressed {what} into \u{201c}{name}\u{201d}"),
-                        folder.display().to_string(),
-                    );
+                    oplog::record(oplog::Kind::Change, format!("Compressed {what} into \u{201c}{name}\u{201d}"), place);
                     app.panes[index].reload_selecting(&[destination]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                    oplog::record(oplog::Kind::Change, format!("Stopped compressing {what}"), place);
                 }
                 Err(e) => {
                     oplog::record(
@@ -1767,6 +1777,131 @@ fn compress(pane: &PaneController) {
             }
         });
     });
+}
+
+/// Shows a line under a task's bar (from any thread), at most ten times a
+/// second.
+struct TaskDetail {
+    note: isize,
+    last: Option<std::time::Instant>,
+}
+
+impl TaskDetail {
+    fn show(&mut self, text: String, force: bool) {
+        let now = std::time::Instant::now();
+        if !force && self.last.is_some_and(|t| now - t < Duration::from_millis(100)) {
+            return;
+        }
+        self.last = Some(now);
+        let note = self.note;
+        DispatchQueue::main().exec_async(move || with_activity(|a| a.set_detail(note, &text)));
+    }
+}
+
+/// The bytes in these files and folders (on the Mac).
+fn size_of_tree(paths: &[PathBuf]) -> u64 {
+    let mut total = 0;
+    let mut stack: Vec<PathBuf> = paths.to_vec();
+    while let Some(path) = stack.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        if meta.is_dir() {
+            if let Ok(read) = std::fs::read_dir(&path) {
+                stack.extend(read.flatten().map(|e| e.path()));
+            }
+        } else if meta.is_file() {
+            total += meta.len();
+        }
+    }
+    total
+}
+
+fn compress_local(
+    paths: &[PathBuf],
+    destination: &Path,
+    note: isize,
+    cancel: &ops::CancelToken,
+) -> std::io::Result<()> {
+    let total = size_of_tree(paths);
+    let mut detail = TaskDetail { note, last: None };
+    vfs::archive::compress(paths, destination, &mut |written| {
+        detail.show(format!("{} of {}", crate::fs::format_size(written), crate::fs::format_size(total)), false);
+        !cancel.is_cancelled()
+    })
+}
+
+/// A job's progress as a task's line ("Downloading: 3 MB of 9 MB").
+struct TaskObserver {
+    detail: TaskDetail,
+    verb: &'static str,
+}
+
+impl ops::Observer for TaskObserver {
+    fn progress(&mut self, progress: &ops::Progress) {
+        let text = format!(
+            "{}: {} of {}",
+            self.verb,
+            crate::fs::format_size(progress.done_bytes),
+            crate::fs::format_size(progress.total_bytes)
+        );
+        self.detail.show(text, false);
+    }
+    fn conflict(&mut self, _conflict: &ops::Conflict) -> ops::Answer {
+        ops::Answer { resolution: ops::Resolution::Replace, apply_to_all: true }
+    }
+    fn error(&mut self, _path: &Path, _error: &std::io::Error) -> ops::ErrorAnswer {
+        ops::ErrorAnswer::Stop
+    }
+}
+
+fn compress_remote(
+    fs: &FsRef,
+    paths: &[PathBuf],
+    folder: &Path,
+    name: &str,
+    note: isize,
+    cancel: &ops::CancelToken,
+) -> std::io::Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let work = preview::cache_dir().join(format!("compress-{}", COUNT.fetch_add(1, Ordering::Relaxed)));
+    let items = work.join("items");
+    let out = work.join("out");
+    std::fs::create_dir_all(&items)?;
+    std::fs::create_dir_all(&out)?;
+    let result = (|| {
+        let stopped = || std::io::Error::new(std::io::ErrorKind::Interrupted, "Stopped");
+        let failed = |outcome: &ops::Outcome| {
+            outcome.failed.first().map(|(path, e)| std::io::Error::other(format!("{}: {e}", title_of(path))))
+        };
+        // Download.
+        let mut download = Job::between(JobKind::Copy, fs.clone(), paths.to_vec(), vfs::local(), items.clone());
+        download.keep_dates = true;
+        let mut observer = TaskObserver { detail: TaskDetail { note, last: None }, verb: "Downloading" };
+        let outcome = ops::run(&download, &mut observer, cancel.clone());
+        if outcome.cancelled || cancel.is_cancelled() {
+            return Err(stopped());
+        }
+        if let Some(error) = failed(&outcome) {
+            return Err(error);
+        }
+        // Compress.
+        let local: Vec<PathBuf> = paths.iter().map(|p| items.join(title_of(p))).collect();
+        let archive = out.join(name);
+        compress_local(&local, &archive, note, cancel)?;
+        // Upload beside the items.
+        let upload = Job::between(JobKind::Copy, vfs::local(), vec![archive], fs.clone(), folder.to_path_buf());
+        let mut observer = TaskObserver { detail: TaskDetail { note, last: None }, verb: "Uploading" };
+        let outcome = ops::run(&upload, &mut observer, cancel.clone());
+        if outcome.cancelled || cancel.is_cancelled() {
+            return Err(stopped());
+        }
+        match failed(&outcome) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    })();
+    let _ = std::fs::remove_dir_all(&work);
+    result
 }
 
 /// Sets the Finder tags of the selection.
@@ -1933,15 +2068,16 @@ fn zoom(step: i32) {
 /// Everything with a Finder tag (that Spotlight knows), in the active pane.
 pub fn show_tag(name: &'static str) {
     let Some(app) = app() else { return };
-    let note = app.activity.begin_note(&format!("Finding items tagged \u{201c}{name}\u{201d}\u{2026}"));
+    let (note, cancel) = app.activity.begin_task(&format!("Finding items tagged \u{201c}{name}\u{201d}\u{2026}"));
     let index = app.active.get();
     std::thread::spawn(move || {
-        let result = crate::fs::search::spotlight_tag(name);
+        let result = crate::fs::search::spotlight_tag(name, &cancel);
         DispatchQueue::main().exec_async(move || {
             let Some(app) = self::app() else { return };
             app.activity.remove(note);
             let paths = match result {
                 Ok(paths) => paths,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return,
                 Err(e) => {
                     dialogs::show_error(
                         format!("Items tagged \u{201c}{name}\u{201d} could not be found."),

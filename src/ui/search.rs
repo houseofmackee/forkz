@@ -4,8 +4,6 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -19,6 +17,7 @@ use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString};
 use super::oplog;
 use super::pane_view::PaneController;
 use super::util::{mtm, ns};
+use crate::fs::ops::CancelToken;
 use crate::fs::search::{self, Mode, Query};
 use crate::pane::title_of;
 use crate::vfs::{self, FsRef};
@@ -117,17 +116,17 @@ pub fn run(pane: &PaneController) {
     let folder = if root.parent().is_none() && !fs.is_local() { fs.label() } else { title_of(&root) };
     let Some((query, use_spotlight)) = ask(&folder, fs.is_local()) else { return };
     let Some(activity) = super::activity_view() else { return };
-    let note =
-        activity.begin_note(&format!("Searching \u{201c}{folder}\u{201d} for \u{201c}{}\u{201d}\u{2026}", query.text));
+    let (note, cancel) =
+        activity.begin_task(&format!("Searching \u{201c}{folder}\u{201d} for \u{201c}{}\u{201d}\u{2026}", query.text));
     let index = pane.index();
     std::thread::spawn(move || {
-        let cancel = Arc::new(AtomicBool::new(false));
         let result = find(&fs, &root, &query, use_spotlight, &cancel);
+        let stopped = cancel.is_cancelled();
         DispatchQueue::main().exec_async(move || {
             if let Some(activity) = super::activity_view() {
                 activity.remove(note);
             }
-            show(index, fs, root, folder, query, result);
+            show(index, fs, root, folder, query, result, stopped);
         });
     });
 }
@@ -137,16 +136,17 @@ fn find(
     root: &std::path::Path,
     query: &Query,
     use_spotlight: bool,
-    cancel: &Arc<AtomicBool>,
+    cancel: &CancelToken,
 ) -> std::io::Result<Vec<crate::fs::Entry>> {
     if use_spotlight {
-        match search::spotlight(root, query) {
+        match search::spotlight(root, query, cancel) {
             // Nothing can also mean the folder is not indexed: walk it.
             Ok(paths) if paths.is_empty() => tracing::info!("Spotlight found nothing; searching by walking"),
             Ok(paths) => {
                 let local = vfs::local();
                 return Ok(paths.iter().filter_map(|p| local.stat(p).ok()).collect());
             }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return Ok(Vec::new()),
             Err(e) => tracing::warn!("Spotlight failed, searching by walking: {e}"),
         }
     }
@@ -160,6 +160,7 @@ fn show(
     folder: String,
     query: Query,
     result: std::io::Result<Vec<crate::fs::Entry>>,
+    stopped: bool,
 ) {
     let entries = match result {
         Ok(entries) => entries,
@@ -172,9 +173,17 @@ fn show(
     let count = entries.len();
     oplog::record(
         oplog::Kind::Change,
-        format!("Searched \u{201c}{folder}\u{201d} for items {what} \u{201c}{}\u{201d}: {count} found", query.text),
+        format!(
+            "Searched \u{201c}{folder}\u{201d} for items {what} \u{201c}{}\u{201d}: {count} found{}",
+            query.text,
+            if stopped { " (stopped)" } else { "" }
+        ),
         "",
     );
+    // Stopped with nothing found: nothing to say.
+    if count == 0 && stopped {
+        return;
+    }
     if count == 0 {
         super::dialogs::show_info(
             format!("Nothing {what} \u{201c}{}\u{201d} was found.", query.text),
@@ -182,8 +191,9 @@ fn show(
         );
         return;
     }
-    let more = if count >= search::LIMIT { "+" } else { "" };
-    let title = format!("\u{201c}{}\u{201d} in {folder} ({count}{more})", query.text);
+    let more = if count >= search::LIMIT || stopped { "+" } else { "" };
+    let title =
+        format!("\u{201c}{}\u{201d} in {folder} ({count}{more}){}", query.text, if stopped { ", stopped" } else { "" });
     let results = vfs::results::ResultsFs::new(fs, root.clone(), title, entries);
     if let Some(pane) = super::pane(index) {
         pane.navigate_to(results, root);
