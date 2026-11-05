@@ -19,6 +19,8 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - Archives (zip, tar, 7z, rar, iso, and more) browsed like folders, read-only: copy items out to extract them; Compress makes zip, tar.gz, 7z, and other archives
 - Search by name or contents (Spotlight on the Mac, and on servers and in archives too), with the results in a pane
 - Workspaces: saved sets of tabs for both panes, including server folders
+- Folder sync with a preview, saved as synclets in the sidebar, and Sync Browsing
+- Transfer speed limits, Pause and Resume, and rules for errors
 - Finder tags (colors on icons, and in the sidebar to find everything tagged), a command palette, and Select Matching
 - Zoom (Command-= and Command-minus) and a sidebar that can be hidden
 - A Settings window (Command-comma), with light and dark appearance, text size and row spacing, and your own keyboard shortcuts
@@ -75,6 +77,9 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 | Command-D | Duplicate |
 | Option-Command-R | Rename multiple items |
 | Option-Command-O | Open with the default app |
+| Option-Command-N, Control-Command-N | New file, new folder with the selection |
+| Option-Command-Delete | Delete immediately |
+| Shift-Command-S, Shift-Command-B | Sync folders, sync browsing |
 | Option-Command-A | Select matching items |
 | Shift-Command-F | Search |
 | Option-Command-P | Command palette |

@@ -16,6 +16,7 @@ mod search;
 mod settings_window;
 mod sidebar;
 mod site_form;
+mod sync_window;
 mod tools;
 mod util;
 mod workspaces;
@@ -299,6 +300,10 @@ pub fn prepare_item(item: &NSMenuItem, command: Command, pane: usize) {
         let shown = app().is_some_and(|a| a.settings.borrow().show_hidden);
         item.setState(if shown { NSControlStateValueOn } else { NSControlStateValueOff });
     }
+    if command == Command::SyncBrowsing {
+        let on = SYNC_BROWSING.with(|s| s.borrow().is_some());
+        item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+    }
 }
 
 /// A command's title for a pane: "Delete..." instead of "Move to Trash" on
@@ -455,6 +460,7 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     app.activity.set_limit(app.settings.borrow().transfers.max_transfers);
     restore_tabs(&app);
     apply_appearance(&app);
+    apply_speed_limits(&app);
     APP.with(|a| a.set(app.clone())).map_err(|_| anyhow::anyhow!("the app is already running"))?;
 
     start_watching();
@@ -674,11 +680,20 @@ fn main_menu(
         command(&file, c);
     }
     separator(&file);
-    for c in [Command::NewFolder, Command::Rename, Command::MultiRename, Command::Duplicate, Command::Compress] {
+    for c in [
+        Command::NewFolder,
+        Command::NewFolderWithSelection,
+        Command::NewFile,
+        Command::Rename,
+        Command::MultiRename,
+        Command::Duplicate,
+        Command::Compress,
+    ] {
         command(&file, c);
     }
     separator(&file);
     command(&file, Command::Trash);
+    command(&file, Command::DeleteImmediately);
     command(&file, Command::Permissions);
     command(&file, Command::EditTags);
     separator(&file);
@@ -686,7 +701,7 @@ fn main_menu(
         command(&file, c);
     }
     separator(&file);
-    for c in [Command::RevealInFinder, Command::OpenInTerminal, Command::AddToSidebar] {
+    for c in [Command::RevealInFinder, Command::OpenInTerminal, Command::Share, Command::AddToSidebar] {
         command(&file, c);
     }
     separator(&file);
@@ -761,6 +776,10 @@ fn main_menu(
     }
     separator(&commands);
     for c in [Command::SwapPanes, Command::SameFolderInOther] {
+        command(&commands, c);
+    }
+    separator(&commands);
+    for c in [Command::SyncFolders, Command::SyncBrowsing] {
         command(&commands, c);
     }
     separator(&commands);
@@ -886,6 +905,10 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         }
         Command::Disconnect => !local,
         Command::OpenWithApp => has_selection,
+        Command::NewFile => !pane.fs().read_only() && !pane.showing_results(),
+        Command::NewFolderWithSelection => has_selection && !pane.fs().read_only() && !pane.showing_results(),
+        Command::DeleteImmediately => has_selection && !pane.fs().read_only(),
+        Command::Share => has_selection && local,
         Command::ZoomIn => {
             app.settings.borrow().appearance.text_size < *crate::settings::TEXT_SIZES.last().unwrap_or(&24.0)
         }
@@ -928,6 +951,12 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::Search => search::run(&pane),
         Command::SaveWorkspace => workspaces::save(),
         Command::ToggleSidebar => toggle_sidebar(),
+        Command::NewFile => new_file(&pane),
+        Command::NewFolderWithSelection => new_folder_with_selection(&pane),
+        Command::DeleteImmediately => delete_immediately(&pane),
+        Command::Share => share(&pane),
+        Command::SyncFolders => sync_folders(None),
+        Command::SyncBrowsing => toggle_sync_browsing(),
         Command::ZoomIn => zoom(1),
         Command::ZoomOut => zoom(-1),
         Command::ActualSize => zoom(0),
@@ -1116,12 +1145,19 @@ pub fn update_settings(change: impl FnOnce(&mut Settings)) {
         }
     }
     app.activity.set_limit(limit);
+    apply_speed_limits(&app);
     if appearance_changed {
         apply_appearance(&app);
     }
     if shortcuts_changed {
         rebuild_main_menu();
     }
+}
+
+/// The upload and download speed limits from settings.
+fn apply_speed_limits(app: &App) {
+    let transfers = &app.settings.borrow().transfers;
+    ops::set_speed_limits(transfers.upload_limit_kbps * 1024, transfers.download_limit_kbps * 1024);
 }
 
 /// Theme, text size, row spacing, and alternating rows (from settings).
@@ -1493,11 +1529,13 @@ fn multi_rename(pane: &PaneController) {
     if paths.is_empty() {
         return;
     }
+    let local = pane.is_local();
     let items: Vec<crate::rename::Item> = pane
         .entries_for(&paths)
         .into_iter()
         .map(|e| crate::rename::Item {
             folder: e.kind == crate::fs::EntryKind::Folder && !e.package,
+            created: if local { std::fs::metadata(&e.path).and_then(|m| m.created()).ok() } else { None },
             name: e.name,
             modified: e.modified,
         })
@@ -1676,6 +1714,356 @@ fn job_finished(id: isize, job: Job, outcome: Outcome) {
         }
     }
     activity::report_problems(&outcome);
+}
+
+thread_local! {
+    /// Sync Browsing: the folders both panes started from.
+    static SYNC_BROWSING: RefCell<Option<(PathBuf, PathBuf)>> = const { RefCell::new(None) };
+    /// The other pane is following (so it does not lead back).
+    static FOLLOWING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Sync Browsing: opening a folder in one pane opens the same folder (by
+/// its path inside where they started) in the other.
+fn toggle_sync_browsing() {
+    let Some(app) = app() else { return };
+    let on = SYNC_BROWSING.with(|s| s.borrow().is_some());
+    let bases = (!on).then(|| (app.panes[0].location(), app.panes[1].location()));
+    SYNC_BROWSING.with(|s| *s.borrow_mut() = bases);
+    let text = if on { "Sync Browsing off" } else { "Sync Browsing on" };
+    oplog::record(oplog::Kind::Change, text, "");
+}
+
+fn follow_sync_browsing(index: usize) {
+    if FOLLOWING.with(Cell::get) {
+        return;
+    }
+    let Some(app) = app() else { return };
+    let Some((left, right)) = SYNC_BROWSING.with(|s| s.borrow().clone()) else { return };
+    let (here_base, other_base) = if index == 0 { (left, right) } else { (right, left) };
+    let here = app.panes[index].location();
+    let other = &app.panes[1 - index];
+    let target = if let Ok(inside) = here.strip_prefix(&here_base) {
+        other_base.join(inside)
+    } else if let Ok(above) = here_base.strip_prefix(&here) {
+        // Went up past where it started: the other goes up as far, and
+        // both start from there.
+        let levels = above.components().count();
+        let mut target = other_base.clone();
+        for _ in 0..levels {
+            target = target.parent().map(Path::to_path_buf).unwrap_or(target);
+        }
+        let bases = if index == 0 { (here.clone(), target.clone()) } else { (target.clone(), here.clone()) };
+        SYNC_BROWSING.with(|s| *s.borrow_mut() = Some(bases));
+        target
+    } else {
+        return;
+    };
+    if other.location() == target || (other.is_local() && !target.is_dir()) {
+        return;
+    }
+    FOLLOWING.with(|f| f.set(true));
+    other.navigate(target);
+    FOLLOWING.with(|f| f.set(false));
+}
+
+/// A side of a sync from a pane (search results: the folder searched).
+fn sync_side(pane: &PaneController) -> sync_window::Side {
+    let fs = pane.fs();
+    let fs = fs.browse_fs().unwrap_or(fs);
+    let path = pane.location();
+    let saved = if fs.read_only() {
+        None
+    } else if fs.is_local() {
+        Some(crate::settings::WorkspaceTab { site: None, path: path.clone() })
+    } else {
+        site_of(&fs).map(|site| crate::settings::WorkspaceTab { site: Some(site), path: path.clone() })
+    };
+    sync_window::Side { fs, path, saved }
+}
+
+/// Sync Folders: the two panes' folders, or a synclet's (with its options,
+/// compared right away).
+fn sync_folders(sides: Option<(sync_window::Side, sync_window::Side, crate::fs::sync::Options)>) {
+    let Some(app) = app() else { return };
+    let compare_now = sides.is_some();
+    let (left, right, options) = sides.unwrap_or_else(|| {
+        // Deleting is never carried over from an earlier sync of other
+        // folders (synclets keep their own choice).
+        let options = crate::fs::sync::Options { delete_orphans: false, ..app.settings.borrow().sync.clone() };
+        (sync_side(&app.panes[0]), sync_side(&app.panes[1]), options)
+    });
+    if left.fs.read_only() && right.fs.read_only() {
+        dialogs::show_error(
+            "Archives cannot be synced.".into(),
+            "At least one side must be a folder that can change.".into(),
+        );
+        return;
+    }
+    let Some((options, items)) = sync_window::show(left.clone(), right.clone(), &options, compare_now) else { return };
+    if !compare_now {
+        update_settings(|s| s.sync = options.clone());
+    }
+    let keep_dates = app.settings.borrow().transfers.preserve_timestamps;
+    let chosen: Vec<&crate::fs::sync::Item> = items.iter().collect();
+    let jobs = crate::fs::sync::jobs(&chosen, &left.fs, &left.path, &right.fs, &right.path, keep_dates);
+    let count = items.len();
+    let (note, cancel) =
+        app.activity.begin_task(&format!("Syncing {count} {}\u{2026}", if count == 1 { "item" } else { "items" }));
+    let place = |side: &sync_window::Side| {
+        if side.fs.is_local() { side.path.display().to_string() } else { side.fs.display_path(&side.path) }
+    };
+    let (left_text, right_text) = (place(&left), place(&right));
+    std::thread::spawn(move || {
+        let mut failed: Vec<String> = Vec::new();
+        for job in &jobs {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let mut observer = SyncObserver { detail: TaskDetail { note, last: None } };
+            let outcome = ops::run(job, &mut observer, cancel.clone());
+            failed.extend(outcome.failed.iter().map(|(path, e)| format!("{}: {e}", title_of(path))));
+        }
+        let stopped = cancel.is_cancelled();
+        DispatchQueue::main().exec_async(move || {
+            let Some(app) = self::app() else { return };
+            app.activity.remove(note);
+            for pane in &app.panes {
+                pane.reload();
+            }
+            let text = format!(
+                "Synced {left_text} and {right_text}: {count} {}{}",
+                if count == 1 { "item" } else { "items" },
+                if stopped { " (stopped)" } else { "" }
+            );
+            let kind = if failed.is_empty() { oplog::Kind::Transfer } else { oplog::Kind::Problem };
+            oplog::record(kind, text, failed.join("\n"));
+            if !failed.is_empty() {
+                let more =
+                    if failed.len() > 8 { format!("\n\u{2026}and {} more", failed.len() - 8) } else { String::new() };
+                let list: Vec<String> = failed.iter().take(8).cloned().collect();
+                dialogs::show_error(format!("{} items could not be synced.", failed.len()), list.join("\n") + &more);
+            }
+        });
+    });
+}
+
+/// Progress for a sync, which carries on past errors (listed at the end).
+struct SyncObserver {
+    detail: TaskDetail,
+}
+
+impl ops::Observer for SyncObserver {
+    fn progress(&mut self, progress: &ops::Progress) {
+        let text = if progress.total_bytes > 0 {
+            format!(
+                "{} of {}: {}",
+                crate::fs::format_size(progress.done_bytes),
+                crate::fs::format_size(progress.total_bytes),
+                progress.current
+            )
+        } else {
+            progress.current.clone()
+        };
+        self.detail.show(text, false);
+    }
+    fn conflict(&mut self, _conflict: &ops::Conflict) -> ops::Answer {
+        ops::Answer { resolution: ops::Resolution::Replace, apply_to_all: true }
+    }
+    fn error(&mut self, _path: &Path, _error: &std::io::Error) -> ops::ErrorAnswer {
+        ops::ErrorAnswer::Skip
+    }
+}
+
+/// Opens a synclet: connects to its sites if needed, then shows the Sync
+/// window with its folders and options, already compared.
+pub fn open_synclet(index: usize) {
+    let Some(app) = app() else { return };
+    let Some(synclet) = app.settings.borrow().synclets.get(index).cloned() else { return };
+    let sites = app.sites.borrow().clone();
+    let existing = |tab: &crate::settings::WorkspaceTab| -> Option<FsRef> {
+        match &tab.site {
+            None => Some(vfs::local()),
+            Some(id) => app.connections.borrow().iter().find(|(sid, _)| sid == id).map(|(_, fs)| fs.clone()),
+        }
+    };
+    let ready = (existing(&synclet.left), existing(&synclet.right));
+    if let (Some(l), Some(r)) = &ready {
+        let left =
+            sync_window::Side { fs: l.clone(), path: synclet.left.path.clone(), saved: Some(synclet.left.clone()) };
+        let right =
+            sync_window::Side { fs: r.clone(), path: synclet.right.path.clone(), saved: Some(synclet.right.clone()) };
+        sync_folders(Some((left, right, synclet.options.clone())));
+        return;
+    }
+    // Connect what is not connected yet (off the main thread).
+    let mut missing = Vec::new();
+    for (tab, fs) in [(&synclet.left, &ready.0), (&synclet.right, &ready.1)] {
+        if fs.is_none()
+            && let Some(id) = &tab.site
+        {
+            match sites.get(id) {
+                Some(site) => missing.push(site.clone()),
+                None => {
+                    dialogs::show_error(
+                        format!("The synclet \u{201c}{}\u{201d} uses a site that was deleted.", synclet.name),
+                        String::new(),
+                    );
+                    return;
+                }
+            }
+        }
+    }
+    missing.dedup_by(|a, b| a.id == b.id);
+    let (timeout, extra_keys) = {
+        let settings = app.settings.borrow();
+        (Duration::from_secs(settings.sftp.timeout_seconds.max(5)), settings.sftp.key_files.clone())
+    };
+    let note = app.activity.begin_note(&format!("Connecting for \u{201c}{}\u{201d}\u{2026}", synclet.name));
+    std::thread::spawn(move || {
+        let mut connected: Vec<(String, std::io::Result<FsRef>)> = Vec::new();
+        for site in &missing {
+            let password = crate::sites::keychain::password(&site.id);
+            let prompter = UiPrompter { offer_save: true, save: std::sync::Mutex::new(false) };
+            let result = open_connection(site, password, timeout, extra_keys.clone(), &prompter).map(|(fs, _)| fs);
+            connected.push((site.id.clone(), result));
+        }
+        DispatchQueue::main().exec_async(move || {
+            let Some(app) = self::app() else { return };
+            app.activity.remove(note);
+            for (id, result) in connected {
+                match result {
+                    Ok(fs) => app.connections.borrow_mut().push((id, fs)),
+                    Err(e) => {
+                        if e.kind() != std::io::ErrorKind::Interrupted {
+                            dialogs::show_error("Could not connect for the synclet.".into(), e.to_string());
+                        }
+                        return;
+                    }
+                }
+            }
+            reload_sidebar();
+            open_synclet(index);
+        });
+    });
+}
+
+pub fn delete_synclet(index: usize) {
+    let Some(name) = current_settings().and_then(|s| s.synclets.get(index).map(|x| x.name.clone())) else { return };
+    if dialogs::confirm(
+        &format!("Delete the synclet \u{201c}{name}\u{201d}?"),
+        "The folders are not changed.",
+        "Delete",
+        true,
+    ) {
+        update_settings(|s| s.synclets.retain(|x| x.name != name));
+        reload_sidebar();
+    }
+}
+
+/// Makes an empty file (named first) in the pane's folder.
+fn new_file(pane: &PaneController) {
+    let initial = "untitled.txt";
+    let Some(name) = dialogs::prompt("New File", "Name of the new file:", "Create", initial, Some("untitled".len()))
+    else {
+        return;
+    };
+    let name = name.trim().to_string();
+    if name.contains('/') {
+        dialogs::show_error("Names cannot contain \u{201c}/\u{201d}.".into(), String::new());
+        return;
+    }
+    let fs = pane.fs();
+    let path = pane.location().join(&name);
+    if fs.stat(&path).is_ok() {
+        dialogs::show_error(format!("\u{201c}{name}\u{201d} already exists."), "Choose another name.".into());
+        return;
+    }
+    let result = fs.open_write_sized(&path, Some(0)).and_then(|mut w| std::io::Write::flush(&mut w));
+    match result {
+        Ok(()) => {
+            let place = if fs.is_local() { path.display().to_string() } else { fs.display_path(&path) };
+            oplog::record(oplog::Kind::Change, format!("Created \u{201c}{name}\u{201d}"), place);
+            pane.reload_selecting(&[path]);
+        }
+        Err(e) => dialogs::show_error(format!("\u{201c}{name}\u{201d} could not be created."), e.to_string()),
+    }
+}
+
+/// Moves the selection into a new folder (named first).
+fn new_folder_with_selection(pane: &PaneController) {
+    let paths = pane.target_paths();
+    if paths.is_empty() {
+        return;
+    }
+    let initial = "New Folder With Items";
+    let what = if paths.len() == 1 { "1 item".to_string() } else { format!("{} items", paths.len()) };
+    let Some(name) = dialogs::prompt(
+        "New Folder with Selection",
+        &format!("A folder for the {what}:"),
+        "Create",
+        initial,
+        Some(initial.chars().count()),
+    ) else {
+        return;
+    };
+    let name = name.trim().to_string();
+    let fs = pane.fs();
+    let folder = pane.location().join(&name);
+    if name.contains('/') || fs.stat(&folder).is_ok() {
+        dialogs::show_error(
+            format!("\u{201c}{name}\u{201d} cannot be used."),
+            "It exists already, or has a \u{201c}/\u{201d}.".into(),
+        );
+        return;
+    }
+    if let Err(e) = fs.create_dir(&folder) {
+        dialogs::show_error(format!("\u{201c}{name}\u{201d} could not be created."), e.to_string());
+        return;
+    }
+    start_job(Job::between(JobKind::Move, fs.clone(), paths, fs, folder.clone()));
+    pane.reload_selecting(&[folder]);
+}
+
+/// Deletes the selection right away (not to the Trash), after asking.
+fn delete_immediately(pane: &PaneController) {
+    let paths = pane.target_paths();
+    if paths.is_empty() {
+        return;
+    }
+    let fs = pane.fs();
+    let what = match paths.as_slice() {
+        [one] => format!("\u{201c}{}\u{201d}", title_of(one)),
+        many => format!("{} items", many.len()),
+    };
+    if dialogs::confirm(
+        &format!("Delete {what} immediately?"),
+        "It does not go to the Trash: this cannot be undone.",
+        "Delete",
+        true,
+    ) {
+        start_job(Job::between(JobKind::Delete, fs.clone(), paths, fs, pane.location()));
+    }
+}
+
+/// The macOS Share menu for the selection (on the Mac).
+fn share(pane: &PaneController) {
+    let paths = pane.target_paths();
+    if paths.is_empty() {
+        return;
+    }
+    let urls: Vec<Retained<AnyObject>> =
+        paths.iter().map(|p| Retained::into_super(Retained::into_super(file_url(p)))).collect();
+    let picker = unsafe {
+        objc2_app_kit::NSSharingServicePicker::initWithItems(
+            <objc2_app_kit::NSSharingServicePicker as objc2::AnyThread>::alloc(),
+            &NSArray::from_retained_slice(&urls),
+        )
+    };
+    let table = pane.table();
+    let row = table.selectedRow();
+    let rect = if row >= 0 { table.rectOfRow(row) } else { table.visibleRect() };
+    picker.showRelativeToRect_ofView_preferredEdge(rect, table, objc2_foundation::NSRectEdge::MaxY);
 }
 
 fn activity_view() -> Option<Retained<Activity>> {
@@ -2231,6 +2619,7 @@ fn current_place(app: &App) -> sidebar::Current {
 
 /// A pane went to another folder.
 pub fn location_changed(index: usize) {
+    follow_sync_browsing(index);
     let Some(app) = app() else { return };
     let pane = &app.panes[index];
     {
@@ -2302,6 +2691,13 @@ fn remove_favorite(path: &Path) {
     reload_sidebar();
 }
 
+/// The sidebar shows the active pane's place again.
+pub fn refresh_sidebar_highlight() {
+    if let Some(app) = app() {
+        app.sidebar.highlight(current_place(&app));
+    }
+}
+
 fn reload_sidebar() {
     let Some(app) = app() else { return };
     let (favorites, remote) = {
@@ -2309,7 +2705,9 @@ fn reload_sidebar() {
         (settings.favorites.clone(), settings.remote_favorites.clone())
     };
     let sites = app.sites.borrow().sites.clone();
-    app.sidebar.reload(&favorites, &remote, &sites, current_place(&app));
+    let connected: Vec<String> = app.connections.borrow().iter().map(|(id, _)| id.clone()).collect();
+    let synclets: Vec<String> = app.settings.borrow().synclets.iter().map(|s| s.name.clone()).collect();
+    app.sidebar.reload(&favorites, &remote, &sites, &connected, &synclets, current_place(&app));
 }
 
 // Sites and connections.
@@ -2345,6 +2743,12 @@ fn site_action(action: sidebar::SiteAction, site_id: Option<String>) {
                 app.sites.borrow_mut().remove(&site.id);
                 app.sites.borrow().save();
                 reload_sidebar();
+            }
+        }
+        (SiteAction::Disconnect, Some(site)) => {
+            let key = app.connections.borrow().iter().find(|(id, _)| *id == site.id).map(|(_, fs)| fs.key());
+            if let Some(key) = key {
+                disconnect(&key);
             }
         }
         (SiteAction::New, _) => run_command(Command::Connect, None),
@@ -2439,6 +2843,7 @@ fn connect_site(site: crate::sites::Site, pane_index: usize, password: Option<St
                     }
                     oplog::record(oplog::Kind::Connection, format!("Connected to {}", site.address()), "");
                     app.connections.borrow_mut().push((site.id.clone(), fs.clone()));
+                    reload_sidebar();
                     show_site(&site, fs, pane_index);
                     workspaces::connection_done();
                 }
@@ -2653,6 +3058,7 @@ fn disconnect(key: &str) {
         pane.leave(key);
     }
     update_title(&app);
+    reload_sidebar();
 }
 
 /// Imports sites, passwords, trusted host keys, and settings from FileZilla.

@@ -70,7 +70,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `pane`, `rename`
 - [x] Preview pane (info, preview, activity, log)
 - [x] Filter field on each list
 - [x] Search (name, content, Spotlight locally, scanning remotely), Quick Select
-- [ ] Folder sync with preview, saved as "synclets"
+- [x] Folder sync with preview, saved as "synclets", and sync browsing
 - [x] Multi-rename with rules and presets
 - [x] Archives browsed as folders (libarchive), extracting by copying out
 - [x] Compressing (zip, tar, tar.gz, tar.bz2, tar.xz, 7z)

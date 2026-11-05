@@ -143,6 +143,7 @@ pub fn compare(key: &str, left: &Path, right: &Path) -> io::Result<()> {
         "beyondcompare" => Some((app.join("Contents/MacOS/bcomp"), vec![])),
         "bbedit" => Some((app.join("Contents/Helpers/bbdiff"), vec![])),
         "vscode" => Some((app.join("Contents/Resources/app/bin/code"), vec!["--diff"])),
+        "araxis" => Some((app.join("Contents/Utilities/compare"), vec![])),
         _ => None,
     };
     match helper {

@@ -38,6 +38,20 @@ pub struct Settings {
     /// Hidden with Hide Sidebar, and its width when shown.
     pub sidebar_hidden: bool,
     pub sidebar_width: f64,
+    /// The Sync window's options, as last used.
+    pub sync: crate::fs::sync::Options,
+    /// Saved syncs, in the sidebar.
+    pub synclets: Vec<Synclet>,
+}
+
+/// A saved sync: two folders and how to sync them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Synclet {
+    pub name: String,
+    pub left: WorkspaceTab,
+    pub right: WorkspaceTab,
+    #[serde(default)]
+    pub options: crate::fs::sync::Options,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -134,6 +148,7 @@ pub const TERMINALS: &[(&str, &str, &str)] = &[
     ("warp", "Warp", "dev.warp.Warp-Stable"),
     ("ghostty", "Ghostty", "com.mitchellh.ghostty"),
     ("kitty", "Kitty", "net.kovidgoyal.kitty"),
+    ("hyper", "Hyper", "co.zeit.hyper"),
 ];
 
 /// Compare tools: (key, name, bundle identifier of the app it needs).
@@ -143,6 +158,7 @@ pub const COMPARE_TOOLS: &[(&str, &str, &str)] = &[
     ("beyondcompare", "Beyond Compare", "com.ScooterSoftware.BeyondCompare"),
     ("bbedit", "BBEdit", "com.barebones.bbedit"),
     ("vscode", "Visual Studio Code", "com.microsoft.VSCode"),
+    ("araxis", "Araxis Merge", "com.araxis.merge"),
 ];
 
 /// A folder on a saved site, shown in the sidebar.
@@ -214,6 +230,13 @@ pub struct TransferSettings {
     /// Ask before uploading an opened server file that was saved (instead
     /// of uploading it right away).
     pub ask_before_upload_on_save: bool,
+    /// Speed limits in KB a second for all uploads and all downloads
+    /// together (0: none).
+    pub upload_limit_kbps: u64,
+    pub download_limit_kbps: u64,
+    /// When a transfer hits an error: "ask", "skip", or "retry" (three
+    /// tries, then skip).
+    pub on_error: String,
 }
 
 impl Default for TransferSettings {
@@ -224,6 +247,9 @@ impl Default for TransferSettings {
             upload_conflict: None,
             max_transfers: 2,
             ask_before_upload_on_save: false,
+            upload_limit_kbps: 0,
+            download_limit_kbps: 0,
+            on_error: "ask".into(),
         }
     }
 }
@@ -290,6 +316,8 @@ impl Default for Settings {
             workspaces: Vec::new(),
             sidebar_hidden: false,
             sidebar_width: 180.0,
+            sync: crate::fs::sync::Options::default(),
+            synclets: Vec::new(),
         }
     }
 }

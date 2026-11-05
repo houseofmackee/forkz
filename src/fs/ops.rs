@@ -180,18 +180,79 @@ pub struct Outcome {
     pub cancelled: bool,
 }
 
-/// Cancels a running job from another thread.
+/// Cancels (or pauses) a running job from another thread.
 #[derive(Debug, Clone, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
+pub struct CancelToken {
+    cancelled: Arc<AtomicBool>,
+    paused: Arc<AtomicBool>,
+}
 
 impl CancelToken {
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.cancelled.store(true, Ordering::Relaxed);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+        self.cancelled.load(Ordering::Relaxed)
     }
+
+    /// Pauses (true) or resumes (false) at the next chunk or item.
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Waits while paused (and not cancelled).
+    pub fn wait_while_paused(&self) {
+        while self.is_paused() && !self.is_cancelled() {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
+/// A shared speed limit: callers wait their turn so that all of them
+/// together stay under it.
+struct Limiter {
+    /// Bytes a second; 0 for no limit.
+    rate: std::sync::atomic::AtomicU64,
+    next: std::sync::Mutex<Option<std::time::Instant>>,
+}
+
+impl Limiter {
+    const fn new() -> Limiter {
+        Limiter { rate: std::sync::atomic::AtomicU64::new(0), next: std::sync::Mutex::new(None) }
+    }
+
+    /// Waits until `bytes` more may go.
+    fn take(&self, bytes: usize) {
+        let rate = self.rate.load(Ordering::Relaxed);
+        if rate == 0 {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let start = {
+            let mut next = self.next.lock().unwrap_or_else(|e| e.into_inner());
+            let start = next.map_or(now, |t| t.max(now));
+            *next = Some(start + std::time::Duration::from_secs_f64(bytes as f64 / rate as f64));
+            start
+        };
+        if start > now {
+            std::thread::sleep(start - now);
+        }
+    }
+}
+
+static UPLOADS: Limiter = Limiter::new();
+static DOWNLOADS: Limiter = Limiter::new();
+
+/// Speed limits for uploads and downloads, in bytes a second (0: none),
+/// shared by all transfers.
+pub fn set_speed_limits(upload: u64, download: u64) {
+    UPLOADS.rate.store(upload, Ordering::Relaxed);
+    DOWNLOADS.rate.store(download, Ordering::Relaxed);
 }
 
 /// Stops the job: cancelled, or "Stop" chosen.
@@ -257,7 +318,19 @@ pub fn run(job: &Job, observer: &mut dyn Observer, cancel: CancelToken) -> Outco
 
 impl Runner<'_> {
     fn check_cancel(&self) -> Result<(), Stopped> {
+        self.cancel.wait_while_paused();
         if self.cancel.is_cancelled() { Err(Stopped) } else { Ok(()) }
+    }
+
+    /// The speed limit that applies: downloads (from a server) or uploads.
+    fn limiter(&self) -> Option<&'static Limiter> {
+        if !self.src.is_local() {
+            Some(&DOWNLOADS)
+        } else if !self.dst.is_local() {
+            Some(&UPLOADS)
+        } else {
+            None
+        }
     }
 
     fn report(&mut self) {
@@ -615,8 +688,12 @@ impl Runner<'_> {
         };
         self.progress.done_bytes = start + copied.min(size);
         self.observer.progress(&self.progress);
-        let mut buffer = vec![0u8; 256 * 1024];
+        let limiter = self.limiter();
+        // Smaller chunks under a speed limit, for steady progress.
+        let chunk = if limiter.is_some_and(|l| l.rate.load(Ordering::Relaxed) > 0) { 32 * 1024 } else { 256 * 1024 };
+        let mut buffer = vec![0u8; chunk];
         loop {
+            self.cancel.wait_while_paused();
             if self.cancel.is_cancelled() {
                 return Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled"));
             }
@@ -626,6 +703,9 @@ impl Runner<'_> {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             };
+            if let Some(limiter) = limiter {
+                limiter.take(n);
+            }
             writer.write_all(&buffer[..n])?;
             copied += n as u64;
             self.progress.done_bytes = start + copied.min(size);
@@ -834,6 +914,42 @@ fn copyfile(source: &Path, target: &Path, extra: u32, on_bytes: Option<ProgressF
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limiter_spreads_bytes_over_time() {
+        let limiter = Limiter::new();
+        limiter.rate.store(10_000_000, Ordering::Relaxed);
+        let start = std::time::Instant::now();
+        for _ in 0..4 {
+            limiter.take(2_500_000);
+        }
+        // 10 MB at 10 MB/s: the first chunk goes at once, the rest wait.
+        let elapsed = start.elapsed().as_secs_f64();
+        assert!((0.7..1.5).contains(&elapsed), "{elapsed}");
+        limiter.rate.store(0, Ordering::Relaxed);
+        let start = std::time::Instant::now();
+        limiter.take(100_000_000);
+        assert!(start.elapsed().as_millis() < 50);
+    }
+
+    #[test]
+    fn pause_holds_until_resumed() {
+        let token = CancelToken::default();
+        token.set_paused(true);
+        let waiter = token.clone();
+        let handle = std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            waiter.wait_while_paused();
+            start.elapsed()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        token.set_paused(false);
+        assert!(handle.join().unwrap().as_millis() >= 250);
+        // Cancelling also ends the wait.
+        token.set_paused(true);
+        token.cancel();
+        token.wait_while_paused();
+    }
 
     /// Answers every conflict the same way and records what happened.
     struct Scripted {

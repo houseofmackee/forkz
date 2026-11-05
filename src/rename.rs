@@ -97,11 +97,25 @@ pub enum Rule {
     Date {
         #[serde(default = "date_format")]
         format: String,
+        /// Which date (the modification date if not set).
+        #[serde(default)]
+        source: DateSource,
         #[serde(default)]
         separator: String,
         #[serde(default)]
         at: Place,
     },
+}
+
+/// Which date a Date rule adds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DateSource {
+    #[default]
+    Modified,
+    Created,
+    /// Today (when renaming).
+    Now,
 }
 
 fn one() -> i64 {
@@ -133,6 +147,8 @@ pub struct Preset {
 pub struct Item {
     pub name: String,
     pub modified: Option<SystemTime>,
+    /// When it was made (on the Mac); the modification date if unknown.
+    pub created: Option<SystemTime>,
     pub folder: bool,
 }
 
@@ -347,8 +363,13 @@ fn apply_one(ready: &Ready, text: &str, index: usize, item: &Item, literal: bool
                 };
                 place(text, &with_separator(&number, separator, *at), *at)
             }
-            Rule::Date { format, separator, at } => {
-                let date = format_date(format, item.modified.unwrap_or_else(SystemTime::now));
+            Rule::Date { format, source, separator, at } => {
+                let when = match source {
+                    DateSource::Modified => item.modified,
+                    DateSource::Created => item.created.or(item.modified),
+                    DateSource::Now => None,
+                };
+                let date = format_date(format, when.unwrap_or_else(SystemTime::now));
                 place(text, &with_separator(&date, separator, *at), *at)
             }
         },
@@ -453,7 +474,10 @@ mod tests {
     use super::*;
 
     fn items(names: &[&str]) -> Vec<Item> {
-        names.iter().map(|n| Item { name: n.to_string(), modified: None, folder: !n.contains('.') }).collect()
+        names
+            .iter()
+            .map(|n| Item { name: n.to_string(), modified: None, created: None, folder: !n.contains('.') })
+            .collect()
     }
 
     fn step(rule: Rule) -> Step {
@@ -531,9 +555,19 @@ mod tests {
         let formatted = format_date("YYYY-MM-DD hh.mm.ss (YY)", time);
         assert!(formatted.starts_with("2026-11-0"), "{formatted}");
         assert!(formatted.ends_with("(26)"), "{formatted}");
-        let item = Item { name: "scan.pdf".into(), modified: Some(time), folder: false };
-        let date = step(Rule::Date { format: "YYYY".into(), separator: "_".into(), at: Place::Start });
-        assert_eq!(plan(&[item], &[date], &[]).unwrap()[0].new, "2026_scan.pdf");
+        let created = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_420_113_600); // 2015
+        let item = Item { name: "scan.pdf".into(), modified: Some(time), created: Some(created), folder: false };
+        let date = |source| step(Rule::Date { format: "YYYY".into(), source, separator: "_".into(), at: Place::Start });
+        assert_eq!(
+            plan(std::slice::from_ref(&item), &[date(DateSource::Modified)], &[]).unwrap()[0].new,
+            "2026_scan.pdf"
+        );
+        assert_eq!(
+            plan(std::slice::from_ref(&item), &[date(DateSource::Created)], &[]).unwrap()[0].new,
+            "2015_scan.pdf"
+        );
+        let today = format_date("YYYY", SystemTime::now());
+        assert_eq!(plan(&[item], &[date(DateSource::Now)], &[]).unwrap()[0].new, format!("{today}_scan.pdf"));
     }
 
     #[test]
@@ -601,7 +635,12 @@ mod tests {
             name: "Photos".into(),
             steps: vec![
                 Step {
-                    rule: Rule::Date { format: "YYYY-MM-DD".into(), separator: " ".into(), at: Place::Start },
+                    rule: Rule::Date {
+                        format: "YYYY-MM-DD".into(),
+                        source: DateSource::Created,
+                        separator: " ".into(),
+                        at: Place::Start,
+                    },
                     scope: Scope::Name,
                 },
                 Step { rule: Rule::Case { to: Case::Lower }, scope: Scope::Extension },

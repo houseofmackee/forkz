@@ -26,6 +26,36 @@ struct Row {
     detail: Retained<NSTextField>,
     bar: Retained<NSProgressIndicator>,
     cancel: CancelToken,
+    /// Pause and Resume (jobs only).
+    pause: Option<Retained<NSButton>>,
+    /// Start Next (shown while the job waits its turn).
+    front: Option<Retained<NSButton>>,
+}
+
+/// A small borderless button with an SF Symbol.
+fn icon_button(
+    symbol_name: &str,
+    tip: &str,
+    id: isize,
+    target: &Activity,
+    action: objc2::runtime::Sel,
+    mtm: MainThreadMarker,
+) -> Retained<NSButton> {
+    let button = NSButton::new(mtm);
+    button.setBezelStyle(NSBezelStyle::Circular);
+    button.setBordered(false);
+    if let Some(image) = symbol(symbol_name, tip) {
+        button.setImage(Some(&image));
+    } else {
+        button.setTitle(&ns(tip));
+    }
+    button.setToolTip(Some(&ns(tip)));
+    button.setTag(id);
+    unsafe {
+        button.setTarget(Some(target));
+        button.setAction(Some(action));
+    }
+    button
 }
 
 pub struct ActivityIvars {
@@ -57,6 +87,16 @@ define_class!(
         #[unsafe(method(stopJob:))]
         fn stop_job(&self, sender: &NSButton) {
             self.stop(sender.tag());
+        }
+
+        #[unsafe(method(pauseJob:))]
+        fn pause_job(&self, sender: &NSButton) {
+            self.toggle_pause(sender.tag());
+        }
+
+        #[unsafe(method(startNext:))]
+        fn start_next(&self, sender: &NSButton) {
+            self.move_to_front(sender.tag());
         }
     }
 
@@ -129,10 +169,16 @@ impl Activity {
         texts.setSpacing(2.0);
         bar.leadingAnchor().constraintEqualToAnchor(&texts.leadingAnchor()).setActive(true);
         bar.trailingAnchor().constraintEqualToAnchor(&texts.trailingAnchor()).setActive(true);
-        let row =
-            NSStackView::stackViewWithViews(&objc2_foundation::NSArray::from_slice(&[&*texts as &NSView, &stop]), mtm);
+        let pause = icon_button("pause.circle.fill", "Pause", id, self, sel!(pauseJob:), mtm);
+        let front = icon_button("arrow.up.circle.fill", "Start next", id, self, sel!(startNext:), mtm);
+        front.setHidden(true);
+        let row = NSStackView::stackViewWithViews(
+            &objc2_foundation::NSArray::from_slice(&[&*texts as &NSView, &front, &pause, &stop]),
+            mtm,
+        );
         row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
         row.setSpacing(8.0);
+        row.setDetachesHiddenViews(true);
         // The bar takes the width; Stop stays at the right.
         row.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
         texts.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Horizontal);
@@ -142,8 +188,17 @@ impl Activity {
         row.leadingAnchor().constraintEqualToAnchor_constant(&stack.leadingAnchor(), 10.0).setActive(true);
         row.trailingAnchor().constraintEqualToAnchor_constant(&stack.trailingAnchor(), -10.0).setActive(true);
         stack.setHidden(false);
-        self.ivars().rows.borrow_mut().push(Row { id, view: row, detail, bar, cancel: cancel.clone() });
+        self.ivars().rows.borrow_mut().push(Row {
+            id,
+            view: row,
+            detail,
+            bar,
+            cancel: cancel.clone(),
+            pause: Some(pause),
+            front: Some(front.clone()),
+        });
         if is_limited(&job) && self.ivars().running.borrow().len() >= self.ivars().limit.get() {
+            front.setHidden(false);
             self.set_detail(id, "Waiting for another transfer to finish\u{2026}");
             self.ivars().waiting.borrow_mut().push_back((id, job, cancel));
             return;
@@ -156,10 +211,14 @@ impl Activity {
             self.ivars().running.borrow_mut().push(id);
             self.set_detail(id, "Preparing\u{2026}");
         }
+        if let Some(front) = self.ivars().rows.borrow().iter().find(|r| r.id == id).and_then(|r| r.front.clone()) {
+            front.setHidden(true);
+        }
+        let on_error = super::current_settings().map(|s| s.transfers.on_error).unwrap_or_default();
         std::thread::Builder::new()
             .name(format!("forkz job {id}"))
             .spawn(move || {
-                let mut observer = UiObserver { id, last_report: None };
+                let mut observer = UiObserver { id, last_report: None, on_error, tries: Default::default() };
                 let outcome = ops::run(&job, &mut observer, cancel);
                 DispatchQueue::main().exec_async(move || super::job_finished(id, job, outcome));
             })
@@ -216,7 +275,15 @@ impl Activity {
         row.leadingAnchor().constraintEqualToAnchor_constant(&stack.leadingAnchor(), 10.0).setActive(true);
         row.trailingAnchor().constraintEqualToAnchor_constant(&stack.trailingAnchor(), -10.0).setActive(true);
         stack.setHidden(false);
-        self.ivars().rows.borrow_mut().push(Row { id, view: row, detail, bar, cancel: cancel.clone() });
+        self.ivars().rows.borrow_mut().push(Row {
+            id,
+            view: row,
+            detail,
+            bar,
+            cancel: cancel.clone(),
+            pause: None,
+            front: None,
+        });
         (id, cancel)
     }
 
@@ -250,6 +317,40 @@ impl Activity {
             row.cancel.cancel();
         }
         self.set_detail_always(id, "Stopping\u{2026}");
+    }
+
+    /// Pause and Resume: the job holds at its next chunk or item.
+    fn toggle_pause(&self, id: isize) {
+        let rows = self.ivars().rows.borrow();
+        let Some(row) = rows.iter().find(|r| r.id == id) else { return };
+        let paused = !row.cancel.is_paused();
+        row.cancel.set_paused(paused);
+        if let Some(button) = &row.pause {
+            let (name, tip) = if paused { ("play.circle.fill", "Resume") } else { ("pause.circle.fill", "Pause") };
+            if let Some(image) = symbol(name, tip) {
+                button.setImage(Some(&image));
+            }
+            button.setToolTip(Some(&ns(tip)));
+        }
+        if paused {
+            row.detail.setStringValue(&ns("Paused"));
+        }
+    }
+
+    /// Start Next: a waiting job goes to the front of the queue.
+    fn move_to_front(&self, id: isize) {
+        let mut queue = self.ivars().waiting.borrow_mut();
+        if let Some(position) = queue.iter().position(|(queued, _, _)| *queued == id)
+            && let Some(entry) = queue.remove(position)
+        {
+            queue.push_front(entry);
+        }
+        drop(queue);
+        // Rows follow the queue's order: the moved one goes first among
+        // the waiting rows.
+        if let Some(row) = self.ivars().rows.borrow().iter().find(|r| r.id == id) {
+            row.detail.setStringValue(&ns("Next in line\u{2026}"));
+        }
     }
 
     /// A job ended: frees its slot and starts the next waiting one.
@@ -298,7 +399,15 @@ impl Activity {
         row.trailingAnchor().constraintEqualToAnchor_constant(&stack.trailingAnchor(), -10.0).setActive(true);
         bar.trailingAnchor().constraintEqualToAnchor(&row.trailingAnchor()).setActive(true);
         stack.setHidden(false);
-        self.ivars().rows.borrow_mut().push(Row { id, view: row, detail, bar, cancel: CancelToken::default() });
+        self.ivars().rows.borrow_mut().push(Row {
+            id,
+            view: row,
+            detail,
+            bar,
+            cancel: CancelToken::default(),
+            pause: None,
+            front: None,
+        });
         id
     }
 
@@ -309,6 +418,10 @@ impl Activity {
             return;
         }
         row.bar.setDoubleValue(progress.fraction());
+        if row.cancel.is_paused() {
+            row.detail.setStringValue(&ns("Paused"));
+            return;
+        }
         row.detail.setStringValue(&ns(&describe(progress)));
     }
 
@@ -342,6 +455,10 @@ fn describe(progress: &Progress) -> String {
 struct UiObserver {
     id: isize,
     last_report: Option<Instant>,
+    /// The error rule from settings: "ask", "skip", or "retry".
+    on_error: String,
+    /// Tries so far per item (for "retry").
+    tries: std::collections::HashMap<std::path::PathBuf, u32>,
 }
 
 impl Observer for UiObserver {
@@ -367,6 +484,20 @@ impl Observer for UiObserver {
     }
 
     fn error(&mut self, path: &Path, error: &std::io::Error) -> ErrorAnswer {
+        match self.on_error.as_str() {
+            "skip" => return ErrorAnswer::Skip,
+            "retry" => {
+                let tries = self.tries.entry(path.to_path_buf()).or_insert(0);
+                *tries += 1;
+                if *tries <= 3 {
+                    // A moment for a dropped connection to come back.
+                    std::thread::sleep(Duration::from_secs(u64::from(*tries)));
+                    return ErrorAnswer::Retry;
+                }
+                return ErrorAnswer::Skip;
+            }
+            _ => {}
+        }
         let (reply, answer) = mpsc::channel();
         let (path, error) = (path.to_path_buf(), error.to_string());
         DispatchQueue::main().exec_async(move || dialogs::ask_error(&path, error, reply));

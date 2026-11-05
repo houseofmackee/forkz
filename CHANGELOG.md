@@ -7,6 +7,22 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-05
+
+### Added
+
+- Sync Folders (Shift-Command-S): compares the two panes' folders, on the Mac or on servers, and shows what would be copied or deleted, with the reason and both sides' sizes and dates. Every item can be left out. One way (left to right or right to left) or both ways; with or without subfolders, hidden items, new items, changed items, empty folders, and deleting what only the target has; a time offset for servers whose clocks differ; and names to leave out. Deleting is off unless chosen for that sync.
+- Synclets: a sync saved in the sidebar with its folders and options; clicking one connects to its sites if needed and compares right away.
+- Sync Browsing (Shift-Command-B): opening a folder in one pane opens the matching folder in the other.
+- Speed limits for uploads and downloads (Settings > Transfers), shared by all transfers.
+- Pause and Resume for transfers, and Start Next for one that waits its turn.
+- What to do when a transfer hits an error: ask, skip the item, or try three more times and then skip (Settings > Transfers).
+- Sites and server folders in the sidebar show when they are connected (a green icon and an eject button); eject, or Disconnect in their menu, closes the connection.
+- New File (Option-Command-N), New Folder with Selection (Control-Command-N), and Delete Immediately (Option-Command-Delete), which deletes without the Trash after asking.
+- Rename Multiple Items can add the creation date or today's date, as well as the modification date.
+- Share (File > Share…) for files on the Mac.
+- Araxis Merge for Compare Files, and Hyper for Open in Terminal.
+
 ## [0.7.0] - 2026-11-05
 
 ### Added
@@ -130,7 +146,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/houseofmackee/forkz/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/houseofmackee/forkz/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/houseofmackee/forkz/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/houseofmackee/forkz/compare/v0.4.0...v0.5.0

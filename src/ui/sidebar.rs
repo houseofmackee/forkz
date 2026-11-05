@@ -33,6 +33,7 @@ enum Row {
         id: String,
         title: String,
         detail: String,
+        connected: bool,
     },
     /// A folder on a saved site.
     RemoteFavorite {
@@ -40,6 +41,12 @@ enum Row {
         path: PathBuf,
         title: String,
         detail: String,
+        connected: bool,
+    },
+    /// A saved sync (by its place in the settings).
+    Synclet {
+        index: usize,
+        name: String,
     },
     /// A Finder color tag.
     Tag {
@@ -57,11 +64,12 @@ pub enum SiteAction {
     Delete,
     New,
     Import,
+    Disconnect,
 }
 
 impl SiteAction {
     fn from_tag(tag: isize) -> Option<SiteAction> {
-        [Self::Connect, Self::ConnectInOther, Self::Edit, Self::Delete, Self::New, Self::Import]
+        [Self::Connect, Self::ConnectInOther, Self::Edit, Self::Delete, Self::New, Self::Import, Self::Disconnect]
             .into_iter()
             .find(|a| *a as isize == tag)
     }
@@ -91,10 +99,36 @@ define_class!(
             let row = self.ivars().menu_row.take();
             let site = row.and_then(|r| match self.ivars().rows.borrow().get(r) {
                 Some(Row::Site { id, .. }) => Some(id.clone()),
+                Some(Row::RemoteFavorite { site_id, .. }) => Some(site_id.clone()),
                 _ => None,
             });
             if let Some(action) = SiteAction::from_tag(sender.tag()) {
                 super::site_action(action, site);
+            }
+        }
+
+        /// The eject button of a connected site.
+        #[unsafe(method(ejectSite:))]
+        fn eject_site(&self, sender: &objc2_app_kit::NSButton) {
+            let site = match self.ivars().rows.borrow().get(sender.tag() as usize) {
+                Some(Row::Site { id, .. }) => Some(id.clone()),
+                Some(Row::RemoteFavorite { site_id, .. }) => Some(site_id.clone()),
+                _ => None,
+            };
+            if site.is_some() {
+                super::site_action(SiteAction::Disconnect, site);
+            }
+        }
+
+        #[unsafe(method(deleteSynclet:))]
+        fn delete_synclet(&self, _sender: Option<&AnyObject>) {
+            let row = self.ivars().menu_row.take();
+            let index = row.and_then(|r| match self.ivars().rows.borrow().get(r) {
+                Some(Row::Synclet { index, .. }) => Some(*index),
+                _ => None,
+            });
+            if let Some(index) = index {
+                super::delete_synclet(index);
             }
         }
 
@@ -187,6 +221,10 @@ define_class!(
                 Some(Row::Site { id, .. }) => super::site_action(SiteAction::Connect, Some(id)),
                 Some(Row::RemoteFavorite { site_id, path, .. }) => super::open_remote_favorite(&site_id, &path),
                 Some(Row::Tag { name, .. }) => super::show_tag(name),
+                Some(Row::Synclet { index, .. }) => {
+                    self.deselect_soon();
+                    super::open_synclet(index);
+                }
                 _ => {}
             }
         }
@@ -213,7 +251,11 @@ define_class!(
             };
             self.ivars().menu_row.set(row);
             match &favorite {
-                Some(Row::Site { .. }) => {
+                Some(Row::Site { connected, .. }) => {
+                    if *connected {
+                        add_site_item("Disconnect", SiteAction::Disconnect);
+                        menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
+                    }
                     add_site_item("Connect", SiteAction::Connect);
                     add_site_item("Connect in Other Pane", SiteAction::ConnectInOther);
                     menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
@@ -225,6 +267,23 @@ define_class!(
                     add_site_item("New Site\u{2026}", SiteAction::New);
                     add_site_item("Import from FileZilla\u{2026}", SiteAction::Import);
                     return;
+                }
+                Some(Row::Synclet { .. }) => {
+                    let item = unsafe {
+                        NSMenuItem::initWithTitle_action_keyEquivalent(
+                            NSMenuItem::alloc(self.mtm()),
+                            &ns("Delete Synclet"),
+                            Some(sel!(deleteSynclet:)),
+                            &ns(""),
+                        )
+                    };
+                    unsafe { item.setTarget(Some(self)) };
+                    menu.addItem(&item);
+                    return;
+                }
+                Some(Row::RemoteFavorite { connected: true, .. }) => {
+                    add_site_item("Disconnect", SiteAction::Disconnect);
+                    menu.addItem(&NSMenuItem::separatorItem(self.mtm()));
                 }
                 _ => {}
             }
@@ -254,7 +313,8 @@ impl Sidebar {
     fn cell_for(&self, row: NSInteger) -> Option<Retained<NSView>> {
         let zoom = self.ivars().zoom.get();
         let rows = self.ivars().rows.borrow();
-        let row = rows.get(usize::try_from(row).ok()?)?;
+        let index = usize::try_from(row).ok()?;
+        let row = rows.get(index)?;
         Some(match row {
             Row::Header(title) => {
                 let field = NSTextField::labelWithString(&ns(title), self.mtm());
@@ -267,9 +327,30 @@ impl Sidebar {
                 let tint = name.is_some().then(objc2_app_kit::NSColor::controlAccentColor);
                 cell(self.mtm(), title, &icon, tint, None, zoom)
             }
-            Row::Site { title, detail, .. } | Row::RemoteFavorite { title, detail, .. } => {
+            Row::Site { title, detail, connected, .. } | Row::RemoteFavorite { title, detail, connected, .. } => {
                 let icon = symbol("server.rack", title).unwrap_or_else(super::util::folder_icon);
-                cell(self.mtm(), title, &icon, Some(objc2_app_kit::NSColor::systemTealColor()), Some(detail), zoom)
+                // Connected: a green icon and an eject button.
+                let (tint, tip) = if *connected {
+                    (objc2_app_kit::NSColor::systemGreenColor(), format!("{detail} (connected)"))
+                } else {
+                    (objc2_app_kit::NSColor::secondaryLabelColor(), detail.clone())
+                };
+                let view = cell(self.mtm(), title, &icon, Some(tint), Some(&tip), zoom);
+                if *connected {
+                    self.add_eject(&view, index, zoom);
+                }
+                view
+            }
+            Row::Synclet { name, .. } => {
+                let icon = symbol("arrow.triangle.2.circlepath", name).unwrap_or_else(super::util::folder_icon);
+                cell(
+                    self.mtm(),
+                    name,
+                    &icon,
+                    Some(objc2_app_kit::NSColor::controlAccentColor()),
+                    Some("Open this sync"),
+                    zoom,
+                )
             }
             Row::Tag { name, color } => {
                 let icon = symbol("circle.fill", name).unwrap_or_else(super::util::folder_icon);
@@ -331,6 +412,8 @@ impl Sidebar {
         favorites: &[PathBuf],
         remote_favorites: &[crate::settings::RemoteFavorite],
         sites: &[crate::sites::Site],
+        connected: &[String],
+        synclets: &[String],
         current: Current,
     ) {
         let mut rows = vec![Row::Header("Favorites")];
@@ -360,6 +443,7 @@ impl Sidebar {
                 path: favorite.path.clone(),
                 title: format!("{folder} ({})", site.name),
                 detail: format!("{}{}", site.address(), favorite.path.display()),
+                connected: connected.contains(&favorite.site_id),
             });
         }
         rows.push(Row::Header("Locations"));
@@ -373,7 +457,18 @@ impl Sidebar {
             } else {
                 format!("{} \u{203a} {}", site.folder, site.name)
             };
-            rows.push(Row::Site { id: site.id.clone(), title, detail: site.address() });
+            rows.push(Row::Site {
+                id: site.id.clone(),
+                title,
+                detail: site.address(),
+                connected: connected.contains(&site.id),
+            });
+        }
+        if !synclets.is_empty() {
+            rows.push(Row::Header("Synclets"));
+            for (index, name) in synclets.iter().enumerate() {
+                rows.push(Row::Synclet { index, name: name.clone() });
+            }
         }
         rows.push(Row::Header("Tags"));
         for (name, color) in crate::fs::tags::COLORS {
@@ -382,6 +477,45 @@ impl Sidebar {
         *self.ivars().rows.borrow_mut() = rows;
         self.table().reloadData();
         self.highlight(current);
+    }
+
+    /// An eject button at the right of a row's cell.
+    fn add_eject(&self, view: &NSView, row: usize, zoom: f64) {
+        let mtm = self.mtm();
+        let side = (16.0 * zoom).round();
+        let frame = view.frame();
+        let button = objc2_app_kit::NSButton::initWithFrame(
+            objc2_app_kit::NSButton::alloc(mtm),
+            NSRect::new(
+                NSPoint::new(frame.size.width - side - 6.0, ((frame.size.height - side) / 2.0).floor()),
+                NSSize::new(side, side),
+            ),
+        );
+        button.setBordered(false);
+        if let Some(image) = symbol("eject.fill", "Disconnect") {
+            button.setImage(Some(&image));
+        }
+        button.setImageScaling(objc2_app_kit::NSImageScaling::ScaleProportionallyDown);
+        button.setContentTintColor(Some(&objc2_app_kit::NSColor::secondaryLabelColor()));
+        button.setToolTip(Some(&ns("Disconnect")));
+        button.setTag(row as isize);
+        button.setAutoresizingMask(objc2_app_kit::NSAutoresizingMaskOptions::ViewMinXMargin);
+        unsafe {
+            button.setTarget(Some(self));
+            button.setAction(Some(sel!(ejectSite:)));
+        }
+        view.addSubview(&button);
+        // The title makes room for it.
+        if let Some(field) = view.subviews().iter().find_map(|v| v.downcast::<NSTextField>().ok()) {
+            let mut text = field.frame();
+            text.size.width -= side + 6.0;
+            field.setFrame(text);
+        }
+    }
+
+    /// Clicking a synclet opens it; its row does not stay selected.
+    fn deselect_soon(&self) {
+        dispatch2::DispatchQueue::main().exec_async(super::refresh_sidebar_highlight);
     }
 
     /// Scales the rows and their text (1 is normal).

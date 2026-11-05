@@ -36,6 +36,10 @@ const CONFLICT_CHOICES: [(&str, Option<Resolution>); 5] = [
 
 const TRANSFER_LIMITS: [usize; 8] = [1, 2, 3, 4, 5, 6, 8, 10];
 
+/// The choices for "when an error happens", in popup order.
+const ERROR_RULES: [(&str, &str); 3] =
+    [("Ask what to do", "ask"), ("Skip the item", "skip"), ("Try 3 more times, then skip", "retry")];
+
 struct Controls {
     show_hidden: Retained<NSButton>,
     start_on_parent: Retained<NSButton>,
@@ -49,6 +53,9 @@ struct Controls {
     download: Retained<NSPopUpButton>,
     upload: Retained<NSPopUpButton>,
     ask_upload: Retained<NSButton>,
+    upload_limit: Retained<NSTextField>,
+    download_limit: Retained<NSTextField>,
+    on_error: Retained<NSPopUpButton>,
     timeout: Retained<NSTextField>,
     key_files: Retained<NSTextField>,
     theme: Retained<NSPopUpButton>,
@@ -185,6 +192,14 @@ fn view<T: Message + AsRef<NSView>>(v: &T) -> Retained<NSView> {
     v.as_ref().retain()
 }
 
+/// A field followed by "KB/s".
+fn kbps(field: &NSTextField, mtm: MainThreadMarker) -> Retained<NSStackView> {
+    NSStackView::stackViewWithViews(
+        &NSArray::from_retained_slice(&[view(field), label("KB/s (empty for none)", mtm)]),
+        mtm,
+    )
+}
+
 fn empty(mtm: MainThreadMarker) -> Retained<NSView> {
     NSView::new(mtm)
 }
@@ -236,6 +251,15 @@ impl SettingsWindow {
             download: popup(&conflict_titles, self, mtm),
             upload: popup(&conflict_titles, self, mtm),
             ask_upload: checkbox("Ask before uploading a saved server file", self, mtm),
+            upload_limit: NSTextField::initWithFrame(
+                NSTextField::alloc(mtm),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(80.0, 22.0)),
+            ),
+            download_limit: NSTextField::initWithFrame(
+                NSTextField::alloc(mtm),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(80.0, 22.0)),
+            ),
+            on_error: popup(&ERROR_RULES.iter().map(|e| e.0).collect::<Vec<_>>(), self, mtm),
             timeout: NSTextField::initWithFrame(
                 NSTextField::alloc(mtm),
                 NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(60.0, 22.0)),
@@ -270,7 +294,11 @@ impl SettingsWindow {
             cell.setWraps(true);
             cell.setScrollable(false);
         }
-        for field in [&controls.timeout, &controls.key_files] {
+        for field in [&controls.upload_limit, &controls.download_limit] {
+            field.widthAnchor().constraintEqualToConstant(80.0).setActive(true);
+            field.setPlaceholderString(Some(&ns("No limit")));
+        }
+        for field in [&controls.timeout, &controls.key_files, &controls.upload_limit, &controls.download_limit] {
             unsafe { field.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(self))) };
         }
         let add_key = unsafe {
@@ -316,6 +344,9 @@ impl SettingsWindow {
                     empty(mtm),
                     note("Saving a server file you opened uploads it back, unless you choose to be asked.", mtm),
                 ),
+                (label("Upload speed limit:", mtm), view(&*kbps(&controls.upload_limit, mtm))),
+                (label("Download speed limit:", mtm), view(&*kbps(&controls.download_limit, mtm))),
+                (label("When an error happens:", mtm), view(&*controls.on_error)),
             ],
             mtm,
         );
@@ -394,6 +425,12 @@ impl SettingsWindow {
         c.download.selectItemAtIndex(conflict(settings.transfers.download_conflict));
         c.upload.selectItemAtIndex(conflict(settings.transfers.upload_conflict));
         set(&c.ask_upload, settings.transfers.ask_before_upload_on_save);
+        let limit_text = |kbps: u64| if kbps == 0 { String::new() } else { kbps.to_string() };
+        c.upload_limit.setStringValue(&ns(&limit_text(settings.transfers.upload_limit_kbps)));
+        c.download_limit.setStringValue(&ns(&limit_text(settings.transfers.download_limit_kbps)));
+        c.on_error.selectItemAtIndex(
+            ERROR_RULES.iter().position(|e| e.1 == settings.transfers.on_error).unwrap_or(0) as isize
+        );
         c.timeout.setStringValue(&ns(&settings.sftp.timeout_seconds.to_string()));
         let keys: Vec<String> = settings.sftp.key_files.iter().map(|k| k.display().to_string()).collect();
         c.key_files.setStringValue(&ns(&keys.join("\n")));
@@ -438,6 +475,12 @@ impl SettingsWindow {
             s.transfers.download_conflict = CONFLICT_CHOICES.get(index(&c.download)).and_then(|c| c.1);
             s.transfers.upload_conflict = CONFLICT_CHOICES.get(index(&c.upload)).and_then(|c| c.1);
             s.transfers.ask_before_upload_on_save = on(&c.ask_upload);
+            let limit = |f: &NSTextField| f.stringValue().to_string().trim().parse::<u64>().unwrap_or(0);
+            s.transfers.upload_limit_kbps = limit(&c.upload_limit);
+            s.transfers.download_limit_kbps = limit(&c.download_limit);
+            if let Some(rule) = ERROR_RULES.get(index(&c.on_error)) {
+                s.transfers.on_error = rule.1.to_string();
+            }
             if let Some(timeout) = timeout {
                 s.sftp.timeout_seconds = timeout;
             }

@@ -19,7 +19,7 @@ use objc2_foundation::{
 
 use super::dialogs;
 use super::util::{mtm, ns};
-use crate::rename::{self, Case, Item, Match, Place, Planned, Preset, Rule, Scope, Step};
+use crate::rename::{self, Case, DateSource, Item, Match, Place, Planned, Preset, Rule, Scope, Step};
 
 const KINDS: [&str; 6] = ["Replace Text", "Insert Text", "Remove Characters", "Change Case", "Add Number", "Add Date"];
 const SCOPES: [(&str, Scope); 3] =
@@ -53,12 +53,17 @@ fn fields(kind: usize, option: usize) -> (Option<&'static str>, Option<&'static 
 
 const PLACES_SHORT: [Place; 3] = [Place::Start, Place::End, Place::Replace];
 
+const DATE_SOURCES: [(&str, DateSource); 3] =
+    [("Modified", DateSource::Modified), ("Created", DateSource::Created), ("Today", DateSource::Now)];
+
 struct Row {
     view: Retained<NSStackView>,
     kind: Retained<NSPopUpButton>,
     a: Retained<NSTextField>,
     b: Retained<NSTextField>,
     separator: Retained<NSPopUpButton>,
+    /// Which date (Date rules only).
+    source: Retained<NSPopUpButton>,
     option: Retained<NSPopUpButton>,
     scope: Retained<NSPopUpButton>,
     remove: Retained<NSButton>,
@@ -117,6 +122,9 @@ impl Row {
                 let format = Self::text(&self.a);
                 Rule::Date {
                     format: if format.trim().is_empty() { "YYYY-MM-DD".into() } else { format },
+                    source: DATE_SOURCES
+                        .get(self.source.indexOfSelectedItem().max(0) as usize)
+                        .map_or(DateSource::Modified, |d| d.1),
                     separator: separator.into(),
                     at: short_place,
                 }
@@ -145,6 +153,7 @@ impl Row {
             field.setPlaceholderString(placeholder.map(ns).as_deref());
         }
         self.separator.setHidden(!separator);
+        self.source.setHidden(self.kind() != 5);
     }
 
     fn load(&self, step: &Step) {
@@ -183,8 +192,9 @@ impl Row {
                 self.select_separator(separator);
                 (4, PLACES_SHORT.iter().position(|p| p == at).unwrap_or(1))
             }
-            Rule::Date { format, separator, at } => {
+            Rule::Date { format, source, separator, at } => {
                 set(&self.a, format);
+                self.source.selectItemAtIndex(DATE_SOURCES.iter().position(|d| d.1 == *source).unwrap_or(0) as isize);
                 self.select_separator(separator);
                 (5, PLACES_SHORT.iter().position(|p| p == at).unwrap_or(1))
             }
@@ -409,6 +419,7 @@ impl RenameWindow {
             a: field(150.0),
             b: field(120.0),
             separator: popup(&separators, self, sel!(ruleChanged:), mtm),
+            source: popup(&DATE_SOURCES.iter().map(|d| d.0).collect::<Vec<_>>(), self, sel!(ruleChanged:), mtm),
             option: popup(&[], self, sel!(optionChanged:), mtm),
             scope: popup(&scopes, self, sel!(ruleChanged:), mtm),
             remove: button("\u{2212}", self, sel!(removeRule:), mtm),
@@ -420,6 +431,7 @@ impl RenameWindow {
             view(&*row.kind),
             view(&*row.a),
             view(&*row.b),
+            view(&*row.source),
             view(&*row.separator),
             view(&*row.option),
             view(&*row.scope),

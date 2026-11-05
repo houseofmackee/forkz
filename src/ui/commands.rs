@@ -68,6 +68,12 @@ pub enum Command {
     ZoomIn,
     ZoomOut,
     ActualSize,
+    NewFile,
+    NewFolderWithSelection,
+    DeleteImmediately,
+    Share,
+    SyncFolders,
+    SyncBrowsing,
 }
 
 impl Command {
@@ -132,6 +138,12 @@ impl Command {
         Command::ZoomIn,
         Command::ZoomOut,
         Command::ActualSize,
+        Command::NewFile,
+        Command::NewFolderWithSelection,
+        Command::DeleteImmediately,
+        Command::Share,
+        Command::SyncFolders,
+        Command::SyncBrowsing,
     ];
 
     pub fn tag(self) -> isize {
@@ -223,6 +235,12 @@ impl Command {
             Command::ZoomIn => "Zoom In",
             Command::ZoomOut => "Zoom Out",
             Command::ActualSize => "Actual Size",
+            Command::NewFile => "New File\u{2026}",
+            Command::NewFolderWithSelection => "New Folder with Selection\u{2026}",
+            Command::DeleteImmediately => "Delete Immediately\u{2026}",
+            Command::Share => "Share\u{2026}",
+            Command::SyncFolders => "Sync Folders\u{2026}",
+            Command::SyncBrowsing => "Sync Browsing",
         }
     }
 
@@ -297,6 +315,12 @@ impl Command {
             Command::ZoomIn => ("=", cmd),
             Command::ZoomOut => ("-", cmd),
             Command::ActualSize => ("0", cmd),
+            Command::NewFile => ("n", opt_cmd),
+            Command::NewFolderWithSelection => ("n", cmd | NSEventModifierFlags::Control),
+            Command::DeleteImmediately => ("\u{8}", opt_cmd),
+            Command::Share => ("", cmd),
+            Command::SyncFolders => ("s", shift_cmd),
+            Command::SyncBrowsing => ("b", shift_cmd),
         }
     }
 
