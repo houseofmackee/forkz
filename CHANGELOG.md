@@ -7,6 +7,12 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-05
+
+### Added
+
+- Expand Preview Pane (Control-Command-P, or the button at the top left of the preview pane): the preview fills the window, for a closer look; the same button shrinks it back, with the sidebar and panes as they were.
+
 ## [0.8.0] - 2026-11-05
 
 ### Added
@@ -146,7 +152,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/houseofmackee/forkz/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/houseofmackee/forkz/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/houseofmackee/forkz/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/houseofmackee/forkz/compare/v0.5.0...v0.6.0

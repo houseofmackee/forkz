@@ -44,6 +44,8 @@ struct ArchiveShown {
 
 struct Views {
     root: Retained<NSStackView>,
+    /// Expand to fill the window, or shrink back.
+    expand: Retained<NSButton>,
     tabs: Retained<NSSegmentedControl>,
     content: Retained<NSView>,
     info: Retained<NSStackView>,
@@ -115,6 +117,11 @@ define_class!(
         #[unsafe(method(archiveRowOpened:))]
         fn archive_row_opened(&self, _sender: Option<&AnyObject>) {
             self.open_archive_row();
+        }
+
+        #[unsafe(method(expandPane:))]
+        fn expand_pane(&self, _sender: Option<&AnyObject>) {
+            super::toggle_preview_expanded();
         }
 
         #[unsafe(method(closePane:))]
@@ -400,8 +407,13 @@ impl PreviewPane {
         close.setBordered(false);
         close.setToolTip(Some(&ns("Hide the preview pane")));
         close.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+        // And on the left, expand to fill the window (or shrink back).
+        let expand =
+            unsafe { NSButton::buttonWithTitle_target_action(&ns(""), Some(self), Some(sel!(expandPane:)), mtm) };
+        expand.setBordered(false);
+        expand.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
         let header = NSView::new(mtm);
-        for control in [view(&*tabs), view(&*close)] {
+        for control in [view(&*tabs), view(&*close), view(&*expand)] {
             control.setTranslatesAutoresizingMaskIntoConstraints(false);
             header.addSubview(&control);
             control.centerYAnchor().constraintEqualToAnchor(&header.centerYAnchor()).setActive(true);
@@ -410,6 +422,8 @@ impl PreviewPane {
         tabs.topAnchor().constraintEqualToAnchor(&header.topAnchor()).setActive(true);
         tabs.bottomAnchor().constraintEqualToAnchor(&header.bottomAnchor()).setActive(true);
         close.trailingAnchor().constraintEqualToAnchor_constant(&header.trailingAnchor(), -8.0).setActive(true);
+        expand.leadingAnchor().constraintEqualToAnchor_constant(&header.leadingAnchor(), 8.0).setActive(true);
+        expand.trailingAnchor().constraintLessThanOrEqualToAnchor_constant(&tabs.leadingAnchor(), -4.0).setActive(true);
         close
             .leadingAnchor()
             .constraintGreaterThanOrEqualToAnchor_constant(&tabs.trailingAnchor(), 4.0)
@@ -429,6 +443,7 @@ impl PreviewPane {
 
         let _ = self.ivars().views.set(Views {
             root,
+            expand,
             tabs,
             content,
             info: info.clone(),
@@ -444,6 +459,7 @@ impl PreviewPane {
             log_text,
         });
         self.select_tab(0);
+        self.set_expanded(false);
     }
 
     /// Scales the text (1 is normal); Quick Look previews keep their size.
@@ -465,6 +481,20 @@ impl PreviewPane {
         // Info is made again at the new size.
         self.ivars().shown.borrow_mut().clear();
         self.refresh();
+    }
+
+    /// Shows whether the pane fills the window (the button's icon).
+    pub fn set_expanded(&self, expanded: bool) {
+        let button = &self.views().expand;
+        let (name, tip) = if expanded {
+            ("arrow.down.right.and.arrow.up.left", "Shrink the preview pane back")
+        } else {
+            ("arrow.up.left.and.arrow.down.right", "Expand the preview pane to fill the window")
+        };
+        if let Some(image) = super::util::symbol(name, tip) {
+            button.setImage(Some(&image));
+        }
+        button.setToolTip(Some(&ns(tip)));
     }
 
     pub fn select_tab_named(&self, id: &str) {

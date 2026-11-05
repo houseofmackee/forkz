@@ -97,6 +97,7 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 | Option-Command-S | Calculate folder sizes |
 | Control-Command-C | Compare files |
 | Shift-Command-P | Show or hide the preview pane |
+| Control-Command-P | Expand the preview pane to fill the window, or shrink it back |
 | Option-Command-1, Option-Command-2 | Hide or show the left pane, the right pane |
 | Command-comma | Settings |
 | Command-T, Command-W | New tab, close tab |

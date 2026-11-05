@@ -74,6 +74,7 @@ pub enum Command {
     Share,
     SyncFolders,
     SyncBrowsing,
+    ExpandPreview,
 }
 
 impl Command {
@@ -144,6 +145,7 @@ impl Command {
         Command::Share,
         Command::SyncFolders,
         Command::SyncBrowsing,
+        Command::ExpandPreview,
     ];
 
     pub fn tag(self) -> isize {
@@ -241,6 +243,7 @@ impl Command {
             Command::Share => "Share\u{2026}",
             Command::SyncFolders => "Sync Folders\u{2026}",
             Command::SyncBrowsing => "Sync Browsing",
+            Command::ExpandPreview => "Expand Preview Pane",
         }
     }
 
@@ -321,6 +324,7 @@ impl Command {
             Command::Share => ("", cmd),
             Command::SyncFolders => ("s", shift_cmd),
             Command::SyncBrowsing => ("b", shift_cmd),
+            Command::ExpandPreview => ("p", cmd | NSEventModifierFlags::Control),
         }
     }
 

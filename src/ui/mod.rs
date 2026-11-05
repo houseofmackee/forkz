@@ -326,6 +326,7 @@ pub fn command_title(command: Command, pane: usize) -> String {
         Command::Disconnect if app.panes[pane].fs().outside().is_some() => "Close Archive",
         Command::ToggleLeftPane if app.panes[0].view().isHidden() => "Show Left Pane",
         Command::ToggleSidebar if app.sidebar.view().isHidden() => "Show Sidebar",
+        Command::ExpandPreview if PREVIEW_EXPANDED.with(|e| e.get().is_some()) => "Shrink Preview Pane",
         Command::ToggleRightPane if app.panes[1].view().isHidden() => "Show Right Pane",
         _ => command.title(),
     };
@@ -566,7 +567,10 @@ fn build_window(
     main_split.addSubview(&preview.view());
     sidebar_view.widthAnchor().constraintGreaterThanOrEqualToConstant(130.0).setActive(true);
     sidebar_view.widthAnchor().constraintLessThanOrEqualToConstant(320.0).setActive(true);
-    preview.view().widthAnchor().constraintLessThanOrEqualToConstant(520.0).setActive(true);
+    let widest = preview.view().widthAnchor().constraintLessThanOrEqualToConstant(520.0);
+    // Turned off while the preview fills the window.
+    widest.setIdentifier(Some(&ns(PREVIEW_MAX_WIDTH)));
+    widest.setActive(true);
     // Resizing the window resizes the panes, not the sidebar or preview.
     main_split.setHoldingPriority_forSubviewAtIndex(260.0, 0);
     main_split.setHoldingPriority_forSubviewAtIndex(250.0, 1);
@@ -724,7 +728,13 @@ fn main_menu(
         command(&view, c);
     }
     separator(&view);
-    for c in [Command::ToggleSidebar, Command::ToggleLeftPane, Command::ToggleRightPane, Command::TogglePreview] {
+    for c in [
+        Command::ToggleSidebar,
+        Command::ToggleLeftPane,
+        Command::ToggleRightPane,
+        Command::TogglePreview,
+        Command::ExpandPreview,
+    ] {
         command(&view, c);
     }
     separator(&view);
@@ -916,6 +926,12 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         Command::ActualSize => (app.settings.borrow().appearance.text_size - 13.0).abs() > 0.01,
         Command::Compress => has_selection && !pane.fs().read_only(),
         Command::EditTags => has_selection && local,
+        // While the preview fills the window, the panes stay as they are.
+        Command::ToggleLeftPane | Command::ToggleRightPane | Command::ToggleSidebar
+            if PREVIEW_EXPANDED.with(|e| e.get().is_some()) =>
+        {
+            false
+        }
         // One pane always stays.
         Command::ToggleLeftPane => app.panes[0].view().isHidden() || !app.panes[1].view().isHidden(),
         Command::ToggleRightPane => app.panes[1].view().isHidden() || !app.panes[0].view().isHidden(),
@@ -957,6 +973,7 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::Share => share(&pane),
         Command::SyncFolders => sync_folders(None),
         Command::SyncBrowsing => toggle_sync_browsing(),
+        Command::ExpandPreview => toggle_preview_expanded(),
         Command::ZoomIn => zoom(1),
         Command::ZoomOut => zoom(-1),
         Command::ActualSize => zoom(0),
@@ -2544,7 +2561,71 @@ fn add_new_toolbar_items(app: &App) {
     }
 }
 
+/// The identifier of the preview pane's maximum width constraint.
+const PREVIEW_MAX_WIDTH: &str = "forkz.preview.max-width";
+
+/// Turns the preview pane's maximum width on or off.
+fn limit_preview_width(preview: &NSView, on: bool) {
+    for constraint in preview.constraints().iter() {
+        if constraint.identifier().is_some_and(|i| i.to_string() == PREVIEW_MAX_WIDTH) {
+            constraint.setActive(on);
+        }
+    }
+}
+
+thread_local! {
+    /// The preview fills the window: whether the sidebar was showing and
+    /// the preview's width before, to go back.
+    static PREVIEW_EXPANDED: Cell<Option<(bool, f64)>> = const { Cell::new(None) };
+}
+
+/// Expands the preview pane to fill the window (hiding the sidebar and
+/// the panes), or shrinks it back.
+pub fn toggle_preview_expanded() {
+    let Some(app) = app() else { return };
+    let Some(split) = app.window.contentView().and_then(|v| v.downcast::<NSSplitView>().ok()) else { return };
+    let subviews = split.subviews();
+    let (Some(sidebar), Some(panes)) = (subviews.iter().next(), subviews.iter().nth(1)) else { return };
+    let preview = app.preview.view();
+    match PREVIEW_EXPANDED.with(|e| e.take()) {
+        None => {
+            if preview.isHidden() {
+                toggle_preview();
+            }
+            PREVIEW_EXPANDED.with(|e| e.set(Some((!sidebar.isHidden(), preview.frame().size.width))));
+            limit_preview_width(&preview, false);
+            sidebar.setHidden(true);
+            panes.setHidden(true);
+            split.adjustSubviews();
+            app.preview.set_expanded(true);
+            app.window.makeFirstResponder(Some(&preview));
+        }
+        Some((sidebar_shown, width)) => {
+            limit_preview_width(&preview, true);
+            panes.setHidden(false);
+            sidebar.setHidden(!sidebar_shown);
+            split.adjustSubviews();
+            split.layoutSubtreeIfNeeded();
+            let total = split.frame().size.width;
+            split.setPosition_ofDividerAtIndex(total - width - split.dividerThickness(), 1);
+            if sidebar_shown {
+                let sidebar_width = app.settings.borrow().sidebar_width.clamp(130.0, 320.0);
+                split.setPosition_ofDividerAtIndex(sidebar_width, 0);
+            }
+            app.preview.set_expanded(false);
+            for pane in &app.panes {
+                pane.fit_columns();
+            }
+            app.panes[app.active.get()].focus();
+        }
+    }
+}
+
 pub fn toggle_preview() {
+    // Closing an expanded preview first gives the panes back.
+    if PREVIEW_EXPANDED.with(|e| e.get().is_some()) {
+        toggle_preview_expanded();
+    }
     let Some(app) = app() else { return };
     let view = app.preview.view();
     let show = view.isHidden();
