@@ -295,3 +295,58 @@ pub fn confirm(message: &str, informative: &str, ok: &str, destructive: bool) ->
     }
     run(&alert) == 0
 }
+
+/// Asks which of some paths to act on: a check box for each (all checked),
+/// shown relative to `base` ("~/Library/..."). The checked ones, or None
+/// for the second button (or none checked).
+pub fn choose_paths(
+    message: &str,
+    informative: &str,
+    ok: &str,
+    cancel: &str,
+    paths: &[std::path::PathBuf],
+    base: &Path,
+) -> Option<Vec<std::path::PathBuf>> {
+    use objc2_app_kit::{NSButton, NSControlStateValueOff, NSScrollView, NSStackView, NSView};
+    let mtm = mtm();
+    let alert = alert(mtm, message, informative);
+    alert.addButtonWithTitle(&ns(ok));
+    alert.addButtonWithTitle(&ns(cancel));
+    let boxes: Vec<Retained<NSButton>> = paths
+        .iter()
+        .map(|path| {
+            let shown = match path.strip_prefix(base) {
+                Ok(inside) => format!("~/{}", inside.display()),
+                Err(_) => path.display().to_string(),
+            };
+            let button = unsafe { NSButton::checkboxWithTitle_target_action(&ns(&shown), None, None, mtm) };
+            button.setState(NSControlStateValueOn);
+            button.setToolTip(Some(&ns(&path.display().to_string())));
+            button
+        })
+        .collect();
+    let views: Vec<&NSView> = boxes.iter().map(|b| &**b as &NSView).collect();
+    let stack = NSStackView::stackViewWithViews(&objc2_foundation::NSArray::from_slice(&views), mtm);
+    stack.setOrientation(objc2_app_kit::NSUserInterfaceLayoutOrientation::Vertical);
+    stack.setAlignment(objc2_app_kit::NSLayoutAttribute::Leading);
+    stack.setSpacing(4.0);
+    let fitting = stack.fittingSize();
+    let width = fitting.width.clamp(300.0, 560.0);
+    stack.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, fitting.height)));
+    // Many leftovers scroll.
+    let scroll = NSScrollView::initWithFrame(
+        NSScrollView::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, fitting.height.min(240.0))),
+    );
+    scroll.setDocumentView(Some(&stack));
+    scroll.setHasVerticalScroller(fitting.height > 240.0);
+    scroll.setDrawsBackground(false);
+    alert.setAccessoryView(Some(&scroll));
+    alert.layout();
+    if run(&alert) != 0 {
+        return None;
+    }
+    let chosen: Vec<std::path::PathBuf> =
+        paths.iter().zip(&boxes).filter(|(_, b)| b.state() != NSControlStateValueOff).map(|(p, _)| p.clone()).collect();
+    (!chosen.is_empty()).then_some(chosen)
+}

@@ -6,6 +6,7 @@ mod column_view;
 pub mod commands;
 mod dialogs;
 mod diff_window;
+mod duplicates_window;
 mod file_viewer;
 mod filters_editor;
 mod icon_view;
@@ -41,11 +42,11 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate, NSBackingStoreType, NSControlStateValueOff,
-    NSControlStateValueOn, NSMenu, NSMenuItem, NSMenuItemValidation, NSPasteboard, NSPasteboardTypeString, NSSplitView,
-    NSSplitViewDividerStyle, NSStackView, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode,
-    NSToolbarFlexibleSpaceItemIdentifier, NSToolbarItem, NSToolbarItemValidation, NSToolbarSpaceItemIdentifier,
-    NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask, NSWindowToolbarStyle, NSWorkspace,
-    NSWorkspaceDidMountNotification, NSWorkspaceDidUnmountNotification,
+    NSControlStateValueOn, NSMenu, NSMenuDelegate, NSMenuItem, NSMenuItemValidation, NSPasteboard,
+    NSPasteboardTypeString, NSSplitView, NSSplitViewDividerStyle, NSStackView, NSToolbar, NSToolbarDelegate,
+    NSToolbarDisplayMode, NSToolbarFlexibleSpaceItemIdentifier, NSToolbarItem, NSToolbarItemValidation,
+    NSToolbarSpaceItemIdentifier, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
+    NSWindowToolbarStyle, NSWorkspace, NSWorkspaceDidMountNotification, NSWorkspaceDidUnmountNotification,
 };
 use objc2_foundation::{NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
@@ -133,6 +134,17 @@ define_class!(
             workspaces::delete((sender.tag() - WORKSPACE_TAG) as usize);
         }
 
+        /// Go > Recent Folders.
+        #[unsafe(method(openRecentFolder:))]
+        fn open_recent_folder(&self, sender: &NSMenuItem) {
+            open_recent((sender.tag() - RECENT_TAG) as usize);
+        }
+
+        #[unsafe(method(clearRecentFolders:))]
+        fn clear_recent_folders(&self, _sender: Option<&AnyObject>) {
+            update_settings(|s| s.recent_folders.clear());
+        }
+
         /// Commands > Simultaneous Transfers.
         #[unsafe(method(transferLimit:))]
         fn transfer_limit(&self, sender: &NSMenuItem) {
@@ -172,6 +184,14 @@ define_class!(
             if let Some(app) = app() {
                 app.settings.borrow().save();
             }
+        }
+    }
+
+    /// The Recent Folders menu is filled when it opens.
+    unsafe impl NSMenuDelegate for AppDelegate {
+        #[unsafe(method(menuNeedsUpdate:))]
+        fn menu_needs_update(&self, menu: &NSMenu) {
+            fill_recent_menu(menu, self);
         }
     }
 
@@ -252,6 +272,7 @@ pub fn toggle_column(local: bool, id: &str) {
 
 /// Tags of the workspace menu items: this plus the workspace's index.
 const WORKSPACE_TAG: isize = 3000;
+const RECENT_TAG: isize = 4000;
 
 /// Tags of the Simultaneous Transfers items: this plus the number.
 const TRANSFER_LIMIT_TAG: isize = 2000;
@@ -340,15 +361,21 @@ pub fn prepare_item(item: &NSMenuItem, command: Command, pane: usize) {
     }
 }
 
+/// Whether a file system is a server (not the Mac or an archive).
+fn on_server(fs: &FsRef) -> bool {
+    !fs.is_local() && fs.outside().is_none()
+}
+
 /// A command's title for a pane: "Delete..." instead of "Move to Trash" on
 /// a server, "Upload" or "Download" when copying between the Mac and a
 /// server, and so on.
 pub fn command_title(command: Command, pane: usize) -> String {
     let Some(app) = app() else { return command.title().into() };
-    let here = app.panes[pane].is_local();
-    let there = app.panes[1 - pane].is_local();
+    // On the Mac, or in an archive (not a server).
+    let here = !on_server(&app.panes[pane].fs());
+    let there = !on_server(&app.panes[1 - pane].fs());
     let title = match command {
-        Command::Trash if !here => "Delete\u{2026}",
+        Command::Trash if !app.panes[pane].is_local() => "Delete\u{2026}",
         Command::CopyToOther if app.panes[pane].fs().read_only() => "Extract to Other Pane",
         Command::CopyToOther if here && !there => "Upload to Other Pane",
         Command::CopyToOther if !here && there => "Download to Other Pane",
@@ -795,7 +822,7 @@ fn main_menu(
         command(&view, c);
     }
     separator(&view);
-    for c in [Command::ToggleHidden, Command::ToggleFilters, Command::Refresh] {
+    for c in [Command::ToggleHidden, Command::ToggleFilters, Command::FlatView, Command::Refresh] {
         command(&view, c);
     }
     separator(&view);
@@ -856,6 +883,12 @@ fn main_menu(
         command(&go, c);
     }
     separator(&go);
+    let recent = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Recent Folders"));
+    recent.setDelegate(Some(ProtocolObject::from_ref(delegate)));
+    let recent_item = NSMenuItem::new(mtm);
+    recent_item.setTitle(&ns("Recent Folders"));
+    recent_item.setSubmenu(Some(&recent));
+    go.addItem(&recent_item);
     command(&go, Command::GoToFolder);
 
     let commands = submenu("Commands");
@@ -869,7 +902,7 @@ fn main_menu(
         command(&commands, c);
     }
     separator(&commands);
-    for c in [Command::ComparePanes, Command::SyncFolders, Command::SyncBrowsing] {
+    for c in [Command::ComparePanes, Command::FindDuplicates, Command::SyncFolders, Command::SyncBrowsing] {
         command(&commands, c);
     }
     separator(&commands);
@@ -999,6 +1032,8 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         Command::OpenWithApp => has_selection,
         Command::NewFile => !pane.fs().read_only() && !pane.showing_results(),
         Command::ComparePanes => !app.panes[0].showing_results() && !app.panes[1].showing_results(),
+        // On the Mac (duplicates go to the Trash).
+        Command::FindDuplicates => local && !pane.showing_results(),
         Command::NewFolderWithSelection => has_selection && !pane.fs().read_only() && !pane.showing_results(),
         Command::DeleteImmediately => has_selection && !pane.fs().read_only(),
         Command::Share => has_selection && local,
@@ -1056,6 +1091,8 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::Share => share(&pane),
         Command::SyncFolders => sync_folders(None),
         Command::ComparePanes => compare_panes(&app),
+        Command::FlatView => search::flat_view(&pane),
+        Command::FindDuplicates => duplicates_window::open(pane.location()),
         Command::SyncBrowsing => toggle_sync_browsing(),
         Command::ExpandPreview => toggle_preview_expanded(),
         Command::ToggleFilters => update_settings(|s| s.filters_on = !s.filters_on),
@@ -1379,6 +1416,97 @@ fn apply_appearance(app: &App) {
     NSApplication::sharedApplication(mtm()).setAppearance(chosen.as_deref());
 }
 
+/// Remembers a folder a pane shows (Go > Recent Folders): on the Mac, or
+/// on a saved site. Search results and archives are left out.
+pub fn note_recent_folder(fs: &FsRef, path: &Path) {
+    if fs.title_for(path).is_some() || fs.outside().is_some() {
+        return;
+    }
+    let site = if fs.is_local() {
+        None
+    } else {
+        match site_of(fs) {
+            Some(site) => Some(site),
+            None => return,
+        }
+    };
+    let folder = crate::settings::RecentFolder { site, path: path.to_path_buf() };
+    let Some(app) = app() else { return };
+    if app.settings.borrow().recent_folders.first() == Some(&folder) {
+        return;
+    }
+    update_settings(|s| {
+        s.recent_folders.retain(|f| *f != folder);
+        s.recent_folders.insert(0, folder);
+        s.recent_folders.truncate(crate::settings::RECENT_FOLDERS);
+    });
+}
+
+/// A recent folder's title: its name, and the site's for a server.
+fn recent_title(folder: &crate::settings::RecentFolder) -> String {
+    let name = if folder.path.parent().is_none() { "/".to_string() } else { title_of(&folder.path) };
+    let site = folder.site.as_deref().and_then(|id| app()?.sites.borrow().get(id).map(|s| s.name.clone()));
+    match site {
+        Some(site) => format!("{name} ({site})"),
+        None => name,
+    }
+}
+
+/// Fills Go > Recent Folders.
+fn fill_recent_menu(menu: &NSMenu, delegate: &AppDelegate) {
+    menu.removeAllItems();
+    let mtm = mtm();
+    let recent = current_settings().map(|s| s.recent_folders).unwrap_or_default();
+    for (index, folder) in recent.iter().enumerate() {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &ns(&recent_title(folder)),
+                Some(sel!(openRecentFolder:)),
+                &ns(""),
+            )
+        };
+        item.setTag(RECENT_TAG + index as isize);
+        item.setToolTip(Some(&ns(&folder.path.display().to_string())));
+        let icon = if folder.site.is_some() {
+            util::symbol("server.rack", "Server").unwrap_or_else(util::folder_icon)
+        } else {
+            util::icon_for_path(&folder.path)
+        };
+        icon.setSize(NSSize::new(16.0, 16.0));
+        item.setImage(Some(&icon));
+        unsafe { item.setTarget(Some(delegate)) };
+        menu.addItem(&item);
+    }
+    if recent.is_empty() {
+        let none = NSMenuItem::new(mtm);
+        none.setTitle(&ns("No Recent Folders"));
+        none.setEnabled(false);
+        menu.addItem(&none);
+        return;
+    }
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    let clear = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &ns("Clear Menu"),
+            Some(sel!(clearRecentFolders:)),
+            &ns(""),
+        )
+    };
+    unsafe { clear.setTarget(Some(delegate)) };
+    menu.addItem(&clear);
+}
+
+/// Opens a recent folder in the active pane (connecting to its site).
+fn open_recent(index: usize) {
+    let Some(folder) = current_settings().and_then(|s| s.recent_folders.get(index).cloned()) else { return };
+    match folder.site {
+        Some(site) => open_remote_favorite(&site, &folder.path),
+        None => open_in_active_pane(folder.path),
+    }
+}
+
 /// The saved site a connection was opened from.
 fn site_of(fs: &FsRef) -> Option<String> {
     let app = app()?;
@@ -1660,7 +1788,28 @@ fn delete(pane: &PaneController, paths: Vec<PathBuf>) {
     }
     let fs = pane.fs();
     if fs.is_local() {
-        start_job(Job::local(JobKind::Trash, paths, pane.location()));
+        // Apps' details first: their bundles are gone once trashed.
+        let offer = app().is_some_and(|a| a.settings.borrow().general.app_leftovers);
+        let apps: Vec<(PathBuf, crate::fs::apps::AppInfo)> = if offer {
+            paths.iter().filter_map(|p| Some((p.clone(), crate::fs::apps::app_info(p)?))).collect()
+        } else {
+            Vec::new()
+        };
+        start_job(Job::local(JobKind::Trash, paths.clone(), pane.location()));
+        if !apps.is_empty() {
+            // Once the apps are in the Trash (not if that failed or was
+            // stopped).
+            std::thread::spawn(move || {
+                for _ in 0..120 {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    if apps.iter().all(|(path, _)| path.symlink_metadata().is_err()) {
+                        let apps: Vec<_> = apps.into_iter().map(|(_, app)| app).collect();
+                        DispatchQueue::main().exec_async(move || offer_app_leftovers(&apps, &paths));
+                        return;
+                    }
+                }
+            });
+        }
         return;
     }
     let what = match paths.as_slice() {
@@ -1668,8 +1817,37 @@ fn delete(pane: &PaneController, paths: Vec<PathBuf>) {
         many => format!("{} items", many.len()),
     };
     let message = format!("Delete {what} from {}?", fs.label());
-    if dialogs::confirm(&message, "Servers have no Trash: this cannot be undone.", "Delete", true) {
+    let why = if fs.outside().is_some() {
+        "Items in an archive cannot go to the Trash: this cannot be undone."
+    } else {
+        "Servers have no Trash: this cannot be undone."
+    };
+    if dialogs::confirm(&message, why, "Delete", true) {
         start_job(Job::between(JobKind::Delete, fs.clone(), paths, fs, pane.location()));
+    }
+}
+
+/// After apps went to the Trash: offers to move their leftover files
+/// (settings, caches, and support files in ~/Library) there too.
+fn offer_app_leftovers(apps: &[crate::fs::apps::AppInfo], trashed: &[PathBuf]) {
+    let Some(home) = dirs::home_dir() else { return };
+    let found: Vec<PathBuf> = apps
+        .iter()
+        .flat_map(|app| crate::fs::apps::leftovers(&home, app))
+        .filter(|p| !trashed.iter().any(|t| p.starts_with(t)))
+        .collect();
+    if found.is_empty() {
+        return;
+    }
+    let names = match apps {
+        [one] => format!("\u{201c}{}\u{201d}", one.name),
+        _ => "these apps".to_string(),
+    };
+    let message = format!("Also move the leftover files of {names} to the Trash?");
+    let informative =
+        "Settings, caches, and support files the app kept in your Library folder. Uncheck any you want to keep.";
+    if let Some(chosen) = dialogs::choose_paths(&message, informative, "Move to Trash", "Keep", &found, &home) {
+        start_job(Job::local(JobKind::Trash, chosen, home.join("Library")));
     }
 }
 
@@ -1944,7 +2122,7 @@ fn log_job(job: &Job, outcome: &Outcome) {
     };
     let place =
         |fs: &FsRef, path: &Path| if fs.is_local() { path.display().to_string() } else { fs.display_path(path) };
-    let text = match (job.kind, job.source_fs.is_local(), job.dest_fs.is_local()) {
+    let text = match (job.kind, !on_server(&job.source_fs), !on_server(&job.dest_fs)) {
         (JobKind::Copy, true, false) => format!("Uploaded {what} to {}", place(&job.dest_fs, &job.destination)),
         (JobKind::Copy, false, true) => format!("Downloaded {what} to {}", job.destination.display()),
         (JobKind::Copy, ..) => format!("Copied {what} to {}", place(&job.dest_fs, &job.destination)),
@@ -2666,6 +2844,7 @@ fn command_palette() {
         RemoteFolder(String, PathBuf),
         Synclet(usize),
         SmartFolder(usize),
+        Recent(usize),
         Preset(usize),
         OpenWith(PathBuf, PathBuf),
     }
@@ -2738,6 +2917,13 @@ fn command_palette() {
             .enumerate()
             .map(|(i, f)| item(format!("Open {}", f.name), "Smart folder", Action::SmartFolder(i))),
     );
+    let recent: Vec<_> = settings.recent_folders.iter().map(recent_title).collect();
+    items.extend(
+        recent
+            .into_iter()
+            .enumerate()
+            .map(|(i, title)| item(format!("Go to {title}"), "Recent folder", Action::Recent(i))),
+    );
     // Presets and apps need a selection.
     let pane = app.panes[active].clone();
     let selection = pane.target_paths();
@@ -2774,6 +2960,7 @@ fn command_palette() {
         Some(Action::RemoteFolder(site, path)) => open_remote_favorite(&site, &path),
         Some(Action::Synclet(index)) => open_synclet(index),
         Some(Action::SmartFolder(index)) => search::open_smart_folder(index),
+        Some(Action::Recent(index)) => open_recent(index),
         Some(Action::Preset(index)) => rename_with_preset(&pane, index),
         Some(Action::OpenWith(file, app)) => open_with(&file, &app),
         None => {}
@@ -3135,6 +3322,15 @@ fn pane_sort_changed(index: usize, sort: Sort) {
         settings.right.sort = sort;
     }
     settings.save();
+}
+
+/// Shows a file selected in its folder, in the active pane.
+fn show_in_active_pane(folder: PathBuf, file: &Path) {
+    let Some(app) = app() else { return };
+    let pane = app.panes[app.active.get()].clone();
+    pane.navigate_selecting(vfs::local(), folder, &[file.to_path_buf()]);
+    app.window.makeKeyAndOrderFront(None);
+    pane.focus();
 }
 
 fn open_in_active_pane(path: PathBuf) {

@@ -229,6 +229,27 @@ pub fn edit_smart_folder(index: usize) {
     });
 }
 
+/// The start of a flat view's title.
+const FLAT_PREFIX: &str = "All files in ";
+
+/// View > Flat View: every file in the pane's folder and the folders in it,
+/// in one list (with a column for the folder each is in). Again: back to
+/// the folder.
+pub fn flat_view(pane: &PaneController) {
+    let current = pane.fs().title_for(&pane.location());
+    if current.is_some_and(|t| t.starts_with(FLAT_PREFIX)) {
+        pane.go_back();
+        return;
+    }
+    let fs = pane.fs();
+    let fs = fs.browse_fs().unwrap_or(fs);
+    let root = pane.location();
+    let folder = if root.parent().is_none() && !fs.is_local() { fs.label() } else { title_of(&root) };
+    let query = Query { kind: Kind::Files, include_hidden: pane.show_hidden(), ..Query::default() };
+    let name = format!("{FLAT_PREFIX}{folder}");
+    start(pane.index(), fs, root, folder, query, false, Some(name));
+}
+
 /// Searches in the background and shows the results in a pane (titled
 /// with `name` for a smart folder).
 fn start(
@@ -310,10 +331,11 @@ fn show(
         return;
     }
     if count == 0 {
-        super::dialogs::show_info(
-            format!("Nothing was found for {}.", describe(&query)),
-            format!("Searched \u{201c}{folder}\u{201d} and everything in it."),
-        );
+        let message = match &name {
+            Some(name) if name.starts_with(FLAT_PREFIX) => "There are no files in this folder or below it.".to_string(),
+            _ => format!("Nothing was found for {}.", describe(&query)),
+        };
+        super::dialogs::show_info(message, format!("Searched \u{201c}{folder}\u{201d} and everything in it."));
         return;
     }
     let more = if count >= search::LIMIT || stopped { "+" } else { "" };

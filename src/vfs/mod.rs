@@ -117,6 +117,15 @@ pub trait Vfs: Send + Sync {
     /// responsive. The local file system returns itself.
     fn connect_another(&self) -> io::Result<FsRef>;
 
+    /// A job starts changing this file system: changes may be held until
+    /// `end_changes` (archives write themselves once, at the end).
+    fn begin_changes(&self) {}
+
+    /// The job is done changing it: held changes are written now.
+    fn end_changes(&self) -> io::Result<()> {
+        Ok(())
+    }
+
     /// A link to show or copy: a path, or "sftp://user@host/path".
     fn display_path(&self, path: &Path) -> String;
 

@@ -7,6 +7,16 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-06
+
+### Added
+
+- Flat View (View menu, Option-Command-F): every file in the pane's folder and the folders in it, in one list with a column for the folder each is in. Again goes back to the folder.
+- Go > Recent Folders: the last 15 folders the panes showed, on the Mac and on saved sites, with Clear Menu. They are in the command palette too.
+- Find Duplicates (Commands menu): files with the same contents in a folder on the Mac and everything in it, in groups, the largest waste of space first. Mark copies by hand, or all but the oldest or newest of each group, and move them to the Trash; one copy of each file is always kept.
+- Moving an app to the Trash offers to move its leftover files there too: settings, caches, containers, saved state, and support files in your Library folder, each with a check box (Settings > General can turn this off). Apple's apps are left alone.
+- Zip, tar (plain, gzip, bzip2, or xz), and 7z archives on the Mac can be changed in place: copy or drag items in, rename and delete items, and make folders. A job's changes are written into the archive once, when it is done.
+
 ## [0.12.2] - 2026-11-06
 
 ### Changed
@@ -256,7 +266,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.12.2...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/houseofmackee/forkz/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/houseofmackee/forkz/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/houseofmackee/forkz/compare/v0.12.0...v0.12.1
 [0.12.0]: https://github.com/houseofmackee/forkz/compare/v0.11.1...v0.12.0

@@ -19,6 +19,9 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - Copy, move, duplicate, trash, rename, new file, and new folder, with progress, Stop, Pause, and a conflict dialog (Replace, Replace if Older, Keep Both, Skip, Merge, and "Apply to all")
 - Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files
 - Quick Look, a hidden files toggle, and live updates when folders change
+- Flat View (Option-Command-F): every file in a folder and the folders in it, in one list
+- Go > Recent Folders: the folders you were in lately, on the Mac and on servers
+- Moving an app to the Trash offers to remove the settings, caches, and support files it left in your Library folder
 - Folder sizes, SHA-256 and MD5 checksums, a built-in compare for files and folders (or your own diff tool), Compare Panes, and Open in Terminal with your terminal app
 - Workspaces: saved sets of tabs for both panes, including server folders
 - A transfer queue: speed limits, Pause and Resume, Pause All and Stop All, and waiting transfers that can be started now or moved up and down (right-click a transfer), plus rules for errors
@@ -41,7 +44,7 @@ In a Git repository, the Git column (View > Columns) shows whether each item is 
 
 The preview pane (Shift-Command-P) shows Info, a Quick Look preview, the session's transfers, and a log. It can expand to fill the window (Control-Command-P) and shrink back. For an archive it lists what is inside.
 
-Archives (zip, tar, 7z, rar, iso, and more) open like folders, read-only: copy items out to extract them, on the Mac or on a server. Compress makes zip, tar.gz, 7z, and other archives.
+Archives (zip, tar, 7z, rar, iso, and more) open like folders: copy items out to extract them, on the Mac or on a server. Zip, tar (plain, gzip, bzip2, or xz), and 7z archives on the Mac can also be changed in place: copy or drag items into them, rename and delete items, and make folders. Other formats, and archives on servers, are read-only. Compress makes zip, tar.gz, 7z, and other archives.
 
 ### Rename Multiple Items
 
@@ -87,7 +90,7 @@ Transfers beyond the simultaneous limit (Commands menu, default 2) wait in a que
 
 ![The command palette showing commands and saved sites that match "on"](docs/images/palette.png)
 
-The command palette (Option-Command-P) runs any command and goes anywhere: places, favorites, devices, sites, server folders, synclets, smart folders, and workspaces. It also applies rename presets to the selection and opens the selected file with any app that can open it.
+The command palette (Option-Command-P) runs any command and goes anywhere: places, favorites, recent folders, devices, sites, server folders, synclets, smart folders, and workspaces. It also applies rename presets to the selection and opens the selected file with any app that can open it.
 
 ### Color themes
 
@@ -123,6 +126,12 @@ View (F3) opens a file in a window of its own, on the Mac, on a server, or in an
 ![Settings > Filters with filters for build output, macOS metadata, logs, and version control folders](docs/images/filters.png)
 
 Filters are named sets of patterns, such as `node_modules; target; *.o`, as in FileZilla. Each can hide matching items in the lists, leave them out of the folders you copy (uploads and downloads included), or both, and apply to files, folders, or both. Settings > Filters edits them and comes with a few to start from; View > Use Filename Filters turns them all on or off, and the status line says how many items they hide. Items you choose yourself are always copied, and moves take everything, so nothing is left behind.
+
+### Find Duplicates
+
+![Duplicate photos and a movie in groups, with all but the oldest copy of each marked for the Trash](docs/images/duplicates.png)
+
+Find Duplicates (Commands menu) looks through a folder on the Mac and everything in it for files with the same contents (by size, then by SHA-256), and lists them in groups, the ones that take the most space first. Mark copies by hand, or all but the oldest or newest of each group, and move them to the Trash; one copy of each file is always kept. Double-click a file to show it in the pane.
 
 ### Finder tags and Select Matching
 
@@ -191,6 +200,7 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 | Option-Command-R | Rename multiple items |
 | Command-A | Select all items |
 | Option-Command-A | Select matching items |
+| Option-Command-F | Flat view (again: back to the folder) |
 | Command-F | Filter the list |
 | Shift-Command-F | Search |
 | Option-Command-P | Command palette |

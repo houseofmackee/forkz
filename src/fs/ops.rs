@@ -327,6 +327,13 @@ pub fn run(job: &Job, observer: &mut dyn Observer, cancel: CancelToken) -> Outco
         fxp,
         exclude: if job.kind == JobKind::Copy { job.exclude.clone() } else { None },
     };
+    // Archives write their changes once, when the job is done.
+    let (src, dst) = (runner.src.clone(), runner.dst.clone());
+    let both = !vfs::same(&src, &dst);
+    src.begin_changes();
+    if both {
+        dst.begin_changes();
+    }
     let result = match job.kind {
         JobKind::Trash => runner.trash_all(&job.sources),
         JobKind::Delete => runner.delete_all(&job.sources),
@@ -334,6 +341,11 @@ pub fn run(job: &Job, observer: &mut dyn Observer, cancel: CancelToken) -> Outco
     };
     if result.is_err() {
         runner.outcome.cancelled = true;
+    }
+    for (fs, ends) in [(&src, true), (&dst, both)] {
+        if ends && let Err(e) = fs.end_changes() {
+            runner.outcome.failed.push((job.destination.clone(), format!("The changes could not be saved: {e}")));
+        }
     }
     runner.outcome
 }

@@ -440,6 +440,8 @@ pub fn apply(fs: &FsRef, dir: &Path, planned: &[Planned]) -> (Vec<PathBuf>, Vec<
     // of case only also goes through a temporary name, for volumes that
     // ignore case.)
     let mut second: Vec<(PathBuf, &Planned)> = Vec::new();
+    // In an archive: written once, after all of them.
+    fs.begin_changes();
     for (n, p) in moves.iter().enumerate() {
         let from = dir.join(&p.old);
         if leaving.contains(&p.new.to_lowercase()) {
@@ -465,6 +467,15 @@ pub fn apply(fs: &FsRef, dir: &Path, planned: &[Planned]) -> (Vec<PathBuf>, Vec<
                 failed.push((p.old.clone(), e));
             }
         }
+    }
+    if let Err(e) = fs.end_changes() {
+        // Nothing was renamed after all.
+        failed.extend(done.drain(..).map(|path| {
+            (
+                path.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()),
+                io::Error::new(e.kind(), e.to_string()),
+            )
+        }));
     }
     (done, failed)
 }

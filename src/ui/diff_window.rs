@@ -63,7 +63,7 @@ impl Side {
     }
 }
 
-fn window(title: &str, size: NSSize, mtm: MainThreadMarker) -> Retained<NSWindow> {
+pub(super) fn window(title: &str, size: NSSize, mtm: MainThreadMarker) -> Retained<NSWindow> {
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -82,18 +82,18 @@ fn window(title: &str, size: NSSize, mtm: MainThreadMarker) -> Retained<NSWindow
     window
 }
 
-fn checkbox(title: &str, on: bool, target: &AnyObject, action: objc2::runtime::Sel) -> Retained<NSButton> {
+pub(super) fn checkbox(title: &str, on: bool, target: &AnyObject, action: objc2::runtime::Sel) -> Retained<NSButton> {
     let button = unsafe { NSButton::checkboxWithTitle_target_action(&ns(title), Some(target), Some(action), mtm()) };
     button.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
     button
 }
 
-fn is_on(button: &NSButton) -> bool {
+pub(super) fn is_on(button: &NSButton) -> bool {
     button.state() == NSControlStateValueOn
 }
 
 /// A bar of controls, then a table filling the rest.
-fn layout(window: &NSWindow, controls: &[&NSView], table: &NSTableView) -> Retained<NSScrollView> {
+pub(super) fn layout(window: &NSWindow, controls: &[&NSView], table: &NSTableView) -> Retained<NSScrollView> {
     let mtm = mtm();
     let bar = NSStackView::stackViewWithViews(&NSArray::from_slice(controls), mtm);
     bar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
@@ -114,7 +114,7 @@ fn layout(window: &NSWindow, controls: &[&NSView], table: &NSTableView) -> Retai
     scroll
 }
 
-fn column(table: &NSTableView, id: &str, title: &str, width: f64, fixed: bool) -> Retained<NSTableColumn> {
+pub(super) fn column(table: &NSTableView, id: &str, title: &str, width: f64, fixed: bool) -> Retained<NSTableColumn> {
     let column = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm()), &ns(id));
     column.setTitle(&ns(title));
     column.setWidth(width);
@@ -126,7 +126,7 @@ fn column(table: &NSTableView, id: &str, title: &str, width: f64, fixed: bool) -
 }
 
 /// A reusable text cell of a table.
-fn text_cell(table: &NSTableView, id: &str, font: &NSFont) -> Retained<NSTextField> {
+pub(super) fn text_cell(table: &NSTableView, id: &str, font: &NSFont) -> Retained<NSTextField> {
     let reuse = ns(id);
     let existing: Option<Retained<NSView>> = unsafe { table.makeViewWithIdentifier_owner(&reuse, None) };
     match existing.and_then(|v| v.downcast::<NSTextField>().ok()) {
@@ -141,7 +141,7 @@ fn text_cell(table: &NSTableView, id: &str, font: &NSFont) -> Retained<NSTextFie
     }
 }
 
-fn tint(color: Retained<NSColor>, alpha: f64) -> Retained<NSColor> {
+pub(super) fn tint(color: Retained<NSColor>, alpha: f64) -> Retained<NSColor> {
     color.colorWithAlphaComponent(alpha)
 }
 
@@ -151,7 +151,7 @@ fn monospaced() -> Retained<NSFont> {
 
 /// Finds a window's controller by identity (windows can close before
 /// background work comes back).
-fn find<T: objc2::Message>(
+pub(super) fn find<T: objc2::Message>(
     list: &'static std::thread::LocalKey<RefCell<Vec<Retained<T>>>>,
     me: usize,
 ) -> Option<Retained<T>> {

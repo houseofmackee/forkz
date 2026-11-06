@@ -1,13 +1,18 @@
-//! Archives as read-only folders, through the libarchive that comes with
-//! macOS: zip, tar (plain, gzip, bzip2, xz, zstd), 7z, rar, iso, cpio, xar,
-//! and more. The archive is indexed once when opened (folders it only
-//! implies are filled in); a file's contents are streamed out when read.
+//! Archives as folders, through the libarchive that comes with macOS: zip,
+//! tar (plain, gzip, bzip2, xz, zstd), 7z, rar, iso, cpio, xar, and more.
+//! The archive is indexed once when opened (folders it only implies are
+//! filled in); a file's contents are streamed out when read.
+//!
+//! Zip, tar (plain, gzip, bzip2, xz), and 7z archives on this Mac can also
+//! be changed: items added, renamed, moved, and deleted, and folders made.
+//! Changes are written by making the archive again next to the old one
+//! (which it then replaces); a job's changes are written once, at its end.
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use super::{FsRef, Vfs};
@@ -131,6 +136,12 @@ impl Handle {
 
     /// The next entry's details, or None at the end.
     fn next(&mut self) -> io::Result<Option<Item>> {
+        Ok(self.next_raw()?.map(|(_, item)| item))
+    }
+
+    /// The next entry (libarchive's, valid until the next one) and its
+    /// details, or None at the end.
+    fn next_raw(&mut self) -> io::Result<Option<(*mut RawEntry, Item)>> {
         let mut entry: *mut RawEntry = std::ptr::null_mut();
         match unsafe { archive_read_next_header(self.0, &mut entry) } {
             ARCHIVE_EOF => Ok(None),
@@ -145,14 +156,17 @@ impl Handle {
                     .then(|| unsafe { archive_entry_mtime(entry) })
                     .and_then(|t| u64::try_from(t).ok())
                     .map(|t| SystemTime::UNIX_EPOCH + Duration::from_secs(t));
-                Ok(Some(Item {
-                    path: normalize(&name),
-                    folder: kind == AE_IFDIR || name.ends_with('/'),
-                    link: kind == AE_IFLNK,
-                    size: u64::try_from(unsafe { archive_entry_size(entry) }).unwrap_or(0),
-                    modified,
-                    permissions: u32::from(unsafe { archive_entry_perm(entry) }),
-                }))
+                Ok(Some((
+                    entry,
+                    Item {
+                        path: normalize(&name),
+                        folder: kind == AE_IFDIR || name.ends_with('/'),
+                        link: kind == AE_IFLNK,
+                        size: u64::try_from(unsafe { archive_entry_size(entry) }).unwrap_or(0),
+                        modified,
+                        permissions: u32::from(unsafe { archive_entry_perm(entry) }),
+                    },
+                )))
             }
             _ => Err(self.error("This archive is damaged")),
         }
@@ -187,6 +201,34 @@ impl Read for EntryReader {
     }
 }
 
+/// Where an item's contents come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Source {
+    /// An entry of the archive file, by its path there.
+    Original(PathBuf),
+    /// A folder the archive only implies ("a/b/c.txt" alone).
+    Implied,
+    /// Written since the archive was opened: a temporary file.
+    Staged(PathBuf),
+    /// A folder made since the archive was opened.
+    NewFolder,
+}
+
+#[derive(Debug, Clone)]
+struct Node {
+    entry: Entry,
+    source: Source,
+}
+
+/// What the archive holds now: its items (with changes not yet written
+/// into the file), and how many jobs are changing it.
+struct Model {
+    nodes: BTreeMap<PathBuf, Node>,
+    /// Jobs changing the archive: the file is written once they are done.
+    batch: usize,
+    dirty: bool,
+}
+
 struct Index {
     /// The archive file on this Mac (a temporary copy for archives on
     /// servers or inside other archives).
@@ -194,74 +236,296 @@ struct Index {
     name: String,
     /// Where the archive is, for going up out of it and for addresses.
     outside: Option<(FsRef, PathBuf)>,
-    entries: HashMap<PathBuf, Entry>,
-    children: HashMap<PathBuf, Vec<PathBuf>>,
+    /// How to write it again, for archives that can be changed: on this
+    /// Mac (not a copy), in a format libarchive can write.
+    format: Option<Format>,
+    model: Mutex<Model>,
 }
 
 pub struct ArchiveFs {
     index: Arc<Index>,
 }
 
+/// Reads an archive's items (with the folders it only implies).
+fn read_nodes(file: &Path) -> io::Result<BTreeMap<PathBuf, Node>> {
+    let mut handle = Handle::open(file)?;
+    let mut nodes: BTreeMap<PathBuf, Node> = BTreeMap::new();
+    while let Some(item) = handle.next()? {
+        unsafe { archive_read_data_skip(handle.0) };
+        if item.path == Path::new("/") {
+            continue;
+        }
+        for parent in item.path.ancestors().skip(1).filter(|p| *p != Path::new("/")) {
+            nodes.entry(parent.to_path_buf()).or_insert_with(|| Node {
+                entry: entry(parent, EntryKind::Folder, 0, None, None),
+                source: Source::Implied,
+            });
+        }
+        let permissions = Some(item.permissions);
+        let kind = if item.folder {
+            EntryKind::Folder
+        } else if item.link {
+            EntryKind::Symlink { target_is_folder: false }
+        } else {
+            EntryKind::File
+        };
+        let size = if item.folder { 0 } else { item.size };
+        let node = Node {
+            entry: entry(&item.path, kind, size, item.modified, permissions),
+            source: Source::Original(item.path.clone()),
+        };
+        nodes.insert(item.path, node);
+    }
+    Ok(nodes)
+}
+
 impl ArchiveFs {
     /// Opens `file` (on this Mac). `outside` is where the archive really
-    /// is: the file system and path shown when going up out of it.
+    /// is: the file system and path shown when going up out of it. An
+    /// archive that is that file itself, in a format forkz can write, can
+    /// be changed.
     pub fn open(file: &Path, outside: Option<(FsRef, PathBuf)>) -> io::Result<Arc<ArchiveFs>> {
-        let mut handle = Handle::open(file)?;
-        let mut entries: BTreeMap<PathBuf, Entry> = BTreeMap::new();
-        let add_folder = |entries: &mut BTreeMap<PathBuf, Entry>, path: &Path, modified, permissions| {
-            entries
-                .entry(path.to_path_buf())
-                .or_insert_with(|| entry(path, EntryKind::Folder, 0, modified, permissions));
-        };
-        while let Some(item) = handle.next()? {
-            unsafe { archive_read_data_skip(handle.0) };
-            if item.path == Path::new("/") {
-                continue;
-            }
-            // Folders the archive only implies ("a/b/c.txt" alone).
-            for parent in item.path.ancestors().skip(1).filter(|p| *p != Path::new("/")) {
-                add_folder(&mut entries, parent, None, None);
-            }
-            let permissions = Some(item.permissions);
-            if item.folder {
-                // A folder's own entry brings its date.
-                let folder = entry(&item.path, EntryKind::Folder, 0, item.modified, permissions);
-                entries.insert(item.path, folder);
-            } else {
-                let kind = if item.link { EntryKind::Symlink { target_is_folder: false } } else { EntryKind::File };
-                let file = entry(&item.path, kind, item.size, item.modified, permissions);
-                entries.insert(item.path, file);
-            }
-        }
-        let mut children: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-        for path in entries.keys() {
-            let parent = path.parent().unwrap_or(Path::new("/")).to_path_buf();
-            children.entry(parent).or_default().push(path.clone());
-        }
+        let nodes = read_nodes(file)?;
         let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let name = outside.as_ref().and_then(|(_, p)| p.file_name()).map_or(name, |n| n.to_string_lossy().into_owned());
+        let real = outside.as_ref().is_some_and(|(fs, path)| fs.is_local() && path == file);
+        let format = if real { Format::for_name(&name) } else { None };
         Ok(Arc::new(ArchiveFs {
             index: Arc::new(Index {
                 file: file.to_path_buf(),
                 name,
                 outside,
-                entries: entries.into_iter().collect(),
-                children,
+                format,
+                model: Mutex::new(Model { nodes, batch: 0, dirty: false }),
             }),
         }))
     }
 
+    fn model(&self) -> std::sync::MutexGuard<'_, Model> {
+        self.index.model.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// (files, folders, total size of the files).
     pub fn summary(&self) -> (usize, usize, u64) {
-        let files: Vec<&Entry> = self.index.entries.values().filter(|e| !e.is_folder_like()).collect();
-        (files.len(), self.index.entries.len() - files.len(), files.iter().map(|e| e.size).sum())
+        let model = self.model();
+        let files: Vec<&Entry> = model.nodes.values().map(|n| &n.entry).filter(|e| !e.is_folder_like()).collect();
+        (files.len(), model.nodes.len() - files.len(), files.iter().map(|e| e.size).sum())
     }
 
     /// Every item, in path order.
     pub fn all_entries(&self) -> Vec<Entry> {
-        let mut all: Vec<Entry> = self.index.entries.values().cloned().collect();
-        all.sort_by(|a, b| a.path.cmp(&b.path));
-        all
+        self.model().nodes.values().map(|n| n.entry.clone()).collect()
+    }
+
+    /// The archive can be changed, or why not.
+    fn writable(&self) -> io::Result<Format> {
+        self.index.format.ok_or_else(read_only)
+    }
+
+    /// A folder to put an item in: the top, or a folder in the archive.
+    fn check_parent(model: &Model, path: &Path) -> io::Result<()> {
+        let parent = path.parent().unwrap_or(Path::new("/"));
+        if parent == Path::new("/") || model.nodes.get(parent).is_some_and(|n| n.entry.is_folder_like()) {
+            Ok(())
+        } else {
+            Err(io::Error::new(io::ErrorKind::NotFound, "No such folder in the archive."))
+        }
+    }
+
+    /// A change was made: written into the file now, unless a job is
+    /// still changing the archive.
+    fn changed(&self, model: &mut Model) -> io::Result<()> {
+        model.dirty = true;
+        if model.batch == 0 { self.commit(model) } else { Ok(()) }
+    }
+
+    /// Writes the archive again with the changes: into a new file next to
+    /// it, which then replaces it. If that fails, the changes are dropped
+    /// and the archive stays as it was.
+    fn commit(&self, model: &mut Model) -> io::Result<()> {
+        if !model.dirty {
+            return Ok(());
+        }
+        let format = self.writable()?;
+        let result = rewrite(&self.index.file, format, &model.nodes);
+        let staged: Vec<PathBuf> = model
+            .nodes
+            .values()
+            .filter_map(|n| match &n.source {
+                Source::Staged(temp) => Some(temp.clone()),
+                _ => None,
+            })
+            .collect();
+        model.dirty = false;
+        // What the file holds now (the old contents if writing failed).
+        let reread = read_nodes(&self.index.file);
+        for temp in staged {
+            let _ = std::fs::remove_file(temp);
+        }
+        model.nodes = reread?;
+        result
+    }
+}
+
+/// Writes `file` again holding `nodes`: original entries copied over (under
+/// their new names), then new folders and files.
+fn rewrite(file: &Path, format: Format, nodes: &BTreeMap<PathBuf, Node>) -> io::Result<()> {
+    let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let partial = file.with_file_name(format!(".{name}.forkz-partial"));
+    let result = (|| {
+        let writer = open_writer(&partial, format)?;
+        // Where each original entry went (gone: deleted or replaced).
+        let moved: HashMap<&Path, &Path> = nodes
+            .iter()
+            .filter_map(|(path, node)| match &node.source {
+                Source::Original(original) => Some((original.as_path(), path.as_path())),
+                _ => None,
+            })
+            .collect();
+        let mut buffer = vec![0u8; 256 * 1024];
+        let mut reader = Handle::open(file)?;
+        while let Some((raw, item)) = reader.next_raw()? {
+            let Some(path) = moved.get(item.path.as_path()) else {
+                unsafe { archive_read_data_skip(reader.0) };
+                continue;
+            };
+            let relative = path.strip_prefix("/").unwrap_or(path).to_string_lossy().into_owned();
+            let name =
+                CString::new(if item.folder { format!("{relative}/") } else { relative }).map_err(io::Error::other)?;
+            unsafe { archive_entry_set_pathname_utf8(raw, name.as_ptr()) };
+            writer.check(unsafe { archive_write_header(writer.0, raw) })?;
+            if !item.folder && !item.link {
+                loop {
+                    let n = unsafe { archive_read_data(reader.0, buffer.as_mut_ptr().cast(), buffer.len()) };
+                    if n < 0 {
+                        return Err(reader.error("A file in the archive cannot be read"));
+                    }
+                    if n == 0 {
+                        break;
+                    }
+                    if unsafe { archive_write_data(writer.0, buffer.as_ptr().cast(), n as usize) } < 0 {
+                        return Err(writer.error());
+                    }
+                }
+            }
+            writer.check(unsafe { archive_write_finish_entry(writer.0) })?;
+        }
+        for (path, node) in nodes {
+            let relative = path.strip_prefix("/").unwrap_or(path).to_string_lossy().into_owned();
+            let modified = node.entry.modified.unwrap_or_else(SystemTime::now);
+            let seconds = modified.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs()) as libc::time_t;
+            match &node.source {
+                Source::Original(_) => continue,
+                Source::Implied | Source::NewFolder => {
+                    let name = CString::new(format!("{relative}/")).map_err(io::Error::other)?;
+                    let entry = unsafe { archive_entry_new() };
+                    unsafe {
+                        archive_entry_set_pathname_utf8(entry, name.as_ptr());
+                        archive_entry_set_filetype(entry, AE_IFDIR);
+                        archive_entry_set_perm(entry, 0o755);
+                        archive_entry_set_mtime(entry, seconds, 0);
+                    }
+                    let header = writer.check(unsafe { archive_write_header(writer.0, entry) });
+                    unsafe { archive_entry_free(entry) };
+                    header?;
+                }
+                Source::Staged(temp) => {
+                    let mut input = std::fs::File::open(temp)?;
+                    let size = input.metadata()?.len();
+                    let name = CString::new(relative).map_err(io::Error::other)?;
+                    let entry = unsafe { archive_entry_new() };
+                    unsafe {
+                        archive_entry_set_pathname_utf8(entry, name.as_ptr());
+                        archive_entry_set_filetype(entry, AE_IFREG);
+                        archive_entry_set_perm(
+                            entry,
+                            node.entry.permissions.map_or(0o644, |p| p & 0o7777) as libc::mode_t,
+                        );
+                        archive_entry_set_size(entry, size as i64);
+                        archive_entry_set_mtime(entry, seconds, 0);
+                    }
+                    let header = writer.check(unsafe { archive_write_header(writer.0, entry) });
+                    unsafe { archive_entry_free(entry) };
+                    header?;
+                    loop {
+                        let n = input.read(&mut buffer)?;
+                        if n == 0 {
+                            break;
+                        }
+                        if unsafe { archive_write_data(writer.0, buffer.as_ptr().cast(), n) } < 0 {
+                            return Err(writer.error());
+                        }
+                    }
+                }
+            }
+            writer.check(unsafe { archive_write_finish_entry(writer.0) })?;
+        }
+        writer.check(unsafe { archive_write_close(writer.0) })?;
+        writer.1.set(true);
+        Ok(())
+    })();
+    match result {
+        Ok(()) => std::fs::rename(&partial, file),
+        Err(e) => {
+            let _ = std::fs::remove_file(&partial);
+            Err(e)
+        }
+    }
+}
+
+/// A file being written into an archive: kept in a temporary file, and
+/// put into the archive when flushed or closed.
+struct StagedWriter {
+    fs: ArchiveFs,
+    path: PathBuf,
+    temp: PathBuf,
+    file: std::fs::File,
+    /// Written to since last put into the archive.
+    fresh: bool,
+}
+
+impl StagedWriter {
+    /// Puts the file (as it is now) into the archive's items.
+    fn stage(&mut self) -> io::Result<()> {
+        self.file.flush()?;
+        self.fresh = false;
+        let size = self.file.metadata()?.len();
+        let mut model = self.fs.model();
+        let modified = Some(SystemTime::now());
+        let old = model.nodes.insert(
+            self.path.clone(),
+            Node {
+                entry: entry(&self.path, EntryKind::File, size, modified, Some(0o644)),
+                source: Source::Staged(self.temp.clone()),
+            },
+        );
+        if let Some(Node { source: Source::Staged(previous), .. }) = old
+            && previous != self.temp
+        {
+            let _ = std::fs::remove_file(previous);
+        }
+        self.fs.changed(&mut model)
+    }
+}
+
+impl Write for StagedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.fresh = true;
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.stage()
+    }
+}
+
+impl Drop for StagedWriter {
+    fn drop(&mut self) {
+        if self.fresh
+            && let Err(e) = self.stage()
+        {
+            tracing::warn!("{} could not be added to the archive: {e}", self.path.display());
+        }
     }
 }
 
@@ -282,7 +546,14 @@ fn entry(path: &Path, kind: EntryKind, size: u64, modified: Option<SystemTime>, 
 }
 
 fn read_only() -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, "Archives are read-only in forkz.")
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "This archive cannot be changed: only zip, tar (with gzip, bzip2, or xz), and 7z archives on this Mac can.",
+    )
+}
+
+fn not_found() -> io::Error {
+    io::Error::new(io::ErrorKind::NotFound, "No such item in the archive.")
 }
 
 impl Vfs for ArchiveFs {
@@ -306,44 +577,109 @@ impl Vfs for ArchiveFs {
     }
 
     fn list(&self, dir: &Path) -> io::Result<Vec<Entry>> {
-        if dir != Path::new("/") && !self.index.entries.get(dir).is_some_and(Entry::is_folder_like) {
+        let model = self.model();
+        if dir != Path::new("/") && !model.nodes.get(dir).is_some_and(|n| n.entry.is_folder_like()) {
             return Err(io::Error::new(io::ErrorKind::NotFound, "No such folder in the archive."));
         }
-        let children = self.index.children.get(dir).map(Vec::as_slice).unwrap_or_default();
-        Ok(children.iter().filter_map(|p| self.index.entries.get(p).cloned()).collect())
+        Ok(model
+            .nodes
+            .range(dir.to_path_buf()..)
+            .skip_while(|(path, _)| path.as_path() == dir)
+            .take_while(|(path, _)| path.starts_with(dir))
+            .filter(|(path, _)| path.parent() == Some(dir))
+            .map(|(_, node)| node.entry.clone())
+            .collect())
     }
 
     fn stat(&self, path: &Path) -> io::Result<Entry> {
         if path == Path::new("/") {
             return Ok(entry(Path::new("/"), EntryKind::Folder, 0, None, None));
         }
-        self.index
-            .entries
-            .get(path)
-            .cloned()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No such item in the archive."))
+        self.model().nodes.get(path).map(|n| n.entry.clone()).ok_or_else(not_found)
     }
 
-    fn create_dir(&self, _path: &Path) -> io::Result<()> {
-        Err(read_only())
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        self.writable()?;
+        let mut model = self.model();
+        if model.nodes.contains_key(path) {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "An item with this name is already there."));
+        }
+        Self::check_parent(&model, path)?;
+        let folder = entry(path, EntryKind::Folder, 0, Some(SystemTime::now()), Some(0o755));
+        model.nodes.insert(path.to_path_buf(), Node { entry: folder, source: Source::NewFolder });
+        self.changed(&mut model)
     }
 
-    fn rename(&self, _from: &Path, _to: &Path) -> io::Result<()> {
-        Err(read_only())
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.writable()?;
+        let mut model = self.model();
+        if !model.nodes.contains_key(from) {
+            return Err(not_found());
+        }
+        if model.nodes.contains_key(to) {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "An item with this name is already there."));
+        }
+        if to.starts_with(from) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "A folder cannot go into itself."));
+        }
+        Self::check_parent(&model, to)?;
+        // The item and everything in it.
+        let moving: Vec<PathBuf> = model.nodes.keys().filter(|p| p.starts_with(from)).cloned().collect();
+        for old in moving {
+            if let Some(mut node) = model.nodes.remove(&old) {
+                let new = to.join(old.strip_prefix(from).unwrap_or(Path::new("")));
+                let new = if new.as_os_str().is_empty() { to.to_path_buf() } else { new };
+                let new = PathBuf::from(new.to_string_lossy().trim_end_matches('/'));
+                node.entry.name = new.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                node.entry.hidden = node.entry.name.starts_with('.');
+                node.entry.path = new.clone();
+                model.nodes.insert(new, node);
+            }
+        }
+        self.changed(&mut model)
     }
 
-    fn remove_file(&self, _path: &Path) -> io::Result<()> {
-        Err(read_only())
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.writable()?;
+        let mut model = self.model();
+        match model.nodes.get(path) {
+            None => return Err(not_found()),
+            Some(node) if node.entry.is_folder_like() => {
+                return Err(io::Error::new(io::ErrorKind::IsADirectory, "This is a folder."));
+            }
+            Some(_) => {}
+        }
+        if let Some(Node { source: Source::Staged(temp), .. }) = model.nodes.remove(path) {
+            let _ = std::fs::remove_file(temp);
+        }
+        self.changed(&mut model)
     }
 
-    fn remove_dir(&self, _path: &Path) -> io::Result<()> {
-        Err(read_only())
+    fn remove_dir(&self, path: &Path) -> io::Result<()> {
+        self.writable()?;
+        let mut model = self.model();
+        if !model.nodes.get(path).is_some_and(|n| n.entry.is_folder_like()) {
+            return Err(not_found());
+        }
+        if model.nodes.keys().any(|p| p != path && p.starts_with(path)) {
+            return Err(io::Error::new(io::ErrorKind::DirectoryNotEmpty, "The folder is not empty."));
+        }
+        model.nodes.remove(path);
+        self.changed(&mut model)
     }
 
     fn open_read(&self, path: &Path) -> io::Result<Box<dyn Read + Send>> {
+        let source = self.model().nodes.get(path).map(|n| n.source.clone()).ok_or_else(not_found)?;
+        let original = match source {
+            Source::Staged(temp) => return Ok(Box::new(std::fs::File::open(temp)?)),
+            Source::Original(original) => original,
+            Source::Implied | Source::NewFolder => {
+                return Err(io::Error::new(io::ErrorKind::IsADirectory, "This is a folder."));
+            }
+        };
         let mut handle = Handle::open(&self.index.file)?;
         while let Some(item) = handle.next()? {
-            if item.path == path && !item.folder {
+            if item.path == original && !item.folder {
                 return Ok(Box::new(EntryReader { handle }));
             }
             unsafe { archive_read_data_skip(handle.0) };
@@ -351,12 +687,48 @@ impl Vfs for ArchiveFs {
         Err(io::Error::new(io::ErrorKind::NotFound, "No such file in the archive."))
     }
 
-    fn open_write(&self, _path: &Path) -> io::Result<Box<dyn Write + Send>> {
-        Err(read_only())
+    fn open_write(&self, path: &Path) -> io::Result<Box<dyn Write + Send>> {
+        self.writable()?;
+        {
+            let model = self.model();
+            Self::check_parent(&model, path)?;
+            if model.nodes.get(path).is_some_and(|n| n.entry.is_folder_like()) {
+                return Err(io::Error::new(io::ErrorKind::IsADirectory, "A folder has this name."));
+            }
+        }
+        let folder = std::env::temp_dir().join("forkz-archive-edits");
+        std::fs::create_dir_all(&folder)?;
+        let temp = folder.join(crate::sites::new_id());
+        let file = std::fs::File::create(&temp)?;
+        Ok(Box::new(StagedWriter {
+            fs: ArchiveFs { index: self.index.clone() },
+            path: path.to_path_buf(),
+            temp,
+            file,
+            fresh: true,
+        }))
     }
 
-    fn set_attributes(&self, _path: &Path, _modified: Option<SystemTime>, _permissions: Option<u32>) -> io::Result<()> {
-        Err(read_only())
+    fn set_attributes(&self, path: &Path, modified: Option<SystemTime>, _permissions: Option<u32>) -> io::Result<()> {
+        self.writable()?;
+        let mut model = self.model();
+        let node = model.nodes.get_mut(path).ok_or_else(not_found)?;
+        // Only new files take a date (original entries keep theirs).
+        if matches!(node.source, Source::Staged(_)) && modified.is_some() {
+            node.entry.modified = modified;
+            return self.changed(&mut model);
+        }
+        Ok(())
+    }
+
+    fn begin_changes(&self) {
+        self.model().batch += 1;
+    }
+
+    fn end_changes(&self) -> io::Result<()> {
+        let mut model = self.model();
+        model.batch = model.batch.saturating_sub(1);
+        if model.batch == 0 { self.commit(&mut model) } else { Ok(()) }
     }
 
     fn connect_another(&self) -> io::Result<FsRef> {
@@ -377,7 +749,7 @@ impl Vfs for ArchiveFs {
     }
 
     fn read_only(&self) -> bool {
-        true
+        self.index.format.is_none()
     }
 
     fn outside(&self) -> Option<(FsRef, PathBuf)> {
@@ -444,6 +816,29 @@ impl Writer {
     }
 }
 
+/// Starts writing an archive file in a format.
+fn open_writer(file: &Path, format: Format) -> io::Result<Writer> {
+    let writer = Writer(unsafe { archive_write_new() }, std::cell::Cell::new(false));
+    unsafe {
+        let a = writer.0;
+        let set = match format {
+            Format::Zip => archive_write_set_format_zip(a),
+            Format::SevenZip => archive_write_set_format_7zip(a),
+            _ => archive_write_set_format_pax_restricted(a),
+        };
+        writer.check(set)?;
+        match format {
+            Format::TarGz => writer.check(archive_write_add_filter_gzip(a))?,
+            Format::TarBz2 => writer.check(archive_write_add_filter_bzip2(a))?,
+            Format::TarXz => writer.check(archive_write_add_filter_xz(a))?,
+            _ => {}
+        }
+        let path = CString::new(file.as_os_str().as_encoded_bytes()).map_err(io::Error::other)?;
+        writer.check(archive_write_open_filename(a, path.as_ptr()))?;
+    }
+    Ok(writer)
+}
+
 /// Makes an archive at `destination` (its name decides the format) of
 /// `sources` and everything in them, named relative to their folder.
 /// `progress` gets the bytes written so far; returning false stops.
@@ -470,24 +865,7 @@ fn write_archive(
     format: Format,
     progress: &mut dyn FnMut(u64) -> bool,
 ) -> io::Result<()> {
-    let writer = Writer(unsafe { archive_write_new() }, std::cell::Cell::new(false));
-    unsafe {
-        let a = writer.0;
-        let set = match format {
-            Format::Zip => archive_write_set_format_zip(a),
-            Format::SevenZip => archive_write_set_format_7zip(a),
-            _ => archive_write_set_format_pax_restricted(a),
-        };
-        writer.check(set)?;
-        match format {
-            Format::TarGz => writer.check(archive_write_add_filter_gzip(a))?,
-            Format::TarBz2 => writer.check(archive_write_add_filter_bzip2(a))?,
-            Format::TarXz => writer.check(archive_write_add_filter_xz(a))?,
-            _ => {}
-        }
-        let path = CString::new(file.as_os_str().as_encoded_bytes()).map_err(io::Error::other)?;
-        writer.check(archive_write_open_filename(a, path.as_ptr()))?;
-    }
+    let writer = open_writer(file, format)?;
     let mut written = 0u64;
     let mut buffer = vec![0u8; 256 * 1024];
     for source in sources {
@@ -698,6 +1076,56 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert!(!stopped.exists() && !dir.path().join(".stopped.zip.forkz-partial").exists());
         assert!(compress(&sources, &dir.path().join("out.rar"), &mut |_| true).is_err());
+    }
+
+    #[test]
+    fn changes_archives_in_place() {
+        let dir = sample();
+        let src = dir.path().join("src");
+        let sources = vec![src.join("a.txt"), src.join("docs")];
+        for name in ["edit.zip", "edit.tar.gz", "edit.7z", "edit.tar"] {
+            let file = dir.path().join(name);
+            compress(&sources, &file, &mut |_| true).unwrap();
+            let open = || ArchiveFs::open(&file, Some((crate::vfs::local(), file.clone()))).unwrap();
+            let fs = open();
+            assert!(!fs.read_only(), "{name}");
+            // One change at a time: written right away.
+            fs.create_dir(Path::new("/new")).unwrap();
+            fs.rename(Path::new("/docs"), Path::new("/new/docs")).unwrap();
+            fs.remove_file(Path::new("/a.txt")).unwrap();
+            let mut writer = fs.open_write(Path::new("/new/added.txt")).unwrap();
+            writer.write_all(b"delta").unwrap();
+            writer.flush().unwrap();
+            drop(writer);
+            // As a job does: held, then written once.
+            fs.begin_changes();
+            let mut writer = fs.open_write(Path::new("/new/.part")).unwrap();
+            writer.write_all(b"echo").unwrap();
+            drop(writer);
+            fs.rename(Path::new("/new/.part"), Path::new("/echo.txt")).unwrap();
+            assert_eq!(read(&fs, "/echo.txt"), "echo", "{name}: readable before it is written");
+            fs.end_changes().unwrap();
+
+            // Read back from the file itself.
+            let fresh = open();
+            assert_eq!(names(&fresh, "/"), [("echo.txt".into(), false), ("new".into(), true)], "{name}");
+            assert_eq!(names(&fresh, "/new"), [("added.txt".into(), false), ("docs".into(), true)], "{name}");
+            assert_eq!(read(&fresh, "/new/added.txt"), "delta", "{name}");
+            assert_eq!(read(&fresh, "/new/docs/b.md"), "# bravo", "{name}");
+            let deep = fresh.list(Path::new("/new/docs/deep")).unwrap().remove(0).path;
+            assert_eq!(read(&fresh, &deep.to_string_lossy()).len(), 70_000, "{name}");
+            // Deleting a folder: its items first, then the folder.
+            fresh.remove_file(&deep).unwrap();
+            fresh.remove_dir(Path::new("/new/docs/deep")).unwrap();
+            assert!(fresh.remove_dir(Path::new("/new")).is_err(), "{name}: not empty");
+            assert_eq!(names(&open(), "/new/docs"), [("b.md".into(), false)], "{name}");
+            assert!(!dir.path().join(format!(".{name}.forkz-partial")).exists());
+        }
+        // Copies, and formats libarchive cannot write, stay read-only.
+        let zip = dir.path().join("edit.zip");
+        let copy = ArchiveFs::open(&zip, None).unwrap();
+        assert!(copy.read_only());
+        assert!(copy.create_dir(Path::new("/x")).is_err());
     }
 
     #[test]

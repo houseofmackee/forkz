@@ -43,6 +43,7 @@ const ERROR_RULES: [(&str, &str); 3] =
 struct Controls {
     show_hidden: Retained<NSButton>,
     start_on_parent: Retained<NSButton>,
+    app_leftovers: Retained<NSButton>,
     terminal: Retained<NSPopUpButton>,
     terminals: Vec<&'static str>,
     compare: Retained<NSPopUpButton>,
@@ -272,6 +273,11 @@ impl SettingsWindow {
         let controls = Controls {
             show_hidden: checkbox("Show hidden files", self, mtm),
             start_on_parent: checkbox("Select \u{201c}..\u{201d} when opening a folder", self, mtm),
+            app_leftovers: checkbox(
+                "Offer to remove an app\u{2019}s leftover files when it goes to the Trash",
+                self,
+                mtm,
+            ),
             terminal: popup(&terminal_names, self, mtm),
             terminals: terminals.iter().map(|t| t.0).collect(),
             compare: popup(&compare_names, self, mtm),
@@ -366,6 +372,7 @@ impl SettingsWindow {
             vec![
                 (label("Files:", mtm), view(&*controls.show_hidden)),
                 (empty(mtm), view(&*controls.start_on_parent)),
+                (label("Apps:", mtm), view(&*controls.app_leftovers)),
                 (label("Open in Terminal uses:", mtm), view(&*controls.terminal)),
                 (label("Compare Files uses:", mtm), view(&*controls.compare)),
                 (label("Updates:", mtm), view(&*controls.auto_updates)),
@@ -560,6 +567,7 @@ impl SettingsWindow {
         let set = |b: &NSButton, on: bool| b.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
         set(&c.show_hidden, settings.show_hidden);
         set(&c.start_on_parent, settings.general.start_on_parent);
+        set(&c.app_leftovers, settings.general.app_leftovers);
         let terminal = c.terminals.iter().position(|k| *k == settings.general.terminal).unwrap_or(0);
         c.terminal.selectItemAtIndex(terminal as isize);
         let compare = c.compare_tools.iter().position(|k| *k == settings.general.compare_tool).unwrap_or(0);
@@ -614,6 +622,7 @@ impl SettingsWindow {
         super::update_settings(|s| {
             s.show_hidden = show_hidden;
             s.general.start_on_parent = on(&c.start_on_parent);
+            s.general.app_leftovers = on(&c.app_leftovers);
             if let Some(key) = c.terminals.get(index(&c.terminal)) {
                 s.general.terminal = key.to_string();
             }

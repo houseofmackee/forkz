@@ -49,7 +49,20 @@ pub struct Settings {
     pub synclets: Vec<Synclet>,
     /// Saved searches, in the sidebar.
     pub smart_folders: Vec<SmartFolder>,
+    /// Folders the panes showed, the latest first (Go > Recent Folders).
+    pub recent_folders: Vec<RecentFolder>,
 }
+
+/// A folder a pane showed: on the Mac, or on a saved site.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RecentFolder {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<String>,
+    pub path: PathBuf,
+}
+
+/// How many recent folders are kept.
+pub const RECENT_FOLDERS: usize = 15;
 
 /// A saved search on the Mac: clicking it in the sidebar searches again.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -164,11 +177,18 @@ pub struct GeneralSettings {
     pub terminal: String,
     /// The tool for Compare Files (a key of `COMPARE_TOOLS`).
     pub compare_tool: String,
+    /// Moving an app to the Trash offers to remove its leftover files.
+    pub app_leftovers: bool,
 }
 
 impl Default for GeneralSettings {
     fn default() -> Self {
-        GeneralSettings { start_on_parent: false, terminal: "terminal".into(), compare_tool: "forkz".into() }
+        GeneralSettings {
+            start_on_parent: false,
+            terminal: "terminal".into(),
+            compare_tool: "forkz".into(),
+            app_leftovers: true,
+        }
     }
 }
 
@@ -364,6 +384,7 @@ impl Default for Settings {
             sync: crate::fs::sync::Options::default(),
             synclets: Vec::new(),
             smart_folders: Vec::new(),
+            recent_folders: Vec::new(),
         }
     }
 }

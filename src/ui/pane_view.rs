@@ -1656,6 +1656,14 @@ impl PaneController {
             self.sync_icons();
         }
         self.update_git();
+        // Go > Recent Folders (once the folder could be listed).
+        let listed = {
+            let state = self.ivars().state.borrow();
+            !state.loading && state.error.is_none()
+        };
+        if listed {
+            super::note_recent_folder(&self.fs(), &self.location());
+        }
     }
 
     /// Runs `git status` in the background for the Git column (when it
