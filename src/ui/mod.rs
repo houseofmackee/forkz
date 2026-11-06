@@ -631,8 +631,11 @@ fn build_window(
     main_split.addSubview(&preview.view());
     sidebar_view.widthAnchor().constraintGreaterThanOrEqualToConstant(130.0).setActive(true);
     sidebar_view.widthAnchor().constraintLessThanOrEqualToConstant(320.0).setActive(true);
-    let widest = preview.view().widthAnchor().constraintLessThanOrEqualToConstant(520.0);
-    // Turned off while the preview fills the window.
+    // At most half the window (turned off while the preview fills it).
+    let widest = preview
+        .view()
+        .widthAnchor()
+        .constraintLessThanOrEqualToAnchor_multiplier(&main_split.widthAnchor(), PREVIEW_MAX_SHARE);
     widest.setIdentifier(Some(&ns(PREVIEW_MAX_WIDTH)));
     widest.setActive(true);
     // Resizing the window resizes the panes, not the sidebar or preview.
@@ -2952,9 +2955,13 @@ fn add_new_toolbar_items(app: &App) {
 /// The identifier of the preview pane's maximum width constraint.
 const PREVIEW_MAX_WIDTH: &str = "forkz.preview.max-width";
 
-/// Turns the preview pane's maximum width on or off.
-fn limit_preview_width(preview: &NSView, on: bool) {
-    for constraint in preview.constraints().iter() {
+/// The preview pane's widest: this share of the window.
+const PREVIEW_MAX_SHARE: f64 = 0.5;
+
+/// Turns the preview pane's maximum width on or off (the constraint is
+/// kept by the split view, as it relates the preview to it).
+fn limit_preview_width(split: &NSSplitView, on: bool) {
+    for constraint in split.constraints().iter() {
         if constraint.identifier().is_some_and(|i| i.to_string() == PREVIEW_MAX_WIDTH) {
             constraint.setActive(on);
         }
@@ -2981,7 +2988,7 @@ pub fn toggle_preview_expanded() {
                 toggle_preview();
             }
             PREVIEW_EXPANDED.with(|e| e.set(Some((!sidebar.isHidden(), preview.frame().size.width))));
-            limit_preview_width(&preview, false);
+            limit_preview_width(&split, false);
             sidebar.setHidden(true);
             panes.setHidden(true);
             split.adjustSubviews();
@@ -2989,7 +2996,7 @@ pub fn toggle_preview_expanded() {
             app.window.makeFirstResponder(Some(&preview));
         }
         Some((sidebar_shown, width)) => {
-            limit_preview_width(&preview, true);
+            limit_preview_width(&split, true);
             panes.setHidden(false);
             sidebar.setHidden(!sidebar_shown);
             split.adjustSubviews();
@@ -3022,8 +3029,8 @@ pub fn toggle_preview() {
         split.adjustSubviews();
         if show {
             split.layoutSubtreeIfNeeded();
-            let width = app.settings.borrow().preview.width.clamp(220.0, 520.0);
             let total = split.frame().size.width;
+            let width = app.settings.borrow().preview.width.clamp(220.0, (total * PREVIEW_MAX_SHARE).max(220.0));
             split.setPosition_ofDividerAtIndex(total - width - split.dividerThickness(), 1);
             split.layoutSubtreeIfNeeded();
         }
