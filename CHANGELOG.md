@@ -7,6 +7,12 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.16.2] - 2026-11-07
+
+### Added
+
+- A Help menu: macOS's search field for finding any command, forkz Help, Keyboard Shortcuts, What's New in forkz, All Release Notes, Report an Issue, forkz on GitHub, and Customize Keyboard Shortcuts.
+
 ## [0.16.1] - 2026-11-07
 
 ### Added
@@ -323,7 +329,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.16.1...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.16.2...HEAD
+[0.16.2]: https://github.com/houseofmackee/forkz/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/houseofmackee/forkz/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/houseofmackee/forkz/compare/v0.15.2...v0.16.0
 [0.15.2]: https://github.com/houseofmackee/forkz/compare/v0.15.1...v0.15.2

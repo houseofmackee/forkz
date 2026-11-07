@@ -141,6 +141,17 @@ define_class!(
             workspaces::delete((sender.tag() - WORKSPACE_TAG) as usize);
         }
 
+        /// Help menu links.
+        #[unsafe(method(openHelpLink:))]
+        fn open_help_link_menu(&self, sender: &NSMenuItem) {
+            open_help_link((sender.tag() - HELP_TAG) as usize);
+        }
+
+        #[unsafe(method(editShortcuts:))]
+        fn edit_shortcuts(&self, _sender: Option<&AnyObject>) {
+            settings_window::show_tab("Shortcuts");
+        }
+
         /// Go > Recent Folders.
         #[unsafe(method(openRecentFolder:))]
         fn open_recent_folder(&self, sender: &NSMenuItem) {
@@ -335,6 +346,7 @@ pub fn toggle_column(local: bool, id: &str) {
 const WORKSPACE_TAG: isize = 3000;
 const RECENT_TAG: isize = 4000;
 const TOOL_TAG: isize = 5000;
+const HELP_TAG: isize = 6000;
 /// Toolbar items for tools: this and the tool's name.
 const TOOL_ITEM_PREFIX: &str = "forkz.tool.";
 
@@ -1082,7 +1094,51 @@ fn main_menu(
     workspace_item.setSubmenu(Some(&workspace_menu));
     window.addItem(&workspace_item);
     NSApplication::sharedApplication(mtm).setWindowsMenu(Some(&window));
+
+    // Help: macOS adds its search field (it finds menu commands).
+    let help = submenu("Help");
+    for (index, (title, symbol, _)) in HELP_LINKS.iter().enumerate() {
+        if title.is_empty() {
+            separator(&help);
+            continue;
+        }
+        // Command-? stays macOS's: it opens the search field.
+        let item = standard(&help, title, sel!(openHelpLink:), "");
+        item.setTag(HELP_TAG + index as isize);
+        if let Some(icon) = util::symbol(symbol, title) {
+            item.setImage(Some(&icon));
+        }
+        unsafe { item.setTarget(Some(delegate)) };
+    }
+    let shortcuts = standard(&help, "Customize Keyboard Shortcuts\u{2026}", sel!(editShortcuts:), "");
+    if let Some(icon) = util::symbol("keyboard", "Shortcuts") {
+        shortcuts.setImage(Some(&icon));
+    }
+    unsafe { shortcuts.setTarget(Some(delegate)) };
+    NSApplication::sharedApplication(mtm).setHelpMenu(Some(&help));
     bar
+}
+
+/// The Help menu's links: title, SF Symbol, and address ("" title: a
+/// separator). "{version}" is this version.
+const HELP_LINKS: &[(&str, &str, &str)] = &[
+    ("forkz Help", "questionmark.circle", "https://github.com/houseofmackee/forkz#readme"),
+    ("Keyboard Shortcuts", "keyboard", "https://github.com/houseofmackee/forkz#keyboard"),
+    ("What\u{2019}s New in forkz", "sparkles", "https://github.com/houseofmackee/forkz/releases/tag/v{version}"),
+    ("All Release Notes", "list.bullet.rectangle", "https://github.com/houseofmackee/forkz/blob/main/CHANGELOG.md"),
+    ("", "", ""),
+    ("Report an Issue\u{2026}", "exclamationmark.bubble", "https://github.com/houseofmackee/forkz/issues/new"),
+    ("forkz on GitHub", "chevron.left.forwardslash.chevron.right", "https://github.com/houseofmackee/forkz"),
+    ("", "", ""),
+];
+
+/// Opens a Help menu link in the browser.
+fn open_help_link(index: usize) {
+    let Some((_, _, address)) = HELP_LINKS.get(index) else { return };
+    let address = address.replace("{version}", env!("CARGO_PKG_VERSION"));
+    if let Some(url) = objc2_foundation::NSURL::URLWithString(&ns(&address)) {
+        NSWorkspace::sharedWorkspace().openURL(&url);
+    }
 }
 
 fn is_enabled(command: Command) -> bool {

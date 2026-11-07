@@ -274,7 +274,7 @@ Settings > Tools holds your own commands, run by zsh in the pane's folder on the
 | Control-Tab, Control-Shift-Tab | Next tab, previous tab |
 | Command-comma | Settings |
 
-Settings > Shortcuts changes any of the menu shortcuts.
+Settings > Shortcuts changes any of the menu shortcuts. To find a command, type its name in the Help menu's search field (Shift-Command-/): it shows where the command is in the menus.
 
 ## Requirements
 
