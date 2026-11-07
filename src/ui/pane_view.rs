@@ -1605,8 +1605,22 @@ impl PaneController {
     /// Updates the list from the state, then selects `select` (or keeps
     /// the selection if None).
     fn refresh(&self, select: Option<&[PathBuf]>) {
-        let keep = if select.is_none() { self.selected_paths() } else { Vec::new() };
-        let first_row = self.table().selectedRow();
+        self.refresh_from(select, None);
+    }
+
+    /// The first selected row (selectedRow is the last one), or -1.
+    fn first_selected_row(&self) -> NSInteger {
+        let rows = self.table().selectedRowIndexes();
+        if rows.count() == 0 { -1 } else { rows.firstIndex() as NSInteger }
+    }
+
+    /// `refresh`, with the selection as it was before the listing changed
+    /// (paths and first row), if it did.
+    fn refresh_from(&self, select: Option<&[PathBuf]>, previous: Option<(Vec<PathBuf>, NSInteger)>) {
+        let (keep, first_row) = match previous {
+            Some((paths, row)) => (if select.is_none() { paths } else { Vec::new() }, row),
+            None => (if select.is_none() { self.selected_paths() } else { Vec::new() }, self.first_selected_row()),
+        };
         // Another tab may show (each keeps the pane's grouping).
         self.ivars().state.borrow_mut().set_group_by(self.ivars().group.get(), kind_of);
         let (exclusions, version) = super::listing_exclusions();
@@ -2032,8 +2046,11 @@ impl PaneController {
         if let Some(columns) = self.ivars().columns.get() {
             columns.forget_listings();
         }
+        // The selection by path, before the listing changes under it (its
+        // rows would then be other items).
+        let previous = (self.selected_paths(), self.first_selected_row());
         self.ivars().state.borrow_mut().load();
-        self.refresh(None);
+        self.refresh_from(None, Some(previous));
         self.start_loading();
     }
 

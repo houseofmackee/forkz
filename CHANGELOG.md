@@ -7,6 +7,12 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.15.2] - 2026-11-07
+
+### Fixed
+
+- After moving (or deleting) several selected items, the source pane selected other items that had taken their rows; it now selects just the item that took the first one's place.
+
 ## [0.15.1] - 2026-11-07
 
 ### Added
@@ -293,7 +299,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.15.2...HEAD
+[0.15.2]: https://github.com/houseofmackee/forkz/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/houseofmackee/forkz/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/houseofmackee/forkz/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/houseofmackee/forkz/compare/v0.13.0...v0.14.0
