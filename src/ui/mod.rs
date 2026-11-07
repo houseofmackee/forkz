@@ -7,6 +7,7 @@ pub mod commands;
 mod custom_tools;
 mod dialogs;
 mod diff_window;
+mod drop_stack;
 mod duplicates_window;
 mod file_viewer;
 mod filters_editor;
@@ -31,6 +32,7 @@ mod theme_editor;
 mod themed;
 mod tools;
 mod tools_editor;
+mod usage_window;
 mod util;
 mod viewer;
 mod workspaces;
@@ -446,6 +448,7 @@ pub fn command_title(command: Command, pane: usize) -> String {
         Command::CopyPath if !here => "Copy Server Link",
         Command::CloseTab if app.panes[pane].tab_count() <= 1 => "Close Window",
         Command::TogglePreview if !app.preview.view().isHidden() => "Hide Preview Pane",
+        Command::ShowDropStack if drop_stack::is_shown() => "Hide Drop Stack",
         Command::Disconnect if app.panes[pane].fs().outside().is_some() => "Close Archive",
         Command::ToggleLeftPane | Command::ToggleRightPane if app.settings.borrow().stacked_panes => {
             let hidden = app.panes[usize::from(command == Command::ToggleRightPane)].view().isHidden();
@@ -484,6 +487,7 @@ const TOOLBAR: &[Command] = &[
     Command::ToggleRightPane,
     Command::TogglePreview,
     Command::ToggleSidebar,
+    Command::ShowDropStack,
 ];
 
 /// Toolbar items added in later versions, by `toolbar_version`, with
@@ -988,7 +992,13 @@ fn main_menu(
         command(&commands, c);
     }
     separator(&commands);
-    for c in [Command::ComparePanes, Command::FindDuplicates, Command::SyncFolders, Command::SyncBrowsing] {
+    for c in [
+        Command::ComparePanes,
+        Command::FindDuplicates,
+        Command::DiskUsage,
+        Command::SyncFolders,
+        Command::SyncBrowsing,
+    ] {
         command(&commands, c);
     }
     separator(&commands);
@@ -1026,6 +1036,8 @@ fn main_menu(
     command(&window, Command::NextTab);
     command(&window, Command::PreviousTab);
     command(&window, Command::MoveTabToOther);
+    separator(&window);
+    command(&window, Command::ShowDropStack);
     separator(&window);
     let workspace_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Workspaces"));
     command(&workspace_menu, Command::SaveWorkspace);
@@ -1352,6 +1364,14 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::MoveTabToOther => move_tab_to_other(&pane, &other),
         Command::ReopenClosedTab => reopen_closed_tab(),
         Command::ExportTree => export_tree(&pane),
+        Command::ShowDropStack => drop_stack::toggle(),
+        Command::DiskUsage => {
+            let fs = pane.fs();
+            let fs = fs.browse_fs().unwrap_or(fs);
+            // The folder the pane shows (a pane always has something
+            // selected, so the selection would rarely be what is meant).
+            usage_window::open(fs, pane.location());
+        }
         Command::Filter => pane.focus_filter(),
         Command::Settings => settings_window::show(),
         Command::NewTab => pane.new_tab(pane.fs(), pane.location()),
@@ -1967,15 +1987,12 @@ fn select_same_type(pane: &PaneController) {
     pane.select_paths(&same);
 }
 
-/// File > Export Folder Tree: a text file listing a folder and everything
-/// in it, indented (the selected folder, or the pane's).
+/// File > Export Folder Tree: a text file listing the pane's folder and
+/// everything in it, indented.
 fn export_tree(pane: &PaneController) {
     let fs = pane.fs();
     let fs = fs.browse_fs().unwrap_or(fs);
-    let root = match pane.target_entries().as_slice() {
-        [one] if one.is_folder_like() => one.path.clone(),
-        _ => pane.location(),
-    };
+    let root = pane.location();
     let name = if root.parent().is_none() && !fs.is_local() { fs.label() } else { title_of(&root) };
     let panel = objc2_app_kit::NSSavePanel::savePanel(mtm());
     panel.setNameFieldStringValue(&ns(&format!("{name} tree.txt")));
@@ -3763,6 +3780,15 @@ fn pane_sort_changed(index: usize, sort: Sort) {
         settings.right.sort = sort;
     }
     settings.save();
+}
+
+/// Shows a folder in the active pane, with items selected.
+fn navigate_active_pane(fs: FsRef, folder: PathBuf, select: &[PathBuf]) {
+    let Some(app) = app() else { return };
+    let pane = app.panes[app.active.get()].clone();
+    pane.navigate_selecting(fs, folder, select);
+    app.window.makeKeyAndOrderFront(None);
+    pane.focus();
 }
 
 /// Shows a file selected in its folder, in the active pane.

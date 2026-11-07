@@ -13,6 +13,7 @@ pub mod search;
 pub mod sync;
 pub mod tags;
 pub mod tree;
+pub mod usage;
 pub mod view;
 
 use std::cmp::Ordering;

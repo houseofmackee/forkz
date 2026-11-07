@@ -135,6 +135,14 @@ Filters are named sets of patterns, such as `node_modules; target; *.o`, as in F
 
 Find Duplicates (Commands menu) looks through a folder on the Mac and everything in it for files with the same contents (by size, then by SHA-256), and lists them in groups, the ones that take the most space first. Mark copies by hand, or all but the oldest or newest of each group, and move them to the Trash; one copy of each file is always kept. Double-click a file to show it in the pane.
 
+### Disk Usage
+
+Disk Usage (Commands menu) measures the pane's folder and everything in it, on the Mac or on a server, and shows it as a tree, largest first: each item's size, its share of its folder as a bar, and how many files it holds. Open folders to see what takes the space; very full folders sum up their smallest items in one row. Show in Pane (or a double-click) selects an item in the active pane, and on the Mac, Move to Trash removes it right there.
+
+### Drop Stack
+
+Window > Show Drop Stack (also a toolbar button) opens a small shelf that floats above other windows, Finder included. Drop files on it from any folder to gather them, then drag them out together onto a pane or into Finder, or copy or move them to the active pane's folder (on the Mac or a server) with its buttons. The stack keeps where the files are, not copies, and remembers them between launches; files moved away leave it.
+
 ### Finder tags and Select Matching
 
 - Tags show as colors on file icons; Tags… edits them, and a tag in the sidebar finds everything with it.

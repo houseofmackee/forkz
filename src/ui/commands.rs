@@ -99,6 +99,8 @@ pub enum Command {
     CopySha384,
     CopySha512,
     ExportTree,
+    DiskUsage,
+    ShowDropStack,
 }
 
 impl Command {
@@ -217,6 +219,8 @@ impl Command {
         Command::CopySha384,
         Command::CopySha512,
         Command::ExportTree,
+        Command::DiskUsage,
+        Command::ShowDropStack,
     ];
 
     pub fn tag(self) -> isize {
@@ -339,6 +343,8 @@ impl Command {
             Command::CopySha384 => "Copy SHA-384 Checksum",
             Command::CopySha512 => "Copy SHA-512 Checksum",
             Command::ExportTree => "Export Folder Tree\u{2026}",
+            Command::DiskUsage => "Disk Usage",
+            Command::ShowDropStack => "Show Drop Stack",
         }
     }
 
@@ -442,6 +448,8 @@ impl Command {
             Command::CopySha384 => ("", cmd),
             Command::CopySha512 => ("", cmd),
             Command::ExportTree => ("", cmd),
+            Command::DiskUsage => ("", cmd),
+            Command::ShowDropStack => ("", cmd),
             // F3, as in Total Commander (also handled in the lists).
             Command::ViewFile => ("\u{f706}", NSEventModifierFlags::empty()),
         }
@@ -466,6 +474,7 @@ impl Command {
             Command::ToggleRightPane => "rectangle.righthalf.inset.filled",
             Command::TogglePreview => "sidebar.right",
             Command::ToggleSidebar => "sidebar.left",
+            Command::ShowDropStack => "tray.and.arrow.down",
             _ => "questionmark",
         }
     }
@@ -474,6 +483,7 @@ impl Command {
     pub fn toolbar_label(self) -> &'static str {
         match self {
             Command::CopyToOther => "Copy to",
+            Command::ShowDropStack => "Drop Stack",
             Command::MoveToOther => "Move to",
             Command::Trash => "Delete",
             Command::ToggleHidden => "Hidden Files",

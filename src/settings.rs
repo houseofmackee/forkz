@@ -55,6 +55,8 @@ pub struct Settings {
     pub tools: Vec<CustomTool>,
     /// The sidebar's items in the order dragged into, by section title.
     pub sidebar_order: std::collections::BTreeMap<String, Vec<String>>,
+    /// The drop stack's files (where they are).
+    pub drop_stack: Vec<PathBuf>,
 }
 
 /// A shell command run on the selection (Settings > Tools).
@@ -431,6 +433,7 @@ impl Default for Settings {
             recent_folders: Vec::new(),
             tools: example_tools(),
             sidebar_order: std::collections::BTreeMap::new(),
+            drop_stack: Vec::new(),
         }
     }
 }

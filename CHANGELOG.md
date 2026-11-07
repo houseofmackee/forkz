@@ -7,6 +7,17 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-07
+
+### Added
+
+- Disk Usage (Commands menu): the pane's folder and everything in it as a tree, largest first, with each item's size, share of its folder, and number of files. Items can be shown in the pane or, on the Mac, moved to the Trash. Works on servers too.
+- Drop Stack (Window menu, and a toolbar button): a floating shelf to gather files from several folders or Finder, then drag them out together or copy or move them to the active pane. It keeps its files between launches.
+
+### Changed
+
+- Export Folder Tree lists the pane's folder (it used the selected folder, and a pane nearly always has one selected).
+
 ## [0.15.2] - 2026-11-07
 
 ### Fixed
@@ -299,7 +310,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.15.2...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/houseofmackee/forkz/compare/v0.15.2...v0.16.0
 [0.15.2]: https://github.com/houseofmackee/forkz/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/houseofmackee/forkz/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/houseofmackee/forkz/compare/v0.14.0...v0.15.0
