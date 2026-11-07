@@ -7,6 +7,13 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-07
+
+### Added
+
+- Shortcuts actions: Open in forkz (a folder, or a file selected in its folder, in either pane or a new tab), Connect to Site in forkz, Search in forkz, Open Synclet, Open Smart Folder, Open Workspace, and Run forkz Command. Saved sites, synclets, smart folders, and workspaces can be picked from a list; commands that delete or move items are not offered.
+- `forkz://` links for scripts, launchers, and web pages: open, connect, search, synclet, smart-folder, workspace, and command (see the README). A link can also be given on the command line.
+
 ## [0.13.0] - 2026-11-06
 
 ### Added
@@ -266,7 +273,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/houseofmackee/forkz/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/houseofmackee/forkz/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/houseofmackee/forkz/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/houseofmackee/forkz/compare/v0.12.0...v0.12.1

@@ -20,6 +20,29 @@ cp macos/Info.plist "$APP/Contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$VERSION" "$APP/Contents/Info.plist"
 cp macos/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
+# Shortcuts actions: the metadata Shortcuts reads, from what the Swift
+# compiler extracted when build.rs built them into the app.
+TARGET=$(cd "${CARGO_TARGET_DIR:-target}/release" && pwd)
+if [ -f "$TARGET/ForkzIntents.swiftconstvalues" ]; then
+    INTENTS=$(mktemp -d)
+    echo "$PWD/macos/Intents/ForkzIntents.swift" > "$INTENTS/sources"
+    echo "$TARGET/ForkzIntents.swiftconstvalues" > "$INTENTS/constants"
+    TOOLCHAIN=$(dirname "$(dirname "$(dirname "$(xcrun --find swiftc)")")")
+    xcrun appintentsmetadataprocessor --force --quiet-warnings \
+        --output "$APP/Contents/Resources" \
+        --toolchain-dir "$TOOLCHAIN" \
+        --module-name ForkzIntents \
+        --sdk-root "$(xcrun --sdk macosx --show-sdk-path)" \
+        --xcode-version "$(xcodebuild -version | awk '/Build version/ {print $3}')" \
+        --platform-family macOS \
+        --deployment-target 14.0 \
+        --target-triple "$(cat "$TARGET/ForkzIntents.triple")" \
+        --source-file-list "$INTENTS/sources" \
+        --swift-const-vals-list "$INTENTS/constants"
+    rm -rf "$INTENTS"
+    test -s "$APP/Contents/Resources/Metadata.appintents/extract.actionsdata"
+fi
+
 # Sparkle for updates, without the XPC services (only sandboxed apps use
 # them); the app loads it at runtime.
 SPARKLE=$(sparkle_dir)

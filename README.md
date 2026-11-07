@@ -138,6 +138,22 @@ Find Duplicates (Commands menu) looks through a folder on the Mac and everything
 - Tags show as colors on file icons; Tags… edits them, and a tag in the sidebar finds everything with it.
 - Select Matching (Option-Command-A) selects items by name pattern, and can add them to the selection or remove them from it.
 
+### Shortcuts and forkz:// links
+
+forkz has actions in the Shortcuts app: Open in forkz (a folder, or a file selected in its folder, in either pane or a new tab), Connect to Site in forkz, Search in forkz, Open Synclet, Open Smart Folder, Open Workspace, and Run forkz Command (Compare Panes, Find Duplicates, Flat View, and the other menu commands; commands that delete or move items are not offered). Saved sites, synclets, smart folders, and workspaces can be picked from a list.
+
+The same things work as `forkz://` links, for scripts, launchers such as Raycast and Alfred, and web pages (`open "forkz://..."` in Terminal, or `forkz 'forkz://...'` from the command line). Values are percent-encoded (a space is `%20`):
+
+| Link | Does |
+| --- | --- |
+| `forkz://open?path=~/Downloads` | Shows a folder (or a file, selected) in the active pane; add `pane=left`, `right`, or `other`, and `tab=new` |
+| `forkz://connect?site=Staging&path=/var/www` | Connects to a saved site (by name), optionally in a folder |
+| `forkz://search?path=~/Documents&text=invoice&kind=documents` | Searches a folder (`kind`: folders, files, images, movies, audio, documents, archives, or code; `contents=1` searches inside files) |
+| `forkz://synclet?name=Website` | Opens a synclet and compares its folders |
+| `forkz://smart-folder?name=Photos` | Opens a smart folder |
+| `forkz://workspace?name=Work` | Opens a workspace |
+| `forkz://command?name=ComparePanes` | Runs a command by its id, such as `ComparePanes`, `FindDuplicates`, `FlatView`, `SwapPanes`, or `SyncFolders` (Run forkz Command in Shortcuts lists them all) |
+
 ## SFTP
 
 - **Connect** with File > Connect to Server (Command-K), the toolbar, a saved site in the sidebar, Go to Folder, the command palette, or `forkz sftp://user@host:port/path`.
@@ -246,6 +262,8 @@ scripts/test_protocols.sh  # live FTP/FTPS, WebDAV, and S3 tests against throwaw
 scripts/bundle.sh        # dist/forkz.app with Sparkle, signed (Developer ID if available)
 scripts/make_icon.sh     # macos/AppIcon.svg to AppIcon.icns (needs librsvg)
 ```
+
+Building needs Xcode (or its command line tools with the macOS SDK): the Shortcuts actions in `macos/Intents` are Swift, compiled into the app by `build.rs`, and `scripts/bundle.sh` adds the metadata Shortcuts reads. `FORKZ_NO_INTENTS=1 cargo build` leaves them out.
 
 ## Releasing
 

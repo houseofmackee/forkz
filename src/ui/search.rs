@@ -250,6 +250,37 @@ pub fn flat_view(pane: &PaneController) {
     start(pane.index(), fs, root, folder, query, false, Some(name));
 }
 
+/// A search from a forkz:// link (or Shortcuts): a folder on the Mac, the
+/// text, and a kind by name ("images", "documents", and so on).
+pub fn search_link(
+    index: usize,
+    root: PathBuf,
+    text: String,
+    kind: Option<&str>,
+    contents: bool,
+) -> Result<(), String> {
+    let kind = match kind {
+        None => Kind::Any,
+        Some(name) => Kind::ALL
+            .iter()
+            .map(|k| k.0)
+            .find(|k| format!("{k:?}").eq_ignore_ascii_case(name) || (name.eq_ignore_ascii_case("music") && *k == Kind::Audio))
+            .ok_or_else(|| {
+                format!("\u{201c}{name}\u{201d} is not a kind: use folders, files, images, movies, audio, documents, archives, or code.")
+            })?,
+    };
+    let query = Query { text, mode: if contents { Mode::Contents } else { Mode::Name }, kind, ..Query::default() };
+    if query.is_empty() {
+        return Err("The search needs some text= or a kind=.".into());
+    }
+    if !root.is_dir() {
+        return Err(format!("{} is not a folder.", root.display()));
+    }
+    let folder = title_of(&root);
+    start(index, vfs::local(), root, folder, query, true, None);
+    Ok(())
+}
+
 /// Searches in the background and shows the results in a pane (titled
 /// with `name` for a smart folder).
 fn start(

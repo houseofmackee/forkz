@@ -10,6 +10,7 @@ mod duplicates_window;
 mod file_viewer;
 mod filters_editor;
 mod icon_view;
+pub mod intents;
 mod multi_rename;
 mod oplog;
 mod palette;
@@ -175,8 +176,18 @@ define_class!(
         /// and files: shown in their folder.
         #[unsafe(method(application:openURLs:))]
         fn open_urls(&self, _app: &NSApplication, urls: &NSArray<objc2_foundation::NSURL>) {
-            let paths: Vec<PathBuf> = urls.iter().filter_map(|u| util::url_path(&u)).collect();
-            show_paths(&paths, false);
+            // forkz:// links (from Shortcuts, scripts, and web pages).
+            let (links, files): (Vec<_>, Vec<_>) =
+                urls.iter().partition(|u| u.scheme().is_some_and(|s| s.to_string().eq_ignore_ascii_case("forkz")));
+            for link in links {
+                let text = link.absoluteString().map(|s| s.to_string()).unwrap_or_default();
+                // Once the window is up (a link can start forkz).
+                DispatchQueue::main().exec_async(move || open_link(&text));
+            }
+            let paths: Vec<PathBuf> = files.iter().filter_map(|u| util::url_path(u)).collect();
+            if !paths.is_empty() {
+                show_paths(&paths, false);
+            }
         }
 
         #[unsafe(method(applicationWillTerminate:))]
@@ -592,6 +603,8 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     if let Some(target) = open {
         open_target(&target);
     }
+    // Shortcuts actions that started the app.
+    DispatchQueue::main().exec_async(intents::follow_waiting);
     ns_app.activate();
     ns_app.run();
     Ok(())
@@ -1414,6 +1427,105 @@ fn apply_appearance(app: &App) {
     };
     let chosen = name.and_then(objc2_app_kit::NSAppearance::appearanceNamed);
     NSApplication::sharedApplication(mtm()).setAppearance(chosen.as_deref());
+}
+
+/// Does what a forkz:// link says (see `crate::links`); problems are shown
+/// in an alert.
+pub fn open_link(link: &str) {
+    use crate::links::{Link, Pane};
+    tracing::info!("link {link}");
+    let Some(app) = app() else { return };
+    let pane_index = |pane: Pane| match pane {
+        Pane::Active => app.active.get(),
+        Pane::Other => 1 - app.active.get(),
+        Pane::Left => 0,
+        Pane::Right => 1,
+    };
+    let by_name = |names: Vec<String>, name: &str, what: &str| -> Result<usize, String> {
+        names
+            .iter()
+            .position(|n| n == name)
+            .or_else(|| names.iter().position(|n| n.eq_ignore_ascii_case(name)))
+            .ok_or_else(|| format!("There is no {what} named \u{201c}{name}\u{201d}."))
+    };
+    let settings = app.settings.borrow().clone();
+    let result: Result<(), String> = match crate::links::parse(link) {
+        Err(e) => Err(e),
+        Ok(Link::Open { path, pane, new_tab }) => {
+            let index = pane_index(pane);
+            let (folder, select) = if path.is_dir() {
+                (path, Vec::new())
+            } else if path.exists() {
+                (path.parent().map_or_else(|| PathBuf::from("/"), Path::to_path_buf), vec![path])
+            } else {
+                return dialogs::show_error(
+                    "This forkz link cannot be used.".into(),
+                    format!("{} does not exist.", path.display()),
+                );
+            };
+            let target = app.panes[index].clone();
+            if new_tab {
+                target.new_tab(vfs::local(), folder.clone());
+            }
+            target.navigate_selecting(vfs::local(), folder, &select);
+            set_active(index);
+            target.focus();
+            Ok(())
+        }
+        Ok(Link::Connect { site, path, pane }) => {
+            let sites = app.sites.borrow().sites.clone();
+            let found = sites.iter().find(|s| s.id == site).or_else(|| {
+                by_name(sites.iter().map(|s| s.name.clone()).collect(), &site, "site").ok().map(|i| &sites[i])
+            });
+            match found {
+                Some(found) => {
+                    let mut found = found.clone();
+                    if let Some(path) = path {
+                        found.remote_dir = Some(path);
+                        found.local_dir = None;
+                    }
+                    let index = pane_index(pane);
+                    set_active(index);
+                    connect_site(found, index, None, false);
+                    Ok(())
+                }
+                None => Err(format!("There is no saved site named \u{201c}{site}\u{201d}.")),
+            }
+        }
+        Ok(Link::Search { path, text, kind, contents, pane }) => {
+            let index = pane_index(pane);
+            set_active(index);
+            search::search_link(index, path, text, kind.as_deref(), contents)
+        }
+        Ok(Link::Synclet(name)) => {
+            by_name(settings.synclets.iter().map(|s| s.name.clone()).collect(), &name, "synclet").map(open_synclet)
+        }
+        Ok(Link::SmartFolder { name, pane }) => {
+            by_name(settings.smart_folders.iter().map(|s| s.name.clone()).collect(), &name, "smart folder").map(|i| {
+                set_active(pane_index(pane));
+                search::open_smart_folder(i);
+            })
+        }
+        Ok(Link::Workspace(name)) => {
+            by_name(settings.workspaces.iter().map(|w| w.name.clone()).collect(), &name, "workspace")
+                .map(workspaces::open)
+        }
+        Ok(Link::Command(name)) => match Command::ALL.iter().find(|c| c.id().eq_ignore_ascii_case(&name)) {
+            Some(command) if is_enabled(*command) => {
+                run_command(*command, None);
+                Ok(())
+            }
+            Some(command) => Err(format!("\u{201c}{}\u{201d} cannot be used right now.", command.title())),
+            None => Err(format!("forkz has no command named \u{201c}{name}\u{201d}.")),
+        },
+    };
+    drop(settings);
+    if let Err(problem) = result {
+        dialogs::show_error("This forkz link cannot be used.".into(), problem);
+        return;
+    }
+    NSApplication::sharedApplication(mtm()).activate();
+    app.window.makeKeyAndOrderFront(None);
 }
 
 /// Remembers a folder a pane shows (Go > Recent Folders): on the Mac, or
@@ -3713,6 +3825,12 @@ fn show_paths(paths: &[PathBuf], reveal: bool) {
 /// Opens a folder or a server address (sftp://, ftp://, ftps://, dav://,
 /// davs://, s3://) in the active pane.
 fn open_target(target: &str) {
+    if target.starts_with("forkz:") {
+        // Once the app runs: at launch, its window is not up yet.
+        let link = target.to_string();
+        DispatchQueue::main().exec_async(move || open_link(&link));
+        return;
+    }
     let Some(app) = app() else { return };
     let protocol = target.split_once("://").and_then(|(scheme, _)| crate::sites::Protocol::from_scheme(scheme));
     let (Some(protocol), Some((_, address))) = (protocol, target.split_once("://")) else {

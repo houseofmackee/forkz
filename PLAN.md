@@ -125,6 +125,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Duplicate finder
 - [x] Flat view; recent folders
 - [ ] Disk usage view
+- [x] Shortcuts actions (App Intents) and forkz:// links
 - [ ] Scripting or plugins
 - [ ] Drop stack
 

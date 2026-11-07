@@ -1,6 +1,7 @@
 //! forkz: a native dual-pane file manager for macOS.
 
 pub mod fs;
+pub mod links;
 pub mod pane;
 pub mod rename;
 pub mod settings;

@@ -7,6 +7,7 @@ Usage:
   forkz                                Start the app
   forkz FOLDER                         Start with FOLDER in the left pane
   forkz sftp://[user@]host[:port]/path Connect (using a saved site if one matches)
+  forkz 'forkz://open?path=...'        Follow a forkz:// link (see the README)
   forkz --version                      Print the version
   forkz --help       Print this help
 ";
@@ -49,7 +50,11 @@ fn main() -> ExitCode {
             print!("{USAGE}");
             ExitCode::SUCCESS
         }
-        Some(target) if target.starts_with("sftp://") || std::path::Path::new(target).is_dir() => {
+        Some(target)
+            if target.starts_with("sftp://")
+                || target.starts_with("forkz:")
+                || std::path::Path::new(target).is_dir() =>
+        {
             match forkz::ui::run(Some(target.to_string())) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
