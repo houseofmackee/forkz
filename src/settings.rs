@@ -53,6 +53,8 @@ pub struct Settings {
     pub recent_folders: Vec<RecentFolder>,
     /// Your own commands (Commands > Tools, the toolbar, the palette).
     pub tools: Vec<CustomTool>,
+    /// The sidebar's items in the order dragged into, by section title.
+    pub sidebar_order: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// A shell command run on the selection (Settings > Tools).
@@ -428,6 +430,7 @@ impl Default for Settings {
             smart_folders: Vec::new(),
             recent_folders: Vec::new(),
             tools: example_tools(),
+            sidebar_order: std::collections::BTreeMap::new(),
         }
     }
 }

@@ -507,9 +507,20 @@ impl PaneState {
 /// The display name of a folder: its name, or "Macintosh HD" for "/".
 pub fn title_of(path: &Path) -> String {
     match path.file_name() {
+        // iCloud Drive's folder, as Finder names it.
+        Some(name) if name == ICLOUD_FOLDER && path.ends_with(ICLOUD_DRIVE) => "iCloud Drive".to_string(),
         Some(name) => name.to_string_lossy().into_owned(),
         None => "Macintosh HD".to_string(),
     }
+}
+
+/// iCloud Drive, relative to the home folder.
+pub const ICLOUD_DRIVE: &str = "Library/Mobile Documents/com~apple~CloudDocs";
+const ICLOUD_FOLDER: &str = "com~apple~CloudDocs";
+
+/// iCloud Drive's folder, if iCloud Drive is on.
+pub fn icloud_drive() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| home.join(ICLOUD_DRIVE)).filter(|path| path.is_dir())
 }
 
 /// Summary for a status bar: "3 of 42 selected, 1.2 MB" or "42 items".

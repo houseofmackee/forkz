@@ -2129,6 +2129,13 @@ impl PaneController {
             return;
         }
         let paths = self.target_paths();
+        // A server in Network: connect to it.
+        if let [one] = paths.as_slice()
+            && let Some(address) = self.fs().link_target(one)
+        {
+            super::connect_address(&address);
+            return;
+        }
         let folder = {
             let state = self.ivars().state.borrow();
             paths

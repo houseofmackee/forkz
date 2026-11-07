@@ -12,7 +12,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 
 ### Two panes, on the Mac and on servers
 
-- Two panes side by side, or stacked one above the other (View > Stack Panes), each with tabs, and a sidebar with favorites, smart folders, volumes, saved sites, synclets, and Finder tags. The sidebar, either pane, and the preview pane can each be hidden.
+- Two panes side by side, or stacked one above the other (View > Stack Panes), each with tabs, and a sidebar with favorites, smart folders, iCloud Drive, volumes, Network (the file servers on your network), saved sites, synclets, and Finder tags. Drag items in the sidebar to put them in the order you like, within each section. The sidebar, either pane, and the preview pane can each be hidden.
 - A line in your accent color along the top of the active pane shows where commands, new connections, and Go to Folder will open. Tabs show a close button when the pointer is over them.
 - A sortable list (name, date modified, size, kind, Git status, and more) with ".." on top to go up, groups by kind, date, or size, a clickable path bar, a filter field, and a status line with the selection size and free space; or icons, or columns, as in Finder
 - A viewer for text and hex (F3), and filename filters that hide items in the lists and leave them out of copies

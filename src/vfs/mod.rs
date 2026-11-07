@@ -7,6 +7,7 @@ pub mod fxp;
 pub mod http;
 pub mod known_hosts;
 pub mod mount;
+pub mod network;
 pub mod results;
 pub mod s3;
 pub mod sftp;
@@ -116,6 +117,12 @@ pub trait Vfs: Send + Sync {
     /// A separate connection for a long transfer, so browsing stays
     /// responsive. The local file system returns itself.
     fn connect_another(&self) -> io::Result<FsRef>;
+
+    /// An item that is a place to connect to (a server in Network): its
+    /// address, opened instead of the item.
+    fn link_target(&self, _path: &Path) -> Option<String> {
+        None
+    }
 
     /// A job starts changing this file system: changes may be held until
     /// `end_changes` (archives write themselves once, at the end).

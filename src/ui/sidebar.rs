@@ -59,6 +59,8 @@ enum Row {
         index: usize,
         name: String,
     },
+    /// The servers on the local network.
+    Network,
     /// A Finder color tag.
     Tag {
         name: &'static str,
@@ -198,8 +200,19 @@ define_class!(
             self.ivars().rows.borrow().len() as NSInteger
         }
 
+        /// Rows can be dragged to another place in their section.
+        #[unsafe(method_id(tableView:pasteboardWriterForRow:))]
+        fn pasteboard_writer(
+            &self,
+            _table: &NSTableView,
+            row: NSInteger,
+        ) -> Option<Retained<ProtocolObject<dyn objc2_app_kit::NSPasteboardWriting>>> {
+            self.row_writer(row)
+        }
+
         /// Items dropped on a rename preset are renamed with it; folders
-        /// dropped anywhere else become favorites.
+        /// dropped anywhere else become favorites; a dragged row moves
+        /// within its section.
         #[unsafe(method(tableView:validateDrop:proposedRow:proposedDropOperation:))]
         fn validate_drop(
             &self,
@@ -208,7 +221,15 @@ define_class!(
             row: NSInteger,
             operation: NSTableViewDropOperation,
         ) -> NSDragOperation {
-            if operation == NSTableViewDropOperation::On && self.preset_at(row).is_some() {
+            if let Some(from) = dragged_row(info) {
+                match self.move_target(from, row) {
+                    Some(to) => {
+                        table.setDropRow_dropOperation(to as NSInteger, NSTableViewDropOperation::Above);
+                        NSDragOperation::Move
+                    }
+                    None => NSDragOperation::None,
+                }
+            } else if operation == NSTableViewDropOperation::On && self.preset_at(row).is_some() {
                 NSDragOperation::Generic
             } else if super::pane_view::paths_on_pasteboard(&info.draggingPasteboard()).iter().any(|p| p.is_dir()) {
                 table.setDropRow_dropOperation(-1, NSTableViewDropOperation::On);
@@ -226,20 +247,22 @@ define_class!(
             row: NSInteger,
             operation: NSTableViewDropOperation,
         ) -> bool {
-            match self.preset_at(row).filter(|_| operation == NSTableViewDropOperation::On) {
-                Some(index) => {
+            match (dragged_row(info), self.preset_at(row).filter(|_| operation == NSTableViewDropOperation::On)) {
+                (Some(from), _) => self.move_row(from, row),
+                (None, Some(index)) => {
                     let items = super::pane_view::dragged_items(info);
                     // After the drag ends: the rename window is modal.
                     dispatch2::DispatchQueue::main().exec_async(move || super::apply_rename_preset(index, items));
+                    true
                 }
-                None => {
+                (None, None) => {
                     let paths = super::pane_view::paths_on_pasteboard(&info.draggingPasteboard());
                     for path in paths.into_iter().filter(|p| p.is_dir()) {
                         super::add_favorite(path);
                     }
+                    true
                 }
             }
-            true
         }
     }
 
@@ -279,6 +302,7 @@ define_class!(
                 Some(Row::Site { id, .. }) => super::site_action(SiteAction::Connect, Some(id)),
                 Some(Row::RemoteFavorite { site_id, path, .. }) => super::open_remote_favorite(&site_id, &path),
                 Some(Row::Tag { name, .. }) => super::show_tag(name),
+                Some(Row::Network) => super::open_network(),
                 Some(Row::Synclet { index, .. }) => {
                     self.deselect_soon();
                     super::open_synclet(index);
@@ -401,6 +425,55 @@ define_class!(
 );
 
 impl Sidebar {
+    /// A row for dragging (headers stay put).
+    fn row_writer(&self, row: NSInteger) -> Option<Retained<ProtocolObject<dyn objc2_app_kit::NSPasteboardWriting>>> {
+        if self.is_header(row) {
+            return None;
+        }
+        let item = objc2_app_kit::NSPasteboardItem::new();
+        item.setString_forType(&ns(&row.to_string()), &ns(ROW_TYPE));
+        Some(ProtocolObject::from_retained(item))
+    }
+
+    /// The section a row is in: its header's row and the rows of items.
+    fn section_of(&self, row: usize) -> Option<(usize, std::ops::Range<usize>)> {
+        let rows = self.ivars().rows.borrow();
+        let header = (0..=row.min(rows.len().checked_sub(1)?)).rev().find(|&i| matches!(rows[i], Row::Header(_)))?;
+        let end = (header + 1..rows.len()).find(|&i| matches!(rows[i], Row::Header(_))).unwrap_or(rows.len());
+        Some((header, header + 1..end))
+    }
+
+    /// Where a row dragged from `from` would go when dropped at `row`
+    /// (between rows): within its own section only.
+    fn move_target(&self, from: usize, row: NSInteger) -> Option<usize> {
+        let (_, items) = self.section_of(from)?;
+        let to = usize::try_from(row).ok()?;
+        (items.start..=items.end).contains(&to).then_some(to)
+    }
+
+    /// Moves a row within its section and keeps that order.
+    fn move_row(&self, from: usize, row: NSInteger) -> bool {
+        let Some(to) = self.move_target(from, row) else { return false };
+        let Some((header, items)) = self.section_of(from) else { return false };
+        let (section, mut keys) = {
+            let rows = self.ivars().rows.borrow();
+            let section = match &rows[header] {
+                Row::Header(title) => title.to_string(),
+                _ => return false,
+            };
+            (section, rows[items.clone()].iter().map(key).collect::<Vec<String>>())
+        };
+        let moved = keys.remove(from - items.start);
+        // Dropping below its old place: one row up, as it left.
+        let at = if to > from { to - 1 } else { to } - items.start;
+        keys.insert(at.min(keys.len()), moved);
+        super::update_settings(|s| {
+            s.sidebar_order.insert(section, keys);
+        });
+        super::reload_sidebar();
+        true
+    }
+
     fn preset_at(&self, row: NSInteger) -> Option<usize> {
         let rows = self.ivars().rows.borrow();
         match usize::try_from(row).ok().and_then(|r| rows.get(r)) {
@@ -468,6 +541,10 @@ impl Sidebar {
                     zoom,
                 )
             }
+            Row::Network => {
+                let icon = symbol("network", "Network").unwrap_or_else(super::util::folder_icon);
+                cell(self.mtm(), "Network", &icon, None, Some("File servers on your network"), zoom)
+            }
             Row::Tag { name, color } => {
                 let icon = symbol("circle.fill", name).unwrap_or_else(super::util::folder_icon);
                 cell(self.mtm(), name, &icon, super::util::tag_color(*color), None, zoom)
@@ -497,7 +574,9 @@ impl Sidebar {
         table.registerForDraggedTypes(&NSArray::from_slice(&[
             unsafe { NSPasteboardTypeFileURL },
             &*ns(super::pane_view::ITEMS_TYPE),
+            &*ns(ROW_TYPE),
         ]));
+        table.setDraggingSourceOperationMask_forLocal(NSDragOperation::Move, true);
         unsafe {
             table.setDataSource(Some(ProtocolObject::from_ref(&*this)));
             table.setDelegate(Some(ProtocolObject::from_ref(&*this)));
@@ -537,7 +616,7 @@ impl Sidebar {
         saved: Saved,
         current: Current,
     ) {
-        let Saved { synclets, presets, smart_folders } = saved;
+        let Saved { synclets, presets, smart_folders, order } = saved;
         let mut rows = vec![Row::Header("Favorites")];
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
         let standard = [
@@ -575,9 +654,18 @@ impl Sidebar {
             }
         }
         rows.push(Row::Header("Locations"));
+        if let Some(icloud) = crate::pane::icloud_drive() {
+            rows.push(Row::Place {
+                title: "iCloud Drive".into(),
+                path: icloud,
+                symbol: Some("icloud"),
+                favorite: false,
+            });
+        }
         for (title, path) in volumes() {
             rows.push(Row::Place { title, path, symbol: None, favorite: false });
         }
+        rows.push(Row::Network);
         rows.push(Row::Header("Sites"));
         for site in sites {
             let title = if site.folder.is_empty() {
@@ -608,7 +696,7 @@ impl Sidebar {
         for (name, color) in crate::fs::tags::COLORS {
             rows.push(Row::Tag { name, color });
         }
-        *self.ivars().rows.borrow_mut() = rows;
+        *self.ivars().rows.borrow_mut() = arrange(rows, order);
         self.table().reloadData();
         self.highlight(current);
     }
@@ -689,6 +777,7 @@ impl Sidebar {
                 site_id == current && path == location
             }
             (Row::Site { id, .. }, Current::Site(current, _)) => id == current,
+            (Row::Network, Current::Network) => true,
             _ => false,
         });
         self.ivars().updating.set(true);
@@ -705,6 +794,56 @@ pub struct Saved<'a> {
     pub synclets: &'a [String],
     pub presets: &'a [String],
     pub smart_folders: &'a [String],
+    /// The order you dragged each section's items into (by section title).
+    pub order: &'a std::collections::BTreeMap<String, Vec<String>>,
+}
+
+/// The pasteboard type of a sidebar row being dragged (its row number).
+const ROW_TYPE: &str = "io.github.houseofmackee.forkz.sidebar-row";
+
+/// The row being dragged within the sidebar, if that is what is dragged.
+fn dragged_row(info: &ProtocolObject<dyn NSDraggingInfo>) -> Option<usize> {
+    info.draggingPasteboard().stringForType(&ns(ROW_TYPE))?.to_string().parse().ok()
+}
+
+/// What identifies a row across launches, for its place in the order.
+fn key(row: &Row) -> String {
+    match row {
+        Row::Header(title) => format!("header:{title}"),
+        Row::Place { path, .. } => format!("place:{}", path.display()),
+        Row::Site { id, .. } => format!("site:{id}"),
+        Row::RemoteFavorite { site_id, path, .. } => format!("remote:{site_id}:{}", path.display()),
+        Row::SmartFolder { name, .. } => format!("smart:{name}"),
+        Row::Synclet { name, .. } => format!("synclet:{name}"),
+        Row::Preset { name, .. } => format!("preset:{name}"),
+        Row::Network => "network".into(),
+        Row::Tag { name, .. } => format!("tag:{name}"),
+    }
+}
+
+/// Each section's items in the order you dragged them into; items not in
+/// it (new ones) keep their place after those.
+fn arrange(rows: Vec<Row>, order: &std::collections::BTreeMap<String, Vec<String>>) -> Vec<Row> {
+    let mut arranged = Vec::with_capacity(rows.len());
+    let mut section: Vec<Row> = Vec::new();
+    let mut title: Option<&str> = None;
+    let flush = |section: &mut Vec<Row>, title: Option<&str>, arranged: &mut Vec<Row>| {
+        if let Some(keys) = title.and_then(|t| order.get(t)) {
+            section.sort_by_key(|row| keys.iter().position(|k| *k == key(row)).unwrap_or(usize::MAX));
+        }
+        arranged.append(section);
+    };
+    for row in rows {
+        if let Row::Header(name) = row {
+            flush(&mut section, title, &mut arranged);
+            title = Some(name);
+            arranged.push(row);
+        } else {
+            section.push(row);
+        }
+    }
+    flush(&mut section, title, &mut arranged);
+    arranged
 }
 
 /// What the active pane shows, to highlight it in the sidebar.
@@ -712,6 +851,8 @@ pub enum Current {
     Local(PathBuf),
     /// A folder on a connection opened from this site (by id).
     Site(String, PathBuf),
+    /// Network (the servers on the local network).
+    Network,
     Other,
 }
 

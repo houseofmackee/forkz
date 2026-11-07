@@ -3690,6 +3690,9 @@ fn update_title(app: &App) {
     } else if fs.is_local() {
         app.window.setTitle(&ns(&title_of(&location)));
         app.window.setRepresentedURL(Some(&file_url(&location)));
+    } else if fs.key() == "network:" {
+        app.window.setTitle(&ns("Network"));
+        app.window.setRepresentedURL(None);
     } else {
         let folder = if location.parent().is_none() { "/".to_string() } else { title_of(&location) };
         app.window.setTitle(&ns(&format!("{folder} ({})", fs.label())));
@@ -3707,6 +3710,9 @@ fn current_place(app: &App) -> sidebar::Current {
     }
     if fs.is_local() {
         return sidebar::Current::Local(pane.location());
+    }
+    if fs.key() == "network:" {
+        return sidebar::Current::Network;
     }
     let connections = app.connections.borrow();
     match connections.iter().find(|(_, c)| vfs::same(c, &fs)) {
@@ -3816,7 +3822,8 @@ pub fn reload_sidebar() {
     let synclets: Vec<String> = app.settings.borrow().synclets.iter().map(|s| s.name.clone()).collect();
     let presets: Vec<String> = app.settings.borrow().rename_presets.iter().map(|p| p.name.clone()).collect();
     let smart: Vec<String> = app.settings.borrow().smart_folders.iter().map(|f| f.name.clone()).collect();
-    let saved = sidebar::Saved { synclets: &synclets, presets: &presets, smart_folders: &smart };
+    let order = app.settings.borrow().sidebar_order.clone();
+    let saved = sidebar::Saved { synclets: &synclets, presets: &presets, smart_folders: &smart, order: &order };
     app.sidebar.reload(&favorites, &remote, &sites, &connected, saved, current_place(&app));
 }
 
@@ -4147,6 +4154,20 @@ fn show_paths(paths: &[PathBuf], reveal: bool) {
 
 /// Opens a folder or a server address (sftp://, ftp://, ftps://, dav://,
 /// davs://, s3://) in the active pane.
+/// Connects to a server address (from Network), as Go to Folder does.
+pub fn connect_address(address: &str) {
+    open_target(address);
+}
+
+/// Network in the sidebar: the servers on the local network, in the
+/// active pane.
+pub fn open_network() {
+    let Some(app) = app() else { return };
+    let pane = app.panes[app.active.get()].clone();
+    pane.navigate_to(vfs::network::new(), PathBuf::from("/"));
+    pane.focus();
+}
+
 fn open_target(target: &str) {
     if target.starts_with("forkz:") {
         // Once the app runs: at launch, its window is not up yet.

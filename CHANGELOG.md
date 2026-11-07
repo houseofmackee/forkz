@@ -7,6 +7,14 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-07
+
+### Added
+
+- iCloud Drive in the sidebar's Locations (when iCloud Drive is on), named as in Finder.
+- Sidebar items can be put in any order by dragging them within their section (Favorites, Locations, Sites, Synclets, Rename Presets, Smart Folders, and Tags); the order is kept.
+- Network in the sidebar's Locations: the file servers on your network that announce themselves (SMB, AFP, SFTP, and WebDAV); open one to connect to it. macOS may ask once to let forkz look on the local network.
+
 ## [0.15.0] - 2026-11-07
 
 ### Added
@@ -285,7 +293,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/houseofmackee/forkz/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/houseofmackee/forkz/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/houseofmackee/forkz/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/houseofmackee/forkz/compare/v0.12.2...v0.13.0
