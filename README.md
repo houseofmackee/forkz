@@ -16,7 +16,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - A line in your accent color along the top of the active pane shows where commands, new connections, and Go to Folder will open. Tabs show a close button when the pointer is over them.
 - A sortable list (name, date modified, size, kind, Git status, and more) with ".." on top to go up, groups by kind, date, or size, a clickable path bar, a filter field, and a status line with the selection size and free space; or icons, or columns, as in Finder
 - A viewer for text and hex (F3), and filename filters that hide items in the lists and leave them out of copies
-- Copy, move, duplicate, trash, rename, new file, and new folder, with progress, Stop, Pause, and a conflict dialog (Replace, Replace if Older, Keep Both, Skip, Merge, and "Apply to all")
+- Copy, move, duplicate, trash, rename, new file, and new folder (right-click Copy To and Move To send items to the other pane, another open tab, or a folder you choose), with progress, Stop, Pause, and a conflict dialog (Replace, Replace if Older, Keep Both, Skip, Merge, and "Apply to all")
 - Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files
 - Quick Look, a hidden files toggle, and live updates when folders change
 - Flat View (Option-Command-F): every file in a folder and the folders in it, in one list
@@ -46,7 +46,7 @@ In a Git repository, the Git column (View > Columns) shows whether each item is 
 
 The preview pane (Shift-Command-P) shows Info, a Quick Look preview, the session's transfers, and a log. It can expand to fill the window (Control-Command-P) and shrink back. For an archive it lists what is inside.
 
-Archives (zip, tar, 7z, rar, iso, and more) open like folders: copy items out to extract them, on the Mac or on a server. Zip, tar (plain, gzip, bzip2, or xz), and 7z archives on the Mac can also be changed in place: copy or drag items into them, rename and delete items, and make folders. Other formats, and archives on servers, are read-only. Compress makes zip, tar.gz, 7z, and other archives.
+Archives (zip, tar, 7z, rar, iso, and more) open like folders: copy items out to extract them, on the Mac or on a server, or right-click an archive and choose Extract To (this folder, the other pane, another tab, or a folder you choose). Zip, tar (plain, gzip, bzip2, or xz), and 7z archives on the Mac can also be changed in place: copy or drag items into them, rename and delete items, and make folders. Other formats, and archives on servers, are read-only. Compress makes zip, tar.gz, 7z, and other archives.
 
 ### Rename Multiple Items
 
@@ -193,7 +193,7 @@ Choose the protocol in Connect to Server; sites keep it.
 
 ### Importing from FileZilla
 
-File > Import from FileZilla reads `~/.config/filezilla` and shows what it found before changing anything:
+File > Import Sites > Import from FileZilla reads `~/.config/filezilla` and shows what it found before changing anything:
 
 - Sites from the Site Manager (SFTP, FTP, FTPS, S3, and WebDAV), with their folders, saved passwords (into the Keychain), key files, and default remote and local folders
 - The host keys FileZilla trusts, so known servers do not ask again
@@ -203,9 +203,9 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 
 ### Other apps, and moving sites to another Mac
 
-- File > Import from Cyberduck reads Cyberduck's bookmarks (SFTP, FTP, FTPS, WebDAV, S3, and SMB, with their folders and key files).
-- File > Import from WinSCP reads a `WinSCP.ini` (in WinSCP on Windows: Tools > Export/Backup Configuration), with its folders.
-- File > Export Sites saves your sites to a file, and File > Import Sites from File brings them in on another Mac. Passwords are not included: forkz asks for them when connecting.
+- File > Import Sites > Import from Cyberduck reads Cyberduck's bookmarks (SFTP, FTP, FTPS, WebDAV, S3, and SMB, with their folders and key files).
+- File > Import Sites > Import from WinSCP reads a `WinSCP.ini` (in WinSCP on Windows: Tools > Export/Backup Configuration), with its folders.
+- File > Export Sites saves your sites to a file, and File > Import Sites > Import Sites from File brings them in on another Mac. Passwords are not included: forkz asks for them when connecting.
 
 Sites forkz already has are left as they are. Transmit's exports are in a private format, so its servers cannot be imported.
 

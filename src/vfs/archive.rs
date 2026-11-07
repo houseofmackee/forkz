@@ -87,6 +87,19 @@ const EXTENSIONS: &[&str] = &[
 /// Compressed tars ("x.tar.gz"), whose last extension alone says nothing.
 const TAR_SUFFIXES: &[&str] = &[".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tar.lz", ".tar.lzma", ".tar.z"];
 
+/// An archive's name without its archive extension ("site.tar.gz" is
+/// "site"), for the folder it is extracted into.
+pub fn base_name(name: &str) -> String {
+    let lower = name.to_lowercase();
+    if let Some(suffix) = TAR_SUFFIXES.iter().find(|s| lower.ends_with(*s)) {
+        return name[..name.len() - suffix.len()].to_string();
+    }
+    match name.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem.to_string(),
+        _ => format!("{name} contents"),
+    }
+}
+
 /// Whether forkz treats a file with this name as an archive.
 pub fn is_archive_name(name: &str) -> bool {
     let lower = name.to_lowercase();
@@ -972,6 +985,14 @@ mod tests {
         std::fs::write(src.join("docs/b.md"), "# bravo").unwrap();
         std::fs::write(src.join("docs/deep/c \u{e4}.txt"), "charlie".repeat(10_000)).unwrap();
         dir
+    }
+
+    #[test]
+    fn base_names() {
+        assert_eq!(base_name("site.zip"), "site");
+        assert_eq!(base_name("Backup 2026.tar.gz"), "Backup 2026");
+        assert_eq!(base_name("x.7z"), "x");
+        assert_eq!(base_name("noext"), "noext contents");
     }
 
     #[test]

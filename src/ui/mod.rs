@@ -812,6 +812,9 @@ fn main_menu(
         };
         item.setKeyEquivalentModifierMask(modifiers);
         item.setTag(command.tag());
+        if let Some(icon) = command.menu_symbol().and_then(|name| util::symbol(name, command.title())) {
+            item.setImage(Some(&icon));
+        }
         unsafe { item.setTarget(Some(delegate)) };
         menu.addItem(&item);
     };
@@ -844,15 +847,18 @@ fn main_menu(
     separator(&file);
     command(&file, Command::Connect);
     command(&file, Command::Disconnect);
-    for c in [
-        Command::ImportFileZilla,
-        Command::ImportCyberduck,
-        Command::ImportWinScp,
-        Command::ImportSitesFile,
-        Command::ExportSites,
-    ] {
-        command(&file, c);
+    let import = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Import Sites"));
+    for c in [Command::ImportFileZilla, Command::ImportCyberduck, Command::ImportWinScp, Command::ImportSitesFile] {
+        command(&import, c);
     }
+    let import_item = NSMenuItem::new(mtm);
+    import_item.setTitle(&ns("Import Sites"));
+    import_item.setSubmenu(Some(&import));
+    if let Some(icon) = util::symbol("square.and.arrow.down", "Import Sites") {
+        import_item.setImage(Some(&icon));
+    }
+    file.addItem(&import_item);
+    command(&file, Command::ExportSites);
     separator(&file);
     for c in [Command::Open, Command::OpenWithApp, Command::QuickLook, Command::ViewFile] {
         command(&file, c);
@@ -1871,6 +1877,41 @@ fn compare_files(pane: &PaneController, other: &PaneController) {
             let result = local.and_then(|paths| tools::compare(&tool, &paths[0], &paths[1]));
             if let Err(e) = result {
                 dialogs::show_error("The files could not be compared.".into(), e.to_string());
+            }
+        });
+    });
+}
+
+/// Extracts an archive into a folder (on any file system): an archive
+/// with one folder at its top gives that folder; otherwise its items go
+/// into a new folder named after the archive.
+pub fn extract_archive(fs: FsRef, archive: PathBuf, dest_fs: FsRef, dest: PathBuf) {
+    let Some(app) = app() else { return };
+    let name = title_of(&archive);
+    let note = app.activity.begin_note(&format!("Opening \u{201c}{name}\u{201d}\u{2026}"));
+    std::thread::spawn(move || {
+        let result = (|| -> std::io::Result<(FsRef, Vec<PathBuf>, PathBuf)> {
+            let local = if fs.is_local() { archive.clone() } else { fetch_archive(&fs, &archive)? };
+            let opened: FsRef = vfs::archive::ArchiveFs::open(&local, None)?;
+            let top = opened.list(Path::new("/"))?;
+            if let [one] = top.as_slice()
+                && one.is_folder_like()
+            {
+                return Ok((opened, vec![one.path.clone()], dest.clone()));
+            }
+            let folder = dest.join(vfs::archive::base_name(&name));
+            let folder =
+                if dest_fs.stat(&folder).is_ok() { crate::fs::ops::unique_name(&dest_fs, &folder) } else { folder };
+            dest_fs.create_dir(&folder)?;
+            Ok((opened, top.into_iter().map(|e| e.path).collect(), folder))
+        })();
+        DispatchQueue::main().exec_async(move || {
+            if let Some(app) = self::app() {
+                app.activity.remove(note);
+            }
+            match result {
+                Ok((opened, items, target)) => start_job(Job::between(JobKind::Copy, opened, items, dest_fs, target)),
+                Err(e) => dialogs::show_error(format!("\u{201c}{name}\u{201d} could not be extracted."), e.to_string()),
             }
         });
     });

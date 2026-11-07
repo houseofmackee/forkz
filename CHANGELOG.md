@@ -7,6 +7,19 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-11-07
+
+### Added
+
+- Right-click Copy To and Move To: to the other pane, any other open tab, or a folder you choose.
+- Right-click Extract To for archives: into this folder, the other pane, another tab, or a folder you choose. An archive with one folder at its top gives that folder; otherwise its items go into a new folder named after it.
+- Compress in the right-click menu.
+- Icons in the menus (the menu bar and the right-click menu).
+
+### Changed
+
+- The import commands are in File > Import Sites.
+
 ## [0.16.0] - 2026-11-07
 
 ### Added
@@ -310,7 +323,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.16.1...HEAD
+[0.16.1]: https://github.com/houseofmackee/forkz/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/houseofmackee/forkz/compare/v0.15.2...v0.16.0
 [0.15.2]: https://github.com/houseofmackee/forkz/compare/v0.15.1...v0.15.2
 [0.15.1]: https://github.com/houseofmackee/forkz/compare/v0.15.0...v0.15.1

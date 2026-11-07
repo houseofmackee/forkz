@@ -271,6 +271,10 @@ pub struct PaneIvars {
     active: Cell<bool>,
     /// The right-clicked row (outside the selection) of the open context menu.
     menu_row: Cell<Option<usize>>,
+    /// The context menu's Copy To, Move To, and Extract To places.
+    menu_places: RefCell<Vec<(FsRef, PathBuf)>>,
+    /// What the context menu's items apply to (taken when it opens).
+    menu_items: RefCell<Vec<PathBuf>>,
     /// Set while a context menu command runs: what it applies to.
     context_row: Cell<Option<usize>>,
     /// The column chooser shown on the column titles.
@@ -387,6 +391,13 @@ define_class!(
             if let Some((id, _)) = crate::settings::COLUMNS.get(sender.tag() as usize) {
                 super::toggle_column(self.is_local(), id);
             }
+        }
+
+        /// Copy To, Move To, and Extract To: the tag is what (see
+        /// `PlaceAction`) times 1000 plus the place (999: choose a folder).
+        #[unsafe(method(sendTo:))]
+        fn send_to(&self, sender: &NSMenuItem) {
+            self.send_to_place(sender.tag());
         }
 
         #[unsafe(method(command:))]
@@ -586,7 +597,95 @@ define_class!(
     }
 );
 
+/// What a context menu place item does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaceAction {
+    Copy = 1,
+    Move = 2,
+    Extract = 3,
+}
+
 impl PaneController {
+    /// The places for Copy To, Move To, and Extract To: this pane's folder
+    /// (for extracting), the other pane, and every other open tab. Titles
+    /// for the menu, and whether it is this pane's folder.
+    fn menu_places_list(&self) -> Vec<(String, bool)> {
+        let index = self.index();
+        let mut places: Vec<(FsRef, PathBuf)> = Vec::new();
+        let mut titles: Vec<(String, bool)> = Vec::new();
+        let name = |fs: &FsRef, path: &Path| {
+            if !fs.is_local() && path.parent().is_none() { fs.label() } else { crate::pane::title_of(path) }
+        };
+        let side = |i: usize| if i == 0 { "Left" } else { "Right" };
+        let mut push = |fs: FsRef, path: PathBuf, title: String, here: bool| {
+            if !places.iter().any(|(f, p)| vfs::same(f, &fs) && *p == path) || here {
+                titles.push((title, here));
+                places.push((fs, path));
+            }
+        };
+        push(self.fs(), self.location(), format!("This Folder ({})", name(&self.fs(), &self.location())), true);
+        if let Some(other) = super::pane(1 - index) {
+            push(other.fs(), other.location(), format!("Other Pane ({})", name(&other.fs(), &other.location())), false);
+        }
+        for pane_index in [index, 1 - index] {
+            let Some(pane) = super::pane(pane_index) else { continue };
+            let active = pane.active_tab();
+            for (tab, (fs, path)) in pane.tab_locations().into_iter().enumerate() {
+                if tab == active {
+                    continue;
+                }
+                let title = format!("{} ({} Tab)", name(&fs, &path), side(pane_index));
+                push(fs, path, title, false);
+            }
+        }
+        *self.ivars().menu_places.borrow_mut() = places;
+        titles
+    }
+
+    /// A Copy To, Move To, or Extract To item was chosen.
+    fn send_to_place(&self, tag: isize) {
+        let action = match tag / 1000 {
+            1 => PlaceAction::Copy,
+            2 => PlaceAction::Move,
+            _ => PlaceAction::Extract,
+        };
+        let place = tag % 1000;
+        let items = std::mem::take(&mut *self.ivars().menu_items.borrow_mut());
+        if items.is_empty() {
+            return;
+        }
+        let destination = if place == 999 {
+            let verb = match action {
+                PlaceAction::Copy => "Copy",
+                PlaceAction::Move => "Move",
+                PlaceAction::Extract => "Extract",
+            };
+            let Some(folder) = choose_folder(&format!("{verb} Here")) else { return };
+            (vfs::local(), folder)
+        } else {
+            match self.ivars().menu_places.borrow().get(place as usize).cloned() {
+                Some(destination) => destination,
+                None => return,
+            }
+        };
+        let (dest_fs, dest) = destination;
+        // Search results: the items' real file system.
+        let fs = self.fs();
+        let fs = fs.browse_fs().unwrap_or(fs);
+        match action {
+            PlaceAction::Extract => super::extract_archive(fs, items[0].clone(), dest_fs, dest),
+            PlaceAction::Copy | PlaceAction::Move => {
+                let same = vfs::same(&fs, &dest_fs) && items.iter().all(|p| p.parent() == Some(dest.as_path()));
+                if same {
+                    objc2_app_kit::NSBeep();
+                    return;
+                }
+                let kind = if action == PlaceAction::Copy { JobKind::Copy } else { JobKind::Move };
+                super::start_job(super::transfer_job(kind, fs, items, dest_fs, dest));
+            }
+        }
+    }
+
     /// The context menu: commands that work where this pane is (the Mac or
     /// a server), worded for it, and disabled when they cannot apply.
     fn build_context_menu(&self, menu: &NSMenu, has_items: bool) {
@@ -607,20 +706,84 @@ impl PaneController {
                 item.setTag(command.tag());
                 unsafe { item.setTarget(Some(self)) };
                 super::prepare_item(&item, command, index);
+                if let Some(icon) = command.menu_symbol().and_then(|name| super::util::symbol(name, command.title())) {
+                    item.setImage(Some(&icon));
+                }
                 item.setEnabled(super::is_enabled_in(command, index, has_items));
                 menu.addItem(&item);
             }
         };
+        // The items these apply to, and the places they can go.
+        // The right-clicked item outside the selection, or the selection.
+        let items = match self.ivars().menu_row.get() {
+            Some(row) => {
+                let state = self.ivars().state.borrow();
+                entry_at(&state, row).map(|e| vec![e.path.clone()]).unwrap_or_default()
+            }
+            None => self.target_paths(),
+        };
+        *self.ivars().menu_items.borrow_mut() = items;
+        let places = self.menu_places_list();
+        let place_menu = |title: &str, symbol: &str, action: PlaceAction, with_here: bool, enabled: bool| {
+            let sub = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns(title));
+            sub.setAutoenablesItems(false);
+            for (index, (label, here)) in places.iter().enumerate() {
+                if *here && !with_here {
+                    continue;
+                }
+                let item = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(mtm),
+                        &ns(label),
+                        Some(sel!(sendTo:)),
+                        &ns(""),
+                    )
+                };
+                item.setTag(action as isize * 1000 + index as isize);
+                unsafe { item.setTarget(Some(self)) };
+                sub.addItem(&item);
+            }
+            sub.addItem(&NSMenuItem::separatorItem(mtm));
+            let choose = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &ns("Choose a Folder\u{2026}"),
+                    Some(sel!(sendTo:)),
+                    &ns(""),
+                )
+            };
+            choose.setTag(action as isize * 1000 + 999);
+            unsafe { choose.setTarget(Some(self)) };
+            sub.addItem(&choose);
+            let item = NSMenuItem::new(mtm);
+            item.setTitle(&ns(title));
+            item.setSubmenu(Some(&sub));
+            item.setEnabled(enabled);
+            if let Some(icon) = super::util::symbol(symbol, title) {
+                item.setImage(Some(&icon));
+            }
+            menu.addItem(&item);
+        };
         use Command::*;
+        if has_items {
+            let read_only = self.fs().read_only();
+            let one_archive = matches!(self.ivars().menu_items.borrow().as_slice(), [one] if vfs::archive::is_archive_name(&crate::pane::title_of(one)));
+            add(Some(Open));
+            add(Some(OpenInNewTab));
+            if self.is_local() {
+                add(Some(QuickLook));
+            }
+            add(None);
+            place_menu("Copy To", "doc.on.doc", PlaceAction::Copy, false, true);
+            place_menu("Move To", "arrow.right.doc.on.clipboard", PlaceAction::Move, false, !read_only);
+            if one_archive {
+                place_menu("Extract To", "shippingbox", PlaceAction::Extract, true, true);
+            }
+            add(Some(Compress));
+            add(None);
+        }
         let commands: &[Option<Command>] = match (self.is_local(), has_items) {
             (true, true) => &[
-                Some(Open),
-                Some(OpenInNewTab),
-                Some(QuickLook),
-                None,
-                Some(CopyToOther),
-                Some(MoveToOther),
-                None,
                 Some(Rename),
                 Some(Duplicate),
                 Some(Trash),
@@ -649,12 +812,6 @@ impl PaneController {
                 Some(Refresh),
             ],
             (false, true) => &[
-                Some(Open),
-                Some(OpenInNewTab),
-                None,
-                Some(CopyToOther),
-                Some(MoveToOther),
-                None,
                 Some(Rename),
                 Some(Duplicate),
                 Some(Trash),
@@ -858,6 +1015,8 @@ impl PaneController {
             container: OnceCell::new(),
             active: Cell::new(false),
             menu_row: Cell::new(None),
+            menu_places: RefCell::new(Vec::new()),
+            menu_items: RefCell::new(Vec::new()),
             context_row: Cell::new(None),
             pending_select: RefCell::new(None),
             header_menu: OnceCell::new(),
@@ -2435,4 +2594,18 @@ pub fn toggle_quick_look(controller: &PaneController) {
         controller.focus();
         panel.makeKeyAndOrderFront(None);
     }
+}
+
+/// Asks for a folder on this Mac (with a button titled `prompt`).
+fn choose_folder(prompt: &str) -> Option<PathBuf> {
+    let panel = objc2_app_kit::NSOpenPanel::openPanel(super::util::mtm());
+    panel.setCanChooseFiles(false);
+    panel.setCanChooseDirectories(true);
+    panel.setCanCreateDirectories(true);
+    panel.setAllowsMultipleSelection(false);
+    panel.setPrompt(Some(&ns(prompt)));
+    if panel.runModal() != objc2_app_kit::NSModalResponseOK {
+        return None;
+    }
+    panel.URL().and_then(|u| url_path(&u))
 }
