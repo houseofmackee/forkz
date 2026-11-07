@@ -1129,6 +1129,9 @@ impl PaneController {
         if count <= 1 || index >= count {
             return false;
         }
+        if let Some((fs, path)) = self.tab_locations().get(index).cloned() {
+            super::remember_closed_tab(self.index(), fs, path);
+        }
         if index == self.active_tab() {
             self.select_tab(if index + 1 < count { index + 1 } else { index - 1 });
         }

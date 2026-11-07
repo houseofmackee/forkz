@@ -20,9 +20,11 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files
 - Quick Look, a hidden files toggle, and live updates when folders change
 - Flat View (Option-Command-F): every file in a folder and the folders in it, in one list
+- Reopen Closed Tab (Shift-Command-T), Move Tab to Other Pane, Select Same Type, and the mouse's Back and Forward buttons
 - Go > Recent Folders: the folders you were in lately, on the Mac and on servers
 - Moving an app to the Trash offers to remove the settings, caches, and support files it left in your Library folder
-- Folder sizes, SHA-256 and MD5 checksums, a built-in compare for files and folders (or your own diff tool), Compare Panes, and Open in Terminal with your terminal app
+- Sounds as in Finder for moving items to the Trash and deleting them, and a chime when a long transfer finishes (or a different sound if something failed); they follow macOS's "Play user interface sound effects" setting and can be turned off in Settings > General
+- Folder sizes, checksums (MD5, SHA-1, SHA-256, SHA-384, and SHA-512), Export Folder Tree (a text listing of a folder and everything in it), a built-in compare for files and folders (or your own diff tool), Compare Panes, and Open in Terminal with your terminal app
 - Workspaces: saved sets of tabs for both panes, including server folders
 - A transfer queue: speed limits, Pause and Resume, Pause All and Stop All, and waiting transfers that can be started now or moved up and down (right-click a transfer), plus rules for errors
 - Zoom (Command-= and Command-minus) and a Settings window (Command-comma) with color themes, text size, row spacing, and your own keyboard shortcuts
@@ -191,6 +193,24 @@ File > Import from FileZilla reads `~/.config/filezilla` and shows what it found
 
 Sites using implicit FTPS (port 990) or protocols forkz does not have, and passwords protected by a FileZilla master password, are listed as not imported. FileZilla's files are not changed.
 
+### Other apps, and moving sites to another Mac
+
+- File > Import from Cyberduck reads Cyberduck's bookmarks (SFTP, FTP, FTPS, WebDAV, S3, and SMB, with their folders and key files).
+- File > Import from WinSCP reads a `WinSCP.ini` (in WinSCP on Windows: Tools > Export/Backup Configuration), with its folders.
+- File > Export Sites saves your sites to a file, and File > Import Sites from File brings them in on another Mac. Passwords are not included: forkz asks for them when connecting.
+
+Sites forkz already has are left as they are. Transmit's exports are in a private format, so its servers cannot be imported.
+
+## Custom tools
+
+Settings > Tools holds your own commands, run by zsh in the pane's folder on the selection: from Commands > Tools, the toolbar (View > Customize Toolbar, with an SF Symbol as the icon), or the command palette. In a command, `{selection}` is the selected items (or the folder if none are selected), `{file}` the first one, `{names}` their names, `{folder}` the pane's folder, and `{other-folder}` and `{other-selection}` the other pane's; paths are quoted for the shell. The same are in the environment as `FORKZ_SELECTION` (one path a line), `FORKZ_FOLDER`, and `FORKZ_OTHER_FOLDER`. A tool can show what it printed when it is done; if it fails, forkz shows its error output. Stop in the activity area ends a tool that runs too long. A few examples come with forkz:
+
+| Tool | Command |
+| --- | --- |
+| Make Executable | `chmod +x {selection}` |
+| Count Lines | `wc -l {selection}` (shows the output) |
+| Disk Usage | `du -sh {selection}` (shows the output) |
+
 ## Keyboard
 
 | Key | Action |
@@ -242,6 +262,7 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 | Control-Shift-Command-S, Control-Command-1 to 9 | Save a workspace, open a workspace |
 | Command-=, Command-minus, Command-0 | Zoom in, zoom out, actual size |
 | Command-T, Command-W | New tab, close tab |
+| Shift-Command-T | Reopen the last closed tab |
 | Control-Tab, Control-Shift-Tab | Next tab, previous tab |
 | Command-comma | Settings |
 

@@ -51,6 +51,42 @@ pub struct Settings {
     pub smart_folders: Vec<SmartFolder>,
     /// Folders the panes showed, the latest first (Go > Recent Folders).
     pub recent_folders: Vec<RecentFolder>,
+    /// Your own commands (Commands > Tools, the toolbar, the palette).
+    pub tools: Vec<CustomTool>,
+}
+
+/// A shell command run on the selection (Settings > Tools).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CustomTool {
+    pub name: String,
+    /// Run by zsh in the pane's folder; {selection}, {file}, {names},
+    /// {folder}, {other-folder}, and {other-selection} are filled in.
+    pub command: String,
+    /// An SF Symbol for the toolbar.
+    #[serde(default = "tool_symbol")]
+    pub symbol: String,
+    /// Show what the command prints when it is done.
+    #[serde(default)]
+    pub show_output: bool,
+}
+
+fn tool_symbol() -> String {
+    "hammer".into()
+}
+
+/// Tools to start with.
+pub fn example_tools() -> Vec<CustomTool> {
+    let tool = |name: &str, command: &str, symbol: &str, show_output: bool| CustomTool {
+        name: name.into(),
+        command: command.into(),
+        symbol: symbol.into(),
+        show_output,
+    };
+    vec![
+        tool("Make Executable", "chmod +x {selection}", "terminal", false),
+        tool("Count Lines", "wc -l {selection}", "text.alignleft", true),
+        tool("Disk Usage", "du -sh {selection}", "chart.pie", true),
+    ]
 }
 
 /// A folder a pane showed: on the Mac, or on a saved site.
@@ -179,6 +215,10 @@ pub struct GeneralSettings {
     pub compare_tool: String,
     /// Moving an app to the Trash offers to remove its leftover files.
     pub app_leftovers: bool,
+    /// Sounds for moving to the Trash and deleting.
+    pub sound_effects: bool,
+    /// A sound when a long transfer finishes.
+    pub transfer_sounds: bool,
 }
 
 impl Default for GeneralSettings {
@@ -188,6 +228,8 @@ impl Default for GeneralSettings {
             terminal: "terminal".into(),
             compare_tool: "forkz".into(),
             app_leftovers: true,
+            sound_effects: true,
+            transfer_sounds: true,
         }
     }
 }
@@ -385,6 +427,7 @@ impl Default for Settings {
             synclets: Vec::new(),
             smart_folders: Vec::new(),
             recent_folders: Vec::new(),
+            tools: example_tools(),
         }
     }
 }

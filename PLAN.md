@@ -126,7 +126,9 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Flat view; recent folders
 - [ ] Disk usage view
 - [x] Shortcuts actions (App Intents) and forkz:// links
-- [ ] Scripting or plugins
+- [x] Custom tools (shell commands on the selection, in a menu, the toolbar, and the palette)
+- [x] Site import from Cyberduck and WinSCP; site export and import between Macs
+- [ ] Scripting or plugins (AppleScript)
 - [ ] Drop stack
 
 ## Release

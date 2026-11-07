@@ -7,6 +7,18 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-07
+
+### Added
+
+- Custom tools (Settings > Tools): your own shell commands, run on the selection from Commands > Tools, the toolbar, or the command palette, with placeholders for the selection, the folder, and the other pane's. A tool can show its output; errors are shown. A few examples come with forkz.
+- Import from Cyberduck and Import from WinSCP (File menu), and Export Sites and Import Sites from File, for moving your sites to another Mac (without passwords).
+- Reopen Closed Tab (Shift-Command-T), Move Tab to Other Pane (Window menu), and Select Same Type (Edit menu).
+- The mouse's Back and Forward buttons go back and forward in the pane under the pointer.
+- SHA-1, SHA-384, and SHA-512 checksums, in File > Copy Checksum with MD5 and SHA-256.
+- Export Folder Tree (File menu): a text file listing a folder and everything in it.
+- Sound cues: Finder's sounds for moving items to the Trash and for deleting them for good, and a chime when a transfer that took 5 seconds or more finishes (another sound if some items failed). They follow macOS's "Play user interface sound effects" setting, and Settings > General can turn each off.
+
 ## [0.14.0] - 2026-11-07
 
 ### Added
@@ -273,7 +285,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/houseofmackee/forkz/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/houseofmackee/forkz/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/houseofmackee/forkz/compare/v0.12.2...v0.13.0
 [0.12.2]: https://github.com/houseofmackee/forkz/compare/v0.12.1...v0.12.2

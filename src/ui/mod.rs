@@ -4,6 +4,7 @@
 mod activity;
 mod column_view;
 pub mod commands;
+mod custom_tools;
 mod dialogs;
 mod diff_window;
 mod duplicates_window;
@@ -23,10 +24,13 @@ mod search;
 mod settings_window;
 mod sidebar;
 mod site_form;
+mod site_transfer;
+mod sounds;
 mod sync_window;
 mod theme_editor;
 mod themed;
 mod tools;
+mod tools_editor;
 mod util;
 mod viewer;
 mod workspaces;
@@ -141,6 +145,29 @@ define_class!(
             open_recent((sender.tag() - RECENT_TAG) as usize);
         }
 
+        /// Commands > Tools.
+        #[unsafe(method(runTool:))]
+        fn run_tool_menu(&self, sender: &NSMenuItem) {
+            run_tool((sender.tag() - TOOL_TAG) as usize);
+        }
+
+        /// A tool on the toolbar (found by its name in the identifier).
+        #[unsafe(method(runToolItem:))]
+        fn run_tool_item(&self, sender: &NSToolbarItem) {
+            let id = sender.itemIdentifier().to_string();
+            let name = id.strip_prefix(TOOL_ITEM_PREFIX).unwrap_or_default().to_string();
+            let index = current_settings().and_then(|s| s.tools.iter().position(|t| t.name == name));
+            match index {
+                Some(index) => run_tool(index),
+                None => dialogs::show_error(format!("There is no tool named \u{201c}{name}\u{201d} any more."), "Remove it from the toolbar with View > Customize Toolbar.".into()),
+            }
+        }
+
+        #[unsafe(method(editTools:))]
+        fn edit_tools(&self, _sender: Option<&AnyObject>) {
+            settings_window::show_tab("Tools");
+        }
+
         #[unsafe(method(clearRecentFolders:))]
         fn clear_recent_folders(&self, _sender: Option<&AnyObject>) {
             update_settings(|s| s.recent_folders.clear());
@@ -202,7 +229,11 @@ define_class!(
     unsafe impl NSMenuDelegate for AppDelegate {
         #[unsafe(method(menuNeedsUpdate:))]
         fn menu_needs_update(&self, menu: &NSMenu) {
-            fill_recent_menu(menu, self);
+            if menu.title().to_string() == "Tools" {
+                fill_tools_menu(menu, self);
+            } else {
+                fill_recent_menu(menu, self);
+            }
         }
     }
 
@@ -240,6 +271,23 @@ define_class!(
 
 impl AppDelegate {
     fn toolbar_item_for(&self, identifier: &NSString) -> Option<Retained<NSToolbarItem>> {
+        if let Some(name) = identifier.to_string().strip_prefix(TOOL_ITEM_PREFIX) {
+            let tool = current_settings().and_then(|s| s.tools.into_iter().find(|t| t.name == name));
+            let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(self.mtm()), identifier);
+            item.setLabel(&ns(name));
+            item.setPaletteLabel(&ns(name));
+            item.setToolTip(Some(&ns(&format!("Run \u{201c}{name}\u{201d}"))));
+            let symbol_name = tool.map_or_else(|| "hammer".to_string(), |t| t.symbol);
+            if let Some(image) = symbol(&symbol_name, name).or_else(|| symbol("hammer", name)) {
+                item.setImage(Some(&image));
+            }
+            item.setBordered(true);
+            unsafe {
+                item.setTarget(Some(self));
+                item.setAction(Some(sel!(runToolItem:)));
+            }
+            return Some(item);
+        }
         let command = TOOLBAR.iter().copied().find(|c| toolbar_id(*c) == identifier.to_string())?;
         let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(self.mtm()), identifier);
         item.setLabel(&ns(command.toolbar_label()));
@@ -284,6 +332,9 @@ pub fn toggle_column(local: bool, id: &str) {
 /// Tags of the workspace menu items: this plus the workspace's index.
 const WORKSPACE_TAG: isize = 3000;
 const RECENT_TAG: isize = 4000;
+const TOOL_TAG: isize = 5000;
+/// Toolbar items for tools: this and the tool's name.
+const TOOL_ITEM_PREFIX: &str = "forkz.tool.";
 
 /// Tags of the Simultaneous Transfers items: this plus the number.
 const TRANSFER_LIMIT_TAG: isize = 2000;
@@ -477,6 +528,9 @@ fn toolbar_identifiers(default: bool) -> Retained<NSArray<NSString>> {
         ]
     } else {
         let mut ids: Vec<_> = TOOLBAR.iter().map(|c| id(*c)).collect();
+        // Your tools (Settings > Tools).
+        let tools = current_settings().map(|s| s.tools).unwrap_or_default();
+        ids.extend(tools.iter().map(|t| ns(&format!("{TOOL_ITEM_PREFIX}{}", t.name))));
         ids.push(flexible);
         ids.push(space);
         ids
@@ -605,6 +659,7 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     }
     // Shortcuts actions that started the app.
     DispatchQueue::main().exec_async(intents::follow_waiting);
+    watch_mouse_buttons();
     ns_app.activate();
     ns_app.run();
     Ok(())
@@ -785,7 +840,15 @@ fn main_menu(
     separator(&file);
     command(&file, Command::Connect);
     command(&file, Command::Disconnect);
-    command(&file, Command::ImportFileZilla);
+    for c in [
+        Command::ImportFileZilla,
+        Command::ImportCyberduck,
+        Command::ImportWinScp,
+        Command::ImportSitesFile,
+        Command::ExportSites,
+    ] {
+        command(&file, c);
+    }
     separator(&file);
     for c in [Command::Open, Command::OpenWithApp, Command::QuickLook, Command::ViewFile] {
         command(&file, c);
@@ -808,15 +871,24 @@ fn main_menu(
     command(&file, Command::Permissions);
     command(&file, Command::EditTags);
     separator(&file);
-    for c in [Command::CompareFiles, Command::CalculateSizes, Command::CopySha256, Command::CopyMd5] {
+    for c in [Command::CompareFiles, Command::CalculateSizes, Command::ExportTree] {
         command(&file, c);
     }
+    let checksums = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Copy Checksum"));
+    for c in [Command::CopyMd5, Command::CopySha1, Command::CopySha256, Command::CopySha384, Command::CopySha512] {
+        command(&checksums, c);
+    }
+    let checksums_item = NSMenuItem::new(mtm);
+    checksums_item.setTitle(&ns("Copy Checksum"));
+    checksums_item.setSubmenu(Some(&checksums));
+    file.addItem(&checksums_item);
     separator(&file);
     for c in [Command::RevealInFinder, Command::OpenInTerminal, Command::Share, Command::AddToSidebar] {
         command(&file, c);
     }
     separator(&file);
     command(&file, Command::CloseTab);
+    command(&file, Command::ReopenClosedTab);
 
     let edit = submenu("Edit");
     standard(&edit, "Cut", sel!(cut:), "x");
@@ -826,6 +898,7 @@ fn main_menu(
     command(&edit, Command::CopyPath);
     standard(&edit, "Select All", sel!(selectAll:), "a");
     command(&edit, Command::SelectMatching);
+    command(&edit, Command::SelectSameType);
     separator(&edit);
     command(&edit, Command::Filter);
     command(&edit, Command::Search);
@@ -919,6 +992,13 @@ fn main_menu(
         command(&commands, c);
     }
     separator(&commands);
+    let tools = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Tools"));
+    tools.setDelegate(Some(ProtocolObject::from_ref(delegate)));
+    let tools_item = NSMenuItem::new(mtm);
+    tools_item.setTitle(&ns("Tools"));
+    tools_item.setSubmenu(Some(&tools));
+    commands.addItem(&tools_item);
+    separator(&commands);
     let limits = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Simultaneous Transfers"));
     for n in [1, 2, 3, 4, 5, 6, 8, 10] {
         let title = if n == 1 { "1 (one after another)".to_string() } else { n.to_string() };
@@ -945,6 +1025,7 @@ fn main_menu(
     separator(&window);
     command(&window, Command::NextTab);
     command(&window, Command::PreviousTab);
+    command(&window, Command::MoveTabToOther);
     separator(&window);
     let workspace_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Workspaces"));
     command(&workspace_menu, Command::SaveWorkspace);
@@ -1034,7 +1115,13 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
                 settings.remote_favorites.iter().any(|f| Some(&f.site_id) == site.as_ref() && f.path == pane.location())
             }
         }
-        Command::CopySha256 | Command::CopyMd5 => has_selection,
+        Command::CopySha256 | Command::CopyMd5 | Command::CopySha1 | Command::CopySha384 | Command::CopySha512 => {
+            has_selection
+        }
+        Command::SelectSameType => has_selection,
+        Command::MoveTabToOther => pane.tab_count() > 1,
+        Command::ReopenClosedTab => CLOSED_TABS.with(|c| !c.borrow().is_empty()),
+        Command::ExportSites => !app.sites.borrow().sites.is_empty(),
         Command::NextTab | Command::PreviousTab => pane.tab_count() > 1,
         Command::CompareFiles => {
             let here = pane.selected_paths().len();
@@ -1254,6 +1341,17 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::CalculateSizes => calculate_sizes(&pane),
         Command::CopySha256 => copy_checksums(&pane, crate::fs::checksum::Algorithm::Sha256),
         Command::CopyMd5 => copy_checksums(&pane, crate::fs::checksum::Algorithm::Md5),
+        Command::CopySha1 => copy_checksums(&pane, crate::fs::checksum::Algorithm::Sha1),
+        Command::CopySha384 => copy_checksums(&pane, crate::fs::checksum::Algorithm::Sha384),
+        Command::CopySha512 => copy_checksums(&pane, crate::fs::checksum::Algorithm::Sha512),
+        Command::ImportCyberduck => site_transfer::import_cyberduck(),
+        Command::ImportWinScp => site_transfer::import_winscp(),
+        Command::ImportSitesFile => site_transfer::import_file(),
+        Command::ExportSites => site_transfer::export_sites(),
+        Command::SelectSameType => select_same_type(&pane),
+        Command::MoveTabToOther => move_tab_to_other(&pane, &other),
+        Command::ReopenClosedTab => reopen_closed_tab(),
+        Command::ExportTree => export_tree(&pane),
         Command::Filter => pane.focus_filter(),
         Command::Settings => settings_window::show(),
         Command::NewTab => pane.new_tab(pane.fs(), pane.location()),
@@ -1564,6 +1662,85 @@ fn recent_title(folder: &crate::settings::RecentFolder) -> String {
     }
 }
 
+/// Fills Commands > Tools: each tool, then Edit Tools.
+fn fill_tools_menu(menu: &NSMenu, delegate: &AppDelegate) {
+    menu.removeAllItems();
+    let mtm = mtm();
+    let tools = current_settings().map(|s| s.tools).unwrap_or_default();
+    for (index, tool) in tools.iter().enumerate() {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &ns(&tool.name),
+                Some(sel!(runTool:)),
+                &ns(""),
+            )
+        };
+        item.setTag(TOOL_TAG + index as isize);
+        item.setToolTip(Some(&ns(&tool.command)));
+        if let Some(icon) = util::symbol(&tool.symbol, &tool.name) {
+            item.setImage(Some(&icon));
+        }
+        unsafe { item.setTarget(Some(delegate)) };
+        menu.addItem(&item);
+    }
+    if !tools.is_empty() {
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+    }
+    let edit = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &ns("Edit Tools\u{2026}"),
+            Some(sel!(editTools:)),
+            &ns(""),
+        )
+    };
+    unsafe { edit.setTarget(Some(delegate)) };
+    menu.addItem(&edit);
+}
+
+/// Runs a tool on the active pane's selection (on this Mac).
+fn run_tool(index: usize) {
+    let Some(app) = app() else { return };
+    let Some(tool) = app.settings.borrow().tools.get(index).cloned() else { return };
+    let active = app.active.get();
+    let (pane, other) = (&app.panes[active], &app.panes[1 - active]);
+    if !pane.is_local() {
+        dialogs::show_error(
+            format!("\u{201c}{}\u{201d} runs on folders on this Mac.", tool.name),
+            "Tools are shell commands: they cannot work on items on servers or in archives.".into(),
+        );
+        return;
+    }
+    let local =
+        |p: &PaneController| if p.is_local() { (p.target_paths(), p.location()) } else { (Vec::new(), PathBuf::new()) };
+    let (other_selection, other_folder) = local(other);
+    let context = custom_tools::Context {
+        selection: pane.target_paths(),
+        folder: pane.location(),
+        other_selection,
+        other_folder,
+    };
+    custom_tools::run(&tool, context);
+}
+
+/// The tools changed (Settings > Tools): the toolbar's items show them.
+pub fn tools_changed() {
+    let Some(app) = app() else { return };
+    let Some(toolbar) = app.window.toolbar() else { return };
+    let names: Vec<String> = app.settings.borrow().tools.iter().map(|t| t.name.clone()).collect();
+    // Items of tools that were renamed or removed go.
+    let items = toolbar.items();
+    for index in (0..items.count()).rev() {
+        let id = items.objectAtIndex(index).itemIdentifier().to_string();
+        if let Some(name) = id.strip_prefix(TOOL_ITEM_PREFIX)
+            && !names.iter().any(|n| n == name)
+        {
+            toolbar.removeItemAtIndex(index as isize);
+        }
+    }
+}
+
 /// Fills Go > Recent Folders.
 fn fill_recent_menu(menu: &NSMenu, delegate: &AppDelegate) {
     menu.removeAllItems();
@@ -1695,6 +1872,134 @@ fn local_copy(fs: &FsRef, path: &Path) -> std::io::Result<PathBuf> {
     let mut writer = std::fs::File::create(&target)?;
     std::io::copy(&mut reader, &mut writer)?;
     Ok(target)
+}
+
+thread_local! {
+    /// Tabs closed lately (pane, file system, folder), the latest last.
+    static CLOSED_TABS: RefCell<Vec<(usize, FsRef, PathBuf)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The mouse's Back and Forward buttons (buttons 4 and 5) go back and
+/// forward in the pane under the pointer.
+fn watch_mouse_buttons() {
+    use objc2_app_kit::{NSEvent, NSEventMask};
+    let block = block2::RcBlock::new(|event: std::ptr::NonNull<NSEvent>| -> *mut NSEvent {
+        let raw = event.as_ptr();
+        let event = unsafe { event.as_ref() };
+        let step = match event.buttonNumber() {
+            3 => -1,
+            4 => 1,
+            _ => return raw,
+        };
+        let Some(app) = app() else { return raw };
+        let in_main = event.window(mtm()).is_some_and(|w| std::ptr::eq(&*w, &*app.window));
+        if !in_main {
+            return raw;
+        }
+        let point = event.locationInWindow();
+        let under = app.panes.iter().find(|pane| {
+            let view = pane.view();
+            let local = view.convertPoint_fromView(point, None);
+            !view.isHiddenOrHasHiddenAncestor() && objc2_foundation::NSPointInRect(local, view.bounds())
+        });
+        let pane = under.unwrap_or(&app.panes[app.active.get()]).clone();
+        if step < 0 {
+            pane.go_back();
+        } else {
+            pane.go_forward();
+        }
+        std::ptr::null_mut()
+    });
+    let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::OtherMouseDown, &block) };
+    // Watched for as long as forkz runs.
+    std::mem::forget(monitor);
+}
+
+/// Remembers a closed tab, for Reopen Closed Tab.
+pub fn remember_closed_tab(pane: usize, fs: FsRef, path: PathBuf) {
+    CLOSED_TABS.with(|c| {
+        let mut closed = c.borrow_mut();
+        closed.push((pane, fs, path));
+        let extra = closed.len().saturating_sub(20);
+        closed.drain(..extra);
+    });
+}
+
+/// File > Reopen Closed Tab: the last closed tab, in its pane again.
+fn reopen_closed_tab() {
+    let Some((index, fs, path)) = CLOSED_TABS.with(|c| c.borrow_mut().pop()) else { return };
+    let Some(app) = app() else { return };
+    // A server since disconnected: its tab opens on the Mac's home.
+    let connected =
+        fs.is_local() || fs.outside().is_some() || app.connections.borrow().iter().any(|(_, c)| vfs::same(c, &fs));
+    let (fs, path) = if connected { (fs, path) } else { (vfs::local(), dirs::home_dir().unwrap_or_default()) };
+    let pane = app.panes[index.min(1)].clone();
+    pane.new_tab(fs, path);
+    set_active(pane.index());
+    pane.focus();
+}
+
+/// Window > Move Tab to Other Pane.
+fn move_tab_to_other(pane: &PaneController, other: &PaneController) {
+    let (fs, path) = (pane.fs(), pane.location());
+    if pane.close_tab(pane.active_tab()) {
+        // Not a closed tab to reopen.
+        CLOSED_TABS.with(|c| c.borrow_mut().pop());
+        other.new_tab(fs, path);
+        set_active(other.index());
+        other.focus();
+    }
+}
+
+/// Edit > Select Same Type: the items like the selected ones (the same
+/// extensions; folders for folders).
+fn select_same_type(pane: &PaneController) {
+    let chosen = pane.target_entries();
+    let folders = chosen.iter().any(|e| e.is_folder_like());
+    let extensions: std::collections::HashSet<String> =
+        chosen.iter().filter(|e| !e.is_folder_like()).map(|e| e.extension()).collect();
+    let same: Vec<PathBuf> = pane
+        .items()
+        .into_iter()
+        .filter(|e| if e.is_folder_like() { folders } else { extensions.contains(&e.extension()) })
+        .map(|e| e.path)
+        .collect();
+    pane.select_paths(&same);
+}
+
+/// File > Export Folder Tree: a text file listing a folder and everything
+/// in it, indented (the selected folder, or the pane's).
+fn export_tree(pane: &PaneController) {
+    let fs = pane.fs();
+    let fs = fs.browse_fs().unwrap_or(fs);
+    let root = match pane.target_entries().as_slice() {
+        [one] if one.is_folder_like() => one.path.clone(),
+        _ => pane.location(),
+    };
+    let name = if root.parent().is_none() && !fs.is_local() { fs.label() } else { title_of(&root) };
+    let panel = objc2_app_kit::NSSavePanel::savePanel(mtm());
+    panel.setNameFieldStringValue(&ns(&format!("{name} tree.txt")));
+    panel.setMessage(Some(&ns(&format!("A text listing of \u{201c}{name}\u{201d} and everything in it."))));
+    if panel.runModal() != objc2_app_kit::NSModalResponseOK {
+        return;
+    }
+    let Some(target) = panel.URL().and_then(|u| util::url_path(&u)) else { return };
+    let hidden = pane.show_hidden();
+    let Some(activity) = activity_view() else { return };
+    let (note, cancel) = activity.begin_task(&format!("Listing \u{201c}{name}\u{201d}\u{2026}"));
+    std::thread::spawn(move || {
+        let result = crate::fs::tree::write(&fs, &root, hidden, &cancel).and_then(|text| std::fs::write(&target, text));
+        DispatchQueue::main().exec_async(move || {
+            if let Some(activity) = activity_view() {
+                activity.remove(note);
+            }
+            match result {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => dialogs::show_error("The folder tree could not be saved.".into(), e.to_string()),
+            }
+        });
+    });
 }
 
 /// Compare Panes: selects in each pane what differs from the other pane:
@@ -2260,10 +2565,23 @@ fn log_job(job: &Job, outcome: &Outcome) {
     }
 }
 
-fn job_finished(id: isize, job: Job, outcome: Outcome) {
+fn job_finished(id: isize, job: Job, outcome: Outcome, took: std::time::Duration) {
     let Some(app) = app() else { return };
     app.activity.remove(id);
     app.activity.job_done(id);
+    // Sound cues (downloads to open a file are not transfers to hear).
+    let cue = match job.kind {
+        _ if outcome.cancelled => None,
+        JobKind::Trash if !outcome.created.is_empty() => Some(sounds::Cue::Trash),
+        JobKind::Delete if outcome.failed.is_empty() => Some(sounds::Cue::Delete),
+        JobKind::Copy | JobKind::Move if took >= sounds::LONG_TRANSFER && !job.open_when_done => {
+            Some(if outcome.failed.is_empty() { sounds::Cue::Done } else { sounds::Cue::Failed })
+        }
+        _ => None,
+    };
+    if let Some(cue) = cue {
+        sounds::play(cue);
+    }
     promises::finished(&job, &outcome);
     log_job(&job, &outcome);
     let shows =
@@ -2957,6 +3275,7 @@ fn command_palette() {
         Synclet(usize),
         SmartFolder(usize),
         Recent(usize),
+        Tool(usize),
         Preset(usize),
         OpenWith(PathBuf, PathBuf),
     }
@@ -3029,6 +3348,9 @@ fn command_palette() {
             .enumerate()
             .map(|(i, f)| item(format!("Open {}", f.name), "Smart folder", Action::SmartFolder(i))),
     );
+    items.extend(
+        settings.tools.iter().enumerate().map(|(i, t)| item(format!("Run {}", t.name), "Tool", Action::Tool(i))),
+    );
     let recent: Vec<_> = settings.recent_folders.iter().map(recent_title).collect();
     items.extend(
         recent
@@ -3073,6 +3395,7 @@ fn command_palette() {
         Some(Action::Synclet(index)) => open_synclet(index),
         Some(Action::SmartFolder(index)) => search::open_smart_folder(index),
         Some(Action::Recent(index)) => open_recent(index),
+        Some(Action::Tool(index)) => run_tool(index),
         Some(Action::Preset(index)) => rename_with_preset(&pane, index),
         Some(Action::OpenWith(file, app)) => open_with(&file, &app),
         None => {}

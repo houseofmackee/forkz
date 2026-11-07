@@ -2,6 +2,7 @@
 //! Passwords are not in that file: they are in the login Keychain.
 
 pub mod filezilla;
+pub mod import;
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

@@ -88,6 +88,17 @@ pub enum Command {
     ComparePanes,
     FlatView,
     FindDuplicates,
+    ImportCyberduck,
+    ImportWinScp,
+    ImportSitesFile,
+    ExportSites,
+    ReopenClosedTab,
+    MoveTabToOther,
+    SelectSameType,
+    CopySha1,
+    CopySha384,
+    CopySha512,
+    ExportTree,
 }
 
 impl Command {
@@ -195,6 +206,17 @@ impl Command {
         Command::ComparePanes,
         Command::FlatView,
         Command::FindDuplicates,
+        Command::ImportCyberduck,
+        Command::ImportWinScp,
+        Command::ImportSitesFile,
+        Command::ExportSites,
+        Command::ReopenClosedTab,
+        Command::MoveTabToOther,
+        Command::SelectSameType,
+        Command::CopySha1,
+        Command::CopySha384,
+        Command::CopySha512,
+        Command::ExportTree,
     ];
 
     pub fn tag(self) -> isize {
@@ -306,6 +328,17 @@ impl Command {
             Command::ComparePanes => "Compare Panes",
             Command::FlatView => "Flat View",
             Command::FindDuplicates => "Find Duplicates",
+            Command::ImportCyberduck => "Import from Cyberduck\u{2026}",
+            Command::ImportWinScp => "Import from WinSCP\u{2026}",
+            Command::ImportSitesFile => "Import Sites from File\u{2026}",
+            Command::ExportSites => "Export Sites\u{2026}",
+            Command::ReopenClosedTab => "Reopen Closed Tab",
+            Command::MoveTabToOther => "Move Tab to Other Pane",
+            Command::SelectSameType => "Select Same Type",
+            Command::CopySha1 => "Copy SHA-1 Checksum",
+            Command::CopySha384 => "Copy SHA-384 Checksum",
+            Command::CopySha512 => "Copy SHA-512 Checksum",
+            Command::ExportTree => "Export Folder Tree\u{2026}",
         }
     }
 
@@ -398,6 +431,17 @@ impl Command {
             Command::ComparePanes => ("", cmd),
             Command::FlatView => ("f", opt_cmd),
             Command::FindDuplicates => ("", cmd),
+            Command::ImportCyberduck => ("", cmd),
+            Command::ImportWinScp => ("", cmd),
+            Command::ImportSitesFile => ("", cmd),
+            Command::ExportSites => ("", cmd),
+            Command::ReopenClosedTab => ("t", shift_cmd),
+            Command::MoveTabToOther => ("", cmd),
+            Command::SelectSameType => ("", cmd),
+            Command::CopySha1 => ("", cmd),
+            Command::CopySha384 => ("", cmd),
+            Command::CopySha512 => ("", cmd),
+            Command::ExportTree => ("", cmd),
             // F3, as in Total Commander (also handled in the lists).
             Command::ViewFile => ("\u{f706}", NSEventModifierFlags::empty()),
         }

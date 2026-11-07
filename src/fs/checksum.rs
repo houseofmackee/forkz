@@ -5,7 +5,8 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use md5::Md5;
-use sha2::{Digest, Sha256};
+use sha1::Sha1;
+use sha2::{Digest, Sha256, Sha384, Sha512};
 
 use crate::vfs::FsRef;
 
@@ -13,6 +14,9 @@ use crate::vfs::FsRef;
 pub enum Algorithm {
     Sha256,
     Md5,
+    Sha1,
+    Sha384,
+    Sha512,
 }
 
 impl Algorithm {
@@ -20,6 +24,9 @@ impl Algorithm {
         match self {
             Algorithm::Sha256 => "SHA-256",
             Algorithm::Md5 => "MD5",
+            Algorithm::Sha1 => "SHA-1",
+            Algorithm::Sha384 => "SHA-384",
+            Algorithm::Sha512 => "SHA-512",
         }
     }
 }
@@ -30,6 +37,9 @@ pub fn checksum(fs: &FsRef, path: &Path, algorithm: Algorithm) -> io::Result<Str
     match algorithm {
         Algorithm::Sha256 => digest::<Sha256>(&mut reader),
         Algorithm::Md5 => digest::<Md5>(&mut reader),
+        Algorithm::Sha1 => digest::<Sha1>(&mut reader),
+        Algorithm::Sha384 => digest::<Sha384>(&mut reader),
+        Algorithm::Sha512 => digest::<Sha512>(&mut reader),
     }
 }
 
@@ -62,6 +72,9 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         assert_eq!(checksum(&fs, &file, Algorithm::Md5).unwrap(), "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(checksum(&fs, &file, Algorithm::Sha1).unwrap(), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert!(checksum(&fs, &file, Algorithm::Sha384).unwrap().starts_with("cb00753f45a35e8b"));
+        assert!(checksum(&fs, &file, Algorithm::Sha512).unwrap().starts_with("ddaf35a193617aba"));
         // Larger than one chunk.
         let big = dir.path().join("big.bin");
         std::fs::write(&big, vec![7u8; 600_000]).unwrap();

@@ -44,6 +44,8 @@ struct Controls {
     show_hidden: Retained<NSButton>,
     start_on_parent: Retained<NSButton>,
     app_leftovers: Retained<NSButton>,
+    sound_effects: Retained<NSButton>,
+    transfer_sounds: Retained<NSButton>,
     terminal: Retained<NSPopUpButton>,
     terminals: Vec<&'static str>,
     compare: Retained<NSPopUpButton>,
@@ -73,6 +75,7 @@ pub struct WindowIvars {
     window: OnceCell<Retained<NSWindow>>,
     controls: OnceCell<Controls>,
     filters: OnceCell<Retained<super::filters_editor::FiltersEditor>>,
+    tools: OnceCell<Retained<super::tools_editor::ToolsEditor>>,
 }
 
 define_class!(
@@ -173,6 +176,27 @@ thread_local! {
     static WINDOW: RefCell<Option<Retained<SettingsWindow>>> = const { RefCell::new(None) };
 }
 
+/// Shows the Settings window at a tab (by its title).
+pub fn show_tab(title: &str) {
+    show();
+    let Some(settings) = WINDOW.with(|w| w.borrow().clone()) else { return };
+    let tabs = settings.ivars().window.get().and_then(|w| w.contentView()).and_then(|v| find_tabs(&v));
+    if let Some(tabs) = tabs {
+        let index = unsafe { tabs.indexOfTabViewItemWithIdentifier(&ns(title)) };
+        if index >= 0 {
+            tabs.selectTabViewItemAtIndex(index);
+        }
+    }
+}
+
+/// The tab view in the window's views.
+fn find_tabs(view: &NSView) -> Option<Retained<NSTabView>> {
+    if let Ok(tabs) = view.retain().downcast::<NSTabView>() {
+        return Some(tabs);
+    }
+    view.subviews().iter().find_map(|v| find_tabs(&v))
+}
+
 /// Shows the Settings window (made the first time), with current values.
 pub fn show() {
     let mtm = mtm();
@@ -254,6 +278,7 @@ impl SettingsWindow {
             window: OnceCell::new(),
             controls: OnceCell::new(),
             filters: OnceCell::new(),
+            tools: OnceCell::new(),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.build(mtm);
@@ -278,6 +303,8 @@ impl SettingsWindow {
                 self,
                 mtm,
             ),
+            sound_effects: checkbox("Play sounds when moving items to the Trash and deleting them", self, mtm),
+            transfer_sounds: checkbox("Play a sound when a long transfer finishes", self, mtm),
             terminal: popup(&terminal_names, self, mtm),
             terminals: terminals.iter().map(|t| t.0).collect(),
             compare: popup(&compare_names, self, mtm),
@@ -373,6 +400,8 @@ impl SettingsWindow {
                 (label("Files:", mtm), view(&*controls.show_hidden)),
                 (empty(mtm), view(&*controls.start_on_parent)),
                 (label("Apps:", mtm), view(&*controls.app_leftovers)),
+                (label("Sounds:", mtm), view(&*controls.sound_effects)),
+                (empty(mtm), view(&*controls.transfer_sounds)),
                 (label("Open in Terminal uses:", mtm), view(&*controls.terminal)),
                 (label("Compare Files uses:", mtm), view(&*controls.compare)),
                 (label("Updates:", mtm), view(&*controls.auto_updates)),
@@ -453,6 +482,9 @@ impl SettingsWindow {
         let filters_editor = super::filters_editor::FiltersEditor::new(mtm);
         let filters = filters_editor.view();
         let _ = self.ivars().filters.set(filters_editor);
+        let tools_editor = super::tools_editor::ToolsEditor::new(mtm);
+        let tools = tools_editor.view();
+        let _ = self.ivars().tools.set(tools_editor);
 
         let tabs = NSTabView::new(mtm);
         for (title, content) in [
@@ -460,11 +492,13 @@ impl SettingsWindow {
             ("Appearance", appearance),
             ("Transfers", transfers),
             ("Filters", filters),
+            ("Tools", tools),
             ("SFTP", sftp),
             ("Shortcuts", shortcuts),
         ] {
             let item = NSTabViewItem::new();
             item.setLabel(&ns(title));
+            unsafe { item.setIdentifier(Some(&ns(title))) };
             item.setView(Some(&content));
             tabs.addTabViewItem(&item);
         }
@@ -562,12 +596,17 @@ impl SettingsWindow {
         if let Some(filters) = self.ivars().filters.get() {
             filters.load();
         }
+        if let Some(tools) = self.ivars().tools.get() {
+            tools.load();
+        }
         let Some(c) = self.ivars().controls.get() else { return };
         let Some(settings) = super::current_settings() else { return };
         let set = |b: &NSButton, on: bool| b.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
         set(&c.show_hidden, settings.show_hidden);
         set(&c.start_on_parent, settings.general.start_on_parent);
         set(&c.app_leftovers, settings.general.app_leftovers);
+        set(&c.sound_effects, settings.general.sound_effects);
+        set(&c.transfer_sounds, settings.general.transfer_sounds);
         let terminal = c.terminals.iter().position(|k| *k == settings.general.terminal).unwrap_or(0);
         c.terminal.selectItemAtIndex(terminal as isize);
         let compare = c.compare_tools.iter().position(|k| *k == settings.general.compare_tool).unwrap_or(0);
@@ -623,6 +662,8 @@ impl SettingsWindow {
             s.show_hidden = show_hidden;
             s.general.start_on_parent = on(&c.start_on_parent);
             s.general.app_leftovers = on(&c.app_leftovers);
+            s.general.sound_effects = on(&c.sound_effects);
+            s.general.transfer_sounds = on(&c.transfer_sounds);
             if let Some(key) = c.terminals.get(index(&c.terminal)) {
                 s.general.terminal = key.to_string();
             }

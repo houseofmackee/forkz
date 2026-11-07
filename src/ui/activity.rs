@@ -333,8 +333,10 @@ impl Activity {
             .name(format!("forkz job {id}"))
             .spawn(move || {
                 let mut observer = UiObserver { id, last_report: None, on_error, tries: Default::default() };
+                let started = Instant::now();
                 let outcome = ops::run(&job, &mut observer, cancel);
-                DispatchQueue::main().exec_async(move || super::job_finished(id, job, outcome));
+                let took = started.elapsed();
+                DispatchQueue::main().exec_async(move || super::job_finished(id, job, outcome, took));
             })
             .expect("starting a job thread");
     }
