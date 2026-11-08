@@ -7,6 +7,12 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.16.4] - 2026-11-08
+
+### Fixed
+
+- In iCloud Drive, the path bar showed "iCloud Drive" twice, and the first led to the folder of apps' containers. It now starts at iCloud Drive (then the app's folder, if in one, and the folders below).
+
 ## [0.16.3] - 2026-11-08
 
 ### Fixed
@@ -336,7 +342,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.16.3...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.16.4...HEAD
+[0.16.4]: https://github.com/houseofmackee/forkz/compare/v0.16.3...v0.16.4
 [0.16.3]: https://github.com/houseofmackee/forkz/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/houseofmackee/forkz/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/houseofmackee/forkz/compare/v0.16.0...v0.16.1

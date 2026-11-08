@@ -1485,6 +1485,29 @@ impl PaneController {
     fn update_path_bar(&self) {
         let Some(path_control) = self.ivars().path_control.get() else { return };
         let state = self.ivars().state.borrow();
+        // In iCloud Drive: from iCloud Drive down (macOS's own path would
+        // go through the folder of apps' containers above it).
+        if state.is_local()
+            && let Some(chain) = crate::fs::icloud::path_chain(state.location())
+        {
+            let items: Vec<Retained<objc2_app_kit::NSPathControlItem>> = chain
+                .iter()
+                .enumerate()
+                .map(|(i, (_, title))| {
+                    let item = objc2_app_kit::NSPathControlItem::new();
+                    item.setTitle(&ns(title));
+                    let image =
+                        if i == 0 { super::util::symbol("icloud", title) } else { Some(super::util::folder_icon()) };
+                    if let Some(image) = image {
+                        item.setImage(Some(&image));
+                    }
+                    item
+                })
+                .collect();
+            path_control.setPathItems(&NSArray::from_retained_slice(&items));
+            *self.ivars().crumbs.borrow_mut() = chain.into_iter().map(|(path, _)| path).collect();
+            return;
+        }
         if state.is_local() {
             path_control.setURL(Some(&file_url(state.location())));
             return;

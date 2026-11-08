@@ -46,6 +46,39 @@ pub fn parent_of(path: &Path) -> Option<PathBuf> {
     Some(container.parent()?.join(DRIVE_FOLDER))
 }
 
+/// The path bar inside iCloud Drive (from iCloud Drive down, never the
+/// folder of containers above it): each folder with its title. None
+/// outside iCloud Drive.
+pub fn path_chain(location: &Path) -> Option<Vec<(PathBuf, String)>> {
+    // iCloud Drive's folder, from the location itself.
+    let (drive, rest, app): (PathBuf, &Path, Option<(PathBuf, String)>) = match location
+        .ancestors()
+        .find(|a| is_drive(a))
+    {
+        Some(drive) => (drive.to_path_buf(), location.strip_prefix(drive).ok()?, None),
+        None => {
+            // In an app's folder: its Documents folder and what is below.
+            let documents = location.ancestors().find(|a| container_of(a).is_some())?;
+            let container = container_of(documents)?;
+            let drive = container.parent()?.join(DRIVE_FOLDER);
+            (drive, location.strip_prefix(documents).ok()?, Some((documents.to_path_buf(), display_name(container))))
+        }
+    };
+    let mut chain = vec![(drive, "iCloud Drive".to_string())];
+    let mut folder = match app {
+        Some((documents, name)) => {
+            chain.push((documents.clone(), name));
+            documents
+        }
+        None => chain[0].0.clone(),
+    };
+    for part in rest.components() {
+        folder = folder.join(part);
+        chain.push((folder.clone(), part.as_os_str().to_string_lossy().into_owned()));
+    }
+    Some(chain)
+}
+
 /// The name macOS gives a container ("com~apple~Numbers" is "Numbers").
 fn display_name(container: &Path) -> String {
     use objc2_foundation::{NSFileManager, NSString};
@@ -94,6 +127,22 @@ mod tests {
         assert!(parent_of(&drive).is_none());
         assert!(parent_of(&drive.join("Documents")).is_none(), "a folder named Documents in iCloud Drive");
         assert_eq!(display_name(Path::new("/nowhere/57T9237FN3~net~whatsapp~WhatsApp")), "WhatsApp");
+    }
+
+    #[test]
+    fn path_bar_starts_at_icloud_drive() {
+        let home = Path::new("/Users/me");
+        let drive = home.join(DRIVE);
+        let titles = |path: &Path| path_chain(path).map(|c| c.into_iter().map(|(_, t)| t).collect::<Vec<_>>());
+        assert_eq!(titles(&drive), Some(vec!["iCloud Drive".to_string()]));
+        assert_eq!(titles(&drive.join("Work/2026")), Some(vec!["iCloud Drive".into(), "Work".into(), "2026".into()]));
+        let numbers = home.join("Library/Mobile Documents/com~apple~Numbers/Documents/Budgets");
+        let chain = path_chain(&numbers).unwrap();
+        assert_eq!(chain[0].0, drive);
+        assert_eq!(chain.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>(), ["iCloud Drive", "Numbers", "Budgets"]);
+        assert_eq!(chain[2].0, numbers);
+        assert_eq!(titles(home), None);
+        assert_eq!(titles(&home.join("Library/Mobile Documents")), None);
     }
 
     #[test]
