@@ -7,6 +7,13 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.16.3] - 2026-11-08
+
+### Fixed
+
+- iCloud Drive works as in Finder: it also shows the folders of apps that keep documents in iCloud (Keynote, Numbers, Preview, and so on) under the apps' names, and going up no longer leads into the folder of apps' containers (with their private data).
+- Locations listed Time Machine's snapshot and backup mounts, and folders they leave behind in /Volumes, which then stayed there. It now lists only the mounted volumes Finder shows.
+
 ## [0.16.2] - 2026-11-07
 
 ### Added
@@ -329,7 +336,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.16.2...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.16.3...HEAD
+[0.16.3]: https://github.com/houseofmackee/forkz/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/houseofmackee/forkz/compare/v0.16.1...v0.16.2
 [0.16.1]: https://github.com/houseofmackee/forkz/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/houseofmackee/forkz/compare/v0.15.2...v0.16.0

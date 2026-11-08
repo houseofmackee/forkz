@@ -8,12 +8,34 @@ pub mod duplicates;
 pub mod filters;
 pub mod git;
 pub mod glob;
+pub mod icloud;
 pub mod ops;
 pub mod search;
 pub mod sync;
 pub mod tags;
 pub mod tree;
 pub mod usage;
+
+/// The mounted volumes Finder would show: real mounts in /Volumes that are
+/// not marked "don't browse" (Time Machine's snapshots and backups are),
+/// by mount point. Empty folders left in /Volumes are not mounts and are
+/// left out.
+pub fn browsable_volumes() -> Vec<std::path::PathBuf> {
+    let mut mounts: *mut libc::statfs = std::ptr::null_mut();
+    let count = unsafe { libc::getmntinfo(&mut mounts, libc::MNT_NOWAIT) };
+    if count <= 0 || mounts.is_null() {
+        return Vec::new();
+    }
+    let all = unsafe { std::slice::from_raw_parts(mounts, count as usize) };
+    all.iter()
+        .filter(|m| m.f_flags & libc::MNT_DONTBROWSE as u32 == 0)
+        .map(|m| {
+            let name = unsafe { std::ffi::CStr::from_ptr(m.f_mntonname.as_ptr()) };
+            std::path::PathBuf::from(name.to_string_lossy().into_owned())
+        })
+        .filter(|path| path.parent() == Some(std::path::Path::new("/Volumes")))
+        .collect()
+}
 pub mod view;
 
 use std::cmp::Ordering;
@@ -148,6 +170,14 @@ pub fn list_dir(path: &Path) -> io::Result<Vec<Entry>> {
         let Ok(item) = item else { continue };
         if let Ok(entry) = Entry::from_path(&item.path()) {
             entries.push(entry);
+        }
+    }
+    // iCloud Drive also shows the apps' folders, as in Finder.
+    if icloud::is_drive(path) {
+        for folder in icloud::app_folders(path) {
+            if !entries.iter().any(|e| e.name == folder.name) {
+                entries.push(folder);
+            }
         }
     }
     Ok(entries)

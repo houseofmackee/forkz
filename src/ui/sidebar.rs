@@ -865,22 +865,21 @@ fn accent() -> Retained<objc2_app_kit::NSColor> {
 fn volumes() -> Vec<(String, PathBuf)> {
     let mut found = Vec::new();
     let mut startup = "Macintosh HD".to_string();
-    let mut others = Vec::new();
+    // The startup disk appears in /Volumes as a link to "/".
     if let Ok(entries) = std::fs::read_dir("/Volumes") {
         for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with('.') {
-                continue;
-            }
-            // The startup disk appears as a link to "/".
-            if std::fs::read_link(&path).is_ok_and(|t| t == Path::new("/")) {
-                startup = name;
-            } else if path.is_dir() {
-                others.push((name, path));
+            if std::fs::read_link(entry.path()).is_ok_and(|t| t == Path::new("/")) {
+                startup = entry.file_name().to_string_lossy().into_owned();
             }
         }
     }
+    // Mounted volumes only, as Finder shows them (not Time Machine's
+    // snapshots and backups, nor folders left behind in /Volumes).
+    let mut others: Vec<(String, PathBuf)> = crate::fs::browsable_volumes()
+        .into_iter()
+        .filter_map(|path| Some((path.file_name()?.to_string_lossy().into_owned(), path)))
+        .filter(|(name, _)| !name.starts_with('.'))
+        .collect();
     others.sort_by(|a, b| crate::fs::natural_cmp(&a.0, &b.0));
     found.push((startup, PathBuf::from("/")));
     found.extend(others);

@@ -444,7 +444,13 @@ impl PaneState {
             self.navigate_to(fs, folder);
             return Some(file);
         }
-        let parent = self.location.parent()?.to_path_buf();
+        // An app's folder in iCloud Drive: up to iCloud Drive.
+        let icloud = if self.fs.is_local() { crate::fs::icloud::parent_of(&self.location) } else { None };
+        let parent = match icloud {
+            Some(drive) => drive,
+            None if self.fs.is_local() && crate::fs::icloud::is_drive(&self.location) => return None,
+            None => self.location.parent()?.to_path_buf(),
+        };
         let came_from = self.location.clone();
         self.navigate(parent);
         Some(came_from)
@@ -452,6 +458,10 @@ impl PaneState {
 
     /// There is somewhere to go up to (".." is shown).
     pub fn can_go_up(&self) -> bool {
+        // iCloud Drive is a top, as in Finder.
+        if self.fs.is_local() && crate::fs::icloud::is_drive(&self.location) {
+            return false;
+        }
         self.location.parent().is_some() || self.fs.outside().is_some()
     }
 
@@ -507,20 +517,22 @@ impl PaneState {
 /// The display name of a folder: its name, or "Macintosh HD" for "/".
 pub fn title_of(path: &Path) -> String {
     match path.file_name() {
-        // iCloud Drive's folder, as Finder names it.
-        Some(name) if name == ICLOUD_FOLDER && path.ends_with(ICLOUD_DRIVE) => "iCloud Drive".to_string(),
+        // iCloud Drive's folder, and apps' folders in it, as Finder names them.
+        Some(_) if crate::fs::icloud::is_drive(path) => "iCloud Drive".to_string(),
+        Some(name)
+            if name == "Documents"
+                && let Some(app) = crate::fs::icloud::app_folder_name(path) =>
+        {
+            app
+        }
         Some(name) => name.to_string_lossy().into_owned(),
         None => "Macintosh HD".to_string(),
     }
 }
 
-/// iCloud Drive, relative to the home folder.
-pub const ICLOUD_DRIVE: &str = "Library/Mobile Documents/com~apple~CloudDocs";
-const ICLOUD_FOLDER: &str = "com~apple~CloudDocs";
-
 /// iCloud Drive's folder, if iCloud Drive is on.
 pub fn icloud_drive() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|home| home.join(ICLOUD_DRIVE)).filter(|path| path.is_dir())
+    crate::fs::icloud::drive()
 }
 
 /// Summary for a status bar: "3 of 42 selected, 1.2 MB" or "42 items".
