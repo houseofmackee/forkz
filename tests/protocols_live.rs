@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use forkz::fs::ops::{self, Answer, CancelToken, Conflict, ErrorAnswer, Job, JobKind, Observer, Progress, Resolution};
 use forkz::vfs::known_hosts::Status;
 use forkz::vfs::sftp::Prompter;
-use forkz::vfs::{self, FsRef, Vfs, azure, ftp, s3, webdav};
+use forkz::vfs::{self, FsRef, Vfs, azure, boxcom, ftp, s3, webdav};
 
 /// Trusts certificates and gives the password when asked.
 struct Answers {
@@ -388,6 +388,41 @@ fn azure_blob() {
     assert!(ops::rename(&fs, &container.join("f"), "g").is_err());
     fs.remove_dir(&container.join("f")).unwrap();
     fs.remove_dir(container).unwrap();
+}
+
+#[test]
+#[ignore = "needs the Box stand-in (scripts/test_protocols.sh)"]
+fn box_api() {
+    let Some((host, port)) = address("FORKZ_TEST_BOX") else { return };
+    let base = format!("http://{host}:{port}");
+    let saved: std::sync::Arc<Mutex<Vec<String>>> = Default::default();
+    let keep = saved.clone();
+    let params = boxcom::BoxParams {
+        refresh_token: Some("rt-0".into()),
+        save_token: Some(std::sync::Arc::new(move |token: &str| keep.lock().unwrap().push(token.to_string()))),
+        timeout: Duration::from_secs(10),
+        service: boxcom::Service {
+            api: format!("{base}/2.0"),
+            upload: format!("{base}/api/2.0"),
+            token: format!("{base}/oauth2/token"),
+            // Files over 1 MB go in parts (the stand-in's parts are 1 MB).
+            simple_upload: 1_000_000,
+            client: Some(("forkz-test".into(), "test-secret".into())),
+        },
+        browser: false,
+    };
+    let fs: FsRef = boxcom::connect(params.clone()).unwrap();
+    assert_eq!(fs.label(), "Box: tester@example.com");
+    exercise(fs.clone(), Path::new("/box-run"), true);
+    // Box revoked access tokens along the way; each renewal was kept, and
+    // only the last one still works.
+    let tokens = saved.lock().unwrap().clone();
+    assert!(tokens.len() > 2, "{tokens:?}");
+    let stale = boxcom::BoxParams { refresh_token: Some(tokens[0].clone()), ..params.clone() };
+    assert_eq!(boxcom::connect(stale).err().map(|e| e.kind()), Some(io::ErrorKind::PermissionDenied));
+    let latest = boxcom::BoxParams { refresh_token: tokens.last().cloned(), ..params };
+    let again: FsRef = boxcom::connect(latest).unwrap();
+    assert!(again.list(Path::new("/")).unwrap().iter().all(|e| e.name != "box-run"));
 }
 
 #[test]

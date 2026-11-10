@@ -106,7 +106,13 @@ jobs:
           FORKZ_NOTARY_KEY_ID: ${{ vars.NOTARY_KEY_ID }}
           FORKZ_NOTARY_ISSUER: ${{ vars.NOTARY_ISSUER_ID }}
           FORKZ_SPARKLE_KEY: ${{ runner.temp }}/sparkle_key
+          # forkz's Box app, built into the binary (Box sign-in).
+          FORKZ_BOX_CLIENT_ID: ${{ secrets.BOX_CLIENT_ID }}
+          FORKZ_BOX_CLIENT_SECRET: ${{ secrets.BOX_CLIENT_SECRET }}
         run: |
+          if [ -z "$FORKZ_BOX_CLIENT_ID" ] || [ -z "$FORKZ_BOX_CLIENT_SECRET" ]; then
+            echo "::warning::BOX_CLIENT_ID and BOX_CLIENT_SECRET are not set: this build cannot sign in to Box"
+          fi
           if [ -z "$FORKZ_TEAM_ID" ] || [ -z "$FORKZ_NOTARY_KEY_ID" ] || [ -z "$FORKZ_NOTARY_ISSUER" ]; then
             echo "::error::the APPLE_TEAM_ID, NOTARY_KEY_ID and NOTARY_ISSUER_ID variables must be set"
             exit 1

@@ -33,6 +33,7 @@ struct Fields {
     protocol: Retained<NSPopUpButton>,
     /// The protocol shown before the last change (to swap default ports).
     last_protocol: std::cell::Cell<Protocol>,
+    host: Retained<objc2_app_kit::NSComboBox>,
     port: Retained<NSTextField>,
     user: Retained<NSTextField>,
     region: Retained<NSTextField>,
@@ -127,9 +128,20 @@ impl FormTarget {
         fields.key_file.setEnabled(key);
         fields.choose.setEnabled(key);
         fields.region.setEnabled(s3 || protocol == Protocol::Gcs);
+        // Box: signing in happens in the browser.
+        let browser = protocol.signs_in_with_browser();
+        fields.host.setEnabled(!browser);
+        fields.port.setEnabled(!browser);
+        fields.user.setEnabled(!browser);
+        fields.host.setPlaceholderString(Some(&ns(if browser {
+            "Not needed"
+        } else {
+            "files.example.com, or a host from ~/.ssh/config"
+        })));
         // The password field doubles as the key's passphrase.
-        fields.password.setEnabled(auth != Some(AuthMethod::Agent));
+        fields.password.setEnabled(auth != Some(AuthMethod::Agent) && !browser);
         let password_hint = match () {
+            _ if browser => "Not needed: you sign in in the browser",
             _ if protocol == Protocol::Gcs => "HMAC secret",
             _ if protocol == Protocol::Azure => "Account access key",
             _ if s3 => "Secret access key",
@@ -138,6 +150,7 @@ impl FormTarget {
         };
         fields.password.setPlaceholderString(Some(&ns(password_hint)));
         let user_hint = match protocol {
+            _ if browser => "Not needed: you sign in in the browser".to_string(),
             Protocol::Gcs => "HMAC access key".to_string(),
             Protocol::Azure => "Storage account name".to_string(),
             _ if s3 => "Access key ID".to_string(),
@@ -151,6 +164,7 @@ impl FormTarget {
             _ if protocol == Protocol::Nfs => "Export, for example /exports/media",
             _ if share => "Share (or Share/folder); empty to choose",
             _ if protocol == Protocol::Azure => "Optional: /container/folder",
+            _ if browser => "Optional: /folder",
             _ if cloud => "Optional: /bucket/folder",
             _ => "Login folder",
         };
@@ -280,6 +294,7 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
     let _ = target.ivars().fields.set(Fields {
         protocol: protocol.clone(),
         last_protocol: std::cell::Cell::new(site.protocol),
+        host: host.clone(),
         port: port.clone(),
         user: user.clone(),
         region: region.clone(),
@@ -317,7 +332,10 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
         let s3 = matches!(protocol_choice, Protocol::S3 | Protocol::S3Http);
         let cloud = protocol_choice.is_object_storage();
         // Google's and Azure's servers when none is typed.
-        let host_text = if host_text.is_empty() {
+        let browser = protocol_choice.signs_in_with_browser();
+        let host_text = if browser {
+            protocol_choice.default_host("").unwrap_or_default()
+        } else if host_text.is_empty() {
             protocol_choice.default_host(&user.stringValue().to_string()).unwrap_or_default()
         } else {
             host_text
@@ -329,6 +347,8 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
             Some("Enter the server\u{2019}s name or address.")
         } else if port_number.is_none() {
             Some("The port must be a number from 1 to 65535.")
+        } else if browser {
+            None
         } else if cloud && user.stringValue().to_string().trim().is_empty() && !host_text.contains('@') {
             Some(match protocol_choice {
                 Protocol::Azure => "Enter the storage account name as the user.",
@@ -348,6 +368,7 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
         // A user@host typed in the server field is split.
         let (user_text, host_text) = match host_text.split_once('@') {
             Some((u, h)) if user.stringValue().to_string().trim().is_empty() => (u.to_string(), h.to_string()),
+            _ if browser => (String::new(), host_text),
             _ => (user.stringValue().to_string().trim().to_string(), host_text),
         };
         result.protocol = protocol_choice;
@@ -359,7 +380,11 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
         result.auth = auth_choice;
         result.key_file = (!key_text.is_empty()).then(|| PathBuf::from(key_text));
         let name_text = name.stringValue().to_string().trim().to_string();
-        result.name = if name_text.is_empty() { host_text } else { name_text };
+        result.name = match () {
+            _ if !name_text.is_empty() => name_text,
+            _ if browser => protocol_choice.title().to_string(),
+            _ => host_text,
+        };
         let remote_text = remote.stringValue().to_string().trim().to_string();
         result.remote_dir = (!remote_text.is_empty()).then_some(remote_text);
         let local_text = local.stringValue().to_string().trim().to_string();

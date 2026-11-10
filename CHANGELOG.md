@@ -7,6 +7,16 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-10
+
+### Added
+
+- Box: choose it in Connect to Server and sign in in the browser. Browse, copy both ways (large files in parts), rename, move, and delete (into Box's trash); forkz remembers the sign-in in the Keychain.
+
+### Fixed
+
+- `forkz` on the command line accepted only `sftp://` addresses; it now takes all the kinds Go to Folder does (`ftp://`, `s3://`, `box://`, and so on).
+
 ## [0.17.0] - 2026-11-10
 
 ### Added
@@ -349,7 +359,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/houseofmackee/forkz/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/houseofmackee/forkz/compare/v0.16.4...v0.17.0
 [0.16.4]: https://github.com/houseofmackee/forkz/compare/v0.16.3...v0.16.4
 [0.16.3]: https://github.com/houseofmackee/forkz/compare/v0.16.2...v0.16.3

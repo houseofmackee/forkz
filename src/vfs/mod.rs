@@ -3,6 +3,7 @@
 
 pub mod archive;
 pub mod azure;
+pub mod boxcom;
 pub mod ftp;
 pub mod fxp;
 pub mod http;
@@ -122,6 +123,17 @@ pub trait Vfs: Send + Sync {
     /// An item that is a place to connect to (a server in Network): its
     /// address, opened instead of the item.
     fn link_target(&self, _path: &Path) -> Option<String> {
+        None
+    }
+
+    /// `remove_dir` takes a folder with everything in it, in one request
+    /// (deleting item by item would be slow).
+    fn removes_folders_whole(&self) -> bool {
+        false
+    }
+
+    /// Where deleted items go, if they can be restored (Box's trash).
+    fn deleted_items_go(&self) -> Option<&'static str> {
         None
     }
 

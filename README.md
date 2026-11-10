@@ -6,7 +6,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 
 **[Download the latest release](https://github.com/houseofmackee/forkz/releases/latest)** (Apple silicon, macOS 14 or later): signed with a Developer ID, notarized by Apple, and it updates itself. Or install it with Homebrew: `brew install --cask houseofmackee/tap/forkz`.
 
-**Status:** early development. The local dual-pane file manager, SFTP, FTP and FTPS, WebDAV, S3, Google Cloud Storage, Azure Blob Storage, and SMB, AFP, and NFS shares work; cloud drives come later. See [PLAN.md](PLAN.md) for what is done and what is planned, and [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+**Status:** early development. The local dual-pane file manager, SFTP, FTP and FTPS, WebDAV, S3, Google Cloud Storage, Azure Blob Storage, Box, and SMB, AFP, and NFS shares work; other cloud drives come later. See [PLAN.md](PLAN.md) for what is done and what is planned, and [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## Features
 
@@ -193,8 +193,9 @@ Choose the protocol in Connect to Server; sites keep it.
 - **S3 and S3-compatible storage:** the access key ID goes in User and the secret key in Password (kept in the Keychain). The top level lists your buckets. The region comes from an AWS server name (`s3.eu-west-1.amazonaws.com`); for other providers, set it in Region (Cloudflare R2 uses `auto`). Files up to 5 GB; folders can be created and deleted, files renamed.
 - **Google Cloud Storage** through its S3-compatible XML API: create an HMAC key (Cloud Storage > Settings > Interoperability) and put the access key in User and the secret in Password. Server defaults to `storage.googleapis.com`.
 - **Azure Blob Storage:** the storage account name goes in User and an access key in Password. Server defaults to `ACCOUNT.blob.core.windows.net`; the top level lists the account's containers, and Remote folder can start in one (`/container/folder`). Files up to 5000 MiB; folders work as in the Azure portal. For the Azurite emulator, set Server to `127.0.0.1` and Port to `10000`.
+- **Box:** choose Box in Connect to Server (no server, user, or password), and sign in in the browser when forkz opens it. forkz keeps the sign-in in your login Keychain, so later connections go straight in (Box asks again after 60 days without connecting). Remote folder can start in a folder (`/Projects`). Files of any size the account allows (large ones are uploaded in parts); deleted items go to Box's trash.
 - **SMB, AFP, and NFS** shares are mounted by macOS, as in Finder (its sign-in and share-picker dialogs included), and browsed like folders on the Mac. Put the share in Remote folder (for example `Public` or `Public/Photos`), or leave it empty to choose. A share that is already mounted is used as it is. Disconnect (Command-E) unmounts the share.
-- Addresses work in Go to Folder and on the command line: `sftp://`, `ftp://`, `ftps://`, `dav://`, `davs://`, `s3://`, `gs://`, `azure://`, `smb://`, `afp://`, and `nfs://`.
+- Addresses work in Go to Folder and on the command line: `sftp://`, `ftp://`, `ftps://`, `dav://`, `davs://`, `s3://`, `gs://`, `azure://`, `box://`, `smb://`, `afp://`, and `nfs://`.
 
 ### Importing from FileZilla
 
@@ -293,12 +294,14 @@ Settings > Shortcuts changes any of the menu shortcuts. To find a command, type 
 cargo run                # run from source
 cargo test               # unit tests
 scripts/test_sftp.sh     # live SFTP tests against a throwaway local sshd
-scripts/test_protocols.sh  # live FTP/FTPS, WebDAV, S3, and Azure tests against throwaway local servers (Python; Azurite through npx)
+scripts/test_protocols.sh  # live FTP/FTPS, WebDAV, S3, Azure, and Box tests against throwaway local servers (Python; Azurite through npx; a stand-in for Box's API)
 scripts/bundle.sh        # dist/forkz.app with Sparkle, signed (Developer ID if available)
 scripts/make_icon.sh     # macos/AppIcon.svg to AppIcon.icns (needs librsvg)
 ```
 
 Building needs Xcode (or its command line tools with the macOS SDK): the Shortcuts actions in `macos/Intents` are Swift, compiled into the app by `build.rs`, and `scripts/bundle.sh` adds the metadata Shortcuts reads. `FORKZ_NO_INTENTS=1 cargo build` leaves them out.
+
+Signing in to Box needs a Box app (a Box Platform app with OAuth 2.0, redirect URI `http://127.0.0.1:53791`): set `FORKZ_BOX_CLIENT_ID` and `FORKZ_BOX_CLIENT_SECRET` when building (releases get forkz's from the repository's secrets) or when running forkz.
 
 ## Releasing
 

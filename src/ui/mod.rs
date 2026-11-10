@@ -2491,11 +2491,13 @@ fn delete(pane: &PaneController, paths: Vec<PathBuf>) {
     };
     let message = format!("Delete {what} from {}?", fs.label());
     let why = if fs.outside().is_some() {
-        "Items in an archive cannot go to the Trash: this cannot be undone."
+        "Items in an archive cannot go to the Trash: this cannot be undone.".to_string()
+    } else if let Some(place) = fs.deleted_items_go() {
+        format!("They go to {place}, where they can be restored.")
     } else {
-        "Servers have no Trash: this cannot be undone."
+        "Servers have no Trash: this cannot be undone.".to_string()
     };
-    if dialogs::confirm(&message, why, "Delete", true) {
+    if dialogs::confirm(&message, &why, "Delete", true) {
         start_job(Job::between(JobKind::Delete, fs.clone(), paths, fs, pane.location()));
     }
 }
@@ -3191,12 +3193,11 @@ fn delete_immediately(pane: &PaneController) {
         [one] => format!("\u{201c}{}\u{201d}", title_of(one)),
         many => format!("{} items", many.len()),
     };
-    if dialogs::confirm(
-        &format!("Delete {what} immediately?"),
-        "It does not go to the Trash: this cannot be undone.",
-        "Delete",
-        true,
-    ) {
+    let why = match fs.deleted_items_go() {
+        Some(place) => format!("It goes to {place}, where it can be restored."),
+        None => "It does not go to the Trash: this cannot be undone.".to_string(),
+    };
+    if dialogs::confirm(&format!("Delete {what} immediately?"), &why, "Delete", true) {
         start_job(Job::between(JobKind::Delete, fs.clone(), paths, fs, pane.location()));
     }
 }
@@ -4109,9 +4110,12 @@ fn site_action(action: sidebar::SiteAction, site_id: Option<String>) {
         (SiteAction::Connect, Some(site)) => connect_site(site, active, None, false),
         (SiteAction::ConnectInOther, Some(site)) => connect_site(site, 1 - active, None, false),
         (SiteAction::Edit, Some(site)) => {
-            let saved = crate::sites::keychain::password(&site.id);
+            // Box keeps its sign-in there, not a password to show.
+            let browser = site.protocol.signs_in_with_browser();
+            let saved = if browser { None } else { crate::sites::keychain::password(&site.id) };
             if let Some(form) = site_form::show(Some(&site), saved.clone()) {
-                if form.save {
+                let keep_sign_in = browser && form.site.protocol == site.protocol;
+                if form.save && !keep_sign_in {
                     match &form.password {
                         Some(password) => crate::sites::keychain::save_password(&form.site.id, password),
                         None => crate::sites::keychain::delete_password(&form.site.id),
@@ -4355,6 +4359,24 @@ fn open_connection(
             let fs = vfs::s3::connect(params, prompter)?;
             let secret = fs.secret().map(str::to_string);
             Ok((fs, secret))
+        }
+        Protocol::Box => {
+            // Box replaces the sign-in each time it is renewed: a saved
+            // site keeps the latest one in the Keychain.
+            let saved = crate::sites::SiteStore::load().get(&site.id).is_some();
+            let id = site.id.clone();
+            let save_token: Option<vfs::boxcom::SaveToken> = saved.then(|| {
+                std::sync::Arc::new(move |token: &str| crate::sites::keychain::save_password(&id, token)) as _
+            });
+            let params = vfs::boxcom::BoxParams {
+                refresh_token: password,
+                save_token,
+                timeout,
+                service: Default::default(),
+                browser: true,
+            };
+            let fs = vfs::boxcom::connect(params)?;
+            Ok((fs, None))
         }
         Protocol::Azure => {
             let host = Protocol::Azure

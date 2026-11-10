@@ -6,7 +6,9 @@ forkz: a dual-pane file manager
 Usage:
   forkz                                Start the app
   forkz FOLDER                         Start with FOLDER in the left pane
-  forkz sftp://[user@]host[:port]/path Connect (using a saved site if one matches)
+  forkz sftp://[user@]host[:port]/path Connect (using a saved site if one matches);
+                                       also ftp, ftps, dav, davs, s3, gs, azure,
+                                       box, smb, afp, and nfs addresses
   forkz 'forkz://open?path=...'        Follow a forkz:// link (see the README)
   forkz --version                      Print the version
   forkz --help       Print this help
@@ -51,7 +53,9 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(target)
-            if target.starts_with("sftp://")
+            if target
+                .split_once("://")
+                .is_some_and(|(scheme, _)| forkz::sites::Protocol::from_scheme(scheme).is_some())
                 || target.starts_with("forkz:")
                 || std::path::Path::new(target).is_dir() =>
         {

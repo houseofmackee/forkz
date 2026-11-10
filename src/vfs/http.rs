@@ -14,16 +14,28 @@ pub use ureq::Agent;
 /// A client that reports HTTP errors as responses (to read their status),
 /// allows WebDAV methods, and uses macOS's TLS and trust settings.
 pub fn agent(timeout: Duration) -> Agent {
+    build_agent(timeout, true)
+}
+
+/// The same, but redirects come back as responses (to follow them with
+/// the request's own headers, such as Range).
+pub fn agent_without_redirects(timeout: Duration) -> Agent {
+    build_agent(timeout, false)
+}
+
+fn build_agent(timeout: Duration, redirects: bool) -> Agent {
     use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
     // The system's roots and trust settings (Keychain), not a bundled list.
     let tls = TlsConfig::builder().provider(TlsProvider::NativeTls).root_certs(RootCerts::PlatformVerifier).build();
-    let config = Agent::config_builder()
+    let mut config = Agent::config_builder()
         .http_status_as_error(false)
         .allow_non_standard_methods(true)
         .timeout_connect(Some(timeout))
-        .tls_config(tls)
-        .build();
-    Agent::new_with_config(config)
+        .tls_config(tls);
+    if !redirects {
+        config = config.max_redirects(0).max_redirects_will_error(false);
+    }
+    Agent::new_with_config(config.build())
 }
 
 /// Characters left as they are in a path segment (RFC 3986 unreserved).
@@ -61,6 +73,36 @@ pub fn utc_stamp(time: SystemTime) -> (String, String) {
     let date = format!("{year:04}{month:02}{day:02}");
     let time = format!("{date}T{:02}{:02}{:02}Z", rest / 3600, rest % 3600 / 60, rest % 60);
     (date, time)
+}
+
+/// "2026-11-04T10:20:30.000Z" or "2012-12-12T10:53:43-08:00" (ISO 8601
+/// as S3 and Box write it).
+pub fn parse_iso(text: &str) -> Option<SystemTime> {
+    let text = text.trim();
+    let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    // A time zone after the seconds (and any fraction): Z or +HH:MM.
+    let zone = text.get(19..)?.trim_start_matches(|c: char| c == '.' || c.is_ascii_digit());
+    let offset = match zone.as_bytes().first() {
+        Some(sign @ (b'+' | b'-')) => {
+            let hours = zone.get(1..3)?.parse::<i64>().ok()?;
+            let minutes = zone.get(zone.len().saturating_sub(2)..)?.parse::<i64>().ok()?;
+            let seconds = hours * 3600 + minutes * 60;
+            if *sign == b'+' { seconds } else { -seconds }
+        }
+        _ => 0,
+    };
+    // Days from 1970 to the date (Howard Hinnant's algorithm).
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (month + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    let seconds = days * 86_400 + hour * 3600 + minute * 60 + second - offset;
+    u64::try_from(seconds).ok().map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s))
 }
 
 /// The other end of an upload pipe: what the request body reads.
@@ -174,6 +216,10 @@ mod tests {
         assert_eq!(decode("/my%20folder/%C3%A4%2Bb.txt"), "/my folder/ä+b.txt");
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_440_938_160);
         assert_eq!(utc_stamp(time), ("20150830".into(), "20150830T123600Z".into()));
+        let utc = parse_iso("2026-11-04T10:20:30.000Z").unwrap();
+        assert_eq!(parse_iso("2026-11-04T02:20:30-08:00"), Some(utc));
+        assert_eq!(parse_iso("2026-11-04T11:50:30+01:30"), Some(utc));
+        assert_eq!(parse_iso("garbage"), None);
     }
 
     /// The system's trust store verifies a public server (needs the

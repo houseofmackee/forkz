@@ -306,23 +306,7 @@ fn folder_entry(path: PathBuf, modified: Option<SystemTime>) -> Entry {
     }
 }
 
-/// "2026-11-04T10:20:30.000Z" (S3 dates).
-fn parse_iso(text: &str) -> Option<SystemTime> {
-    let text = text.trim();
-    let number = |range: std::ops::Range<usize>| text.get(range)?.parse::<i64>().ok();
-    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
-    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
-    // Days from 1970 to the date (Howard Hinnant's algorithm).
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = y.div_euclid(400);
-    let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let seconds = days * 86_400 + hour * 3600 + minute * 60 + second;
-    u64::try_from(seconds).ok().map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s))
-}
+use super::http::parse_iso;
 
 impl Vfs for S3Fs {
     fn key(&self) -> String {

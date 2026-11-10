@@ -1,8 +1,9 @@
 #!/bin/sh
-# Runs the live FTP/FTPS, WebDAV, and S3 tests against throwaway servers on
-# 127.0.0.1: pyftpdlib (FTP with explicit TLS, a self-signed certificate;
-# two more for FXP, one of which refuses it), WsgiDAV, and moto (an S3
-# emulator). They run from a Python virtual
+# Runs the live FTP/FTPS, WebDAV, S3, Azure, and Box tests against throwaway
+# servers on 127.0.0.1: pyftpdlib (FTP with explicit TLS, a self-signed
+# certificate; two more for FXP, one of which refuses it), WsgiDAV, moto (an
+# S3 emulator), Azurite (if Node is installed), and a stand-in for Box's API
+# (scripts/box_mock.py). They run from a Python virtual
 # environment in a temporary folder that is removed afterwards, along with
 # everything the servers stored.
 #
@@ -83,6 +84,10 @@ PIDS="$PIDS $!"
 "$DIR/venv/bin/moto_server" -H 127.0.0.1 -p 9555 > "$DIR/s3.log" 2>&1 &
 PIDS="$PIDS $!"
 
+# A stand-in for Box's API (Python's standard library only).
+"$DIR/venv/bin/python" scripts/box_mock.py 9777 > "$DIR/box.log" 2>&1 &
+PIDS="$PIDS $!"
+
 # Azurite (Microsoft's Azure Storage emulator), if Node is installed.
 AZURE=""
 if command -v npx >/dev/null 2>&1; then
@@ -93,7 +98,7 @@ if command -v npx >/dev/null 2>&1; then
 fi
 
 # Wait for all of them to listen.
-for port in 2121 2122 2123 8080 9555 ${AZURE:+10000}; do
+for port in 2121 2122 2123 8080 9555 9777 ${AZURE:+10000}; do
     for _ in $(seq 1 50); do
         nc -z 127.0.0.1 "$port" 2>/dev/null && break
         sleep 0.2
@@ -102,10 +107,10 @@ done
 
 status=0
 FORKZ_TEST_FTP=127.0.0.1:2121 FORKZ_TEST_FTP2=127.0.0.1:2122 FORKZ_TEST_FTP_NO_FXP=127.0.0.1:2123 \
-FORKZ_TEST_DAV=127.0.0.1:8080 FORKZ_TEST_S3=127.0.0.1:9555 FORKZ_TEST_AZURE="$AZURE" \
+FORKZ_TEST_DAV=127.0.0.1:8080 FORKZ_TEST_S3=127.0.0.1:9555 FORKZ_TEST_AZURE="$AZURE" FORKZ_TEST_BOX=127.0.0.1:9777 \
     cargo test --test protocols_live -- --ignored --test-threads=1 "$@" || status=$?
 if [ "$status" -ne 0 ]; then
-    for log in ftp ftp2 ftp3 dav s3 azure; do
+    for log in ftp ftp2 ftp3 dav s3 azure box; do
         echo "--- $log.log (last lines)"
         tail -n 30 "$DIR/$log.log"
     done

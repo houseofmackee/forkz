@@ -405,8 +405,11 @@ impl Runner<'_> {
     }
 
     fn delete_all(&mut self, sources: &[PathBuf]) -> Result<(), Stopped> {
+        // Where folders go whole, counting what is in them would take as
+        // long as deleting item by item.
+        let whole = self.src.removes_folders_whole();
         for source in sources {
-            self.progress.total_items += measure(&self.src, source).1;
+            self.progress.total_items += if whole { 1 } else { measure(&self.src, source).1 };
         }
         self.report();
         for source in sources {
@@ -424,7 +427,9 @@ impl Runner<'_> {
         let Ok(entry) = src.stat(path) else { return Ok(true) };
         self.progress.current = entry.name.clone();
         let mut complete = true;
-        if entry.kind == EntryKind::Folder {
+        if entry.kind == EntryKind::Folder && src.removes_folders_whole() {
+            complete = self.attempt(path, |_| src.remove_dir(path))?;
+        } else if entry.kind == EntryKind::Folder {
             let children = match src.list(path) {
                 Ok(children) => children,
                 Err(e) => {
@@ -914,7 +919,9 @@ pub fn remove_tree(fs: &FsRef, path: &Path) -> io::Result<()> {
         return if meta.is_dir() { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) };
     }
     let entry = fs.stat(path)?;
-    if entry.kind == EntryKind::Folder {
+    if entry.kind == EntryKind::Folder && fs.removes_folders_whole() {
+        fs.remove_dir(path)
+    } else if entry.kind == EntryKind::Folder {
         for child in fs.list(path)? {
             remove_tree(fs, &child.path)?;
         }

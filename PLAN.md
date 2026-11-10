@@ -104,6 +104,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Filename filters for listings and copies
 - [x] Open in Terminal for iTerm, Warp, Ghostty, Kitty (and SSH sessions in them)
 - [x] Tags (column and editing)
+- [x] Box, through OAuth in the browser
 - [ ] Cloud drives (Google Drive, OneDrive, Dropbox) through OAuth
 - [x] Settings window
 - [x] Compare Files in an external tool (FileMerge, Kaleidoscope, Beyond Compare, BBEdit, VS Code)

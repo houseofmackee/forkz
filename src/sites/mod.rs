@@ -60,6 +60,8 @@ pub enum Protocol {
     Gcs,
     /// Azure Blob Storage (account name and access key).
     Azure,
+    /// Box (signing in in the browser).
+    Box,
     /// Network shares, mounted by macOS.
     Smb,
     Afp,
@@ -67,7 +69,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub const ALL: [Protocol; 13] = [
+    pub const ALL: [Protocol; 14] = [
         Protocol::Sftp,
         Protocol::Ftp,
         Protocol::Ftps,
@@ -78,6 +80,7 @@ impl Protocol {
         Protocol::S3Http,
         Protocol::Gcs,
         Protocol::Azure,
+        Protocol::Box,
         Protocol::Smb,
         Protocol::Afp,
         Protocol::Nfs,
@@ -95,6 +98,7 @@ impl Protocol {
             Protocol::S3Http => "S3 (HTTP, unencrypted)",
             Protocol::Gcs => "Google Cloud Storage",
             Protocol::Azure => "Azure Blob Storage",
+            Protocol::Box => "Box",
             Protocol::Smb => "SMB (Windows and Mac sharing)",
             Protocol::Afp => "AFP (older Mac sharing)",
             Protocol::Nfs => "NFS",
@@ -112,6 +116,7 @@ impl Protocol {
             Protocol::S3 | Protocol::S3Http => "s3",
             Protocol::Gcs => "gcs",
             Protocol::Azure => "azure",
+            Protocol::Box => "box",
             Protocol::Smb => "smb",
             Protocol::Afp => "afp",
             Protocol::Nfs => "nfs",
@@ -128,6 +133,7 @@ impl Protocol {
             "s3" => Protocol::S3,
             "gcs" | "gs" => Protocol::Gcs,
             "azure" | "azblob" => Protocol::Azure,
+            "box" => Protocol::Box,
             "smb" | "cifs" => Protocol::Smb,
             "afp" => Protocol::Afp,
             "nfs" => Protocol::Nfs,
@@ -140,7 +146,7 @@ impl Protocol {
             Protocol::Sftp => 22,
             Protocol::Ftp | Protocol::Ftps | Protocol::FtpPlain => 21,
             Protocol::Webdav | Protocol::S3Http => 80,
-            Protocol::Webdavs | Protocol::S3 | Protocol::Gcs | Protocol::Azure => 443,
+            Protocol::Webdavs | Protocol::S3 | Protocol::Gcs | Protocol::Azure | Protocol::Box => 443,
             Protocol::Smb => 445,
             Protocol::Afp => 548,
             Protocol::Nfs => 2049,
@@ -161,9 +167,16 @@ impl Protocol {
     pub fn default_host(self, user: &str) -> Option<String> {
         match self {
             Protocol::Gcs => Some("storage.googleapis.com".into()),
+            Protocol::Box => Some("box.com".into()),
             Protocol::Azure if !user.trim().is_empty() => Some(crate::vfs::azure::account_host(user.trim())),
             _ => None,
         }
+    }
+
+    /// A cloud drive signed in to in the browser (Box): no server, user,
+    /// or password in the site.
+    pub fn signs_in_with_browser(self) -> bool {
+        self == Protocol::Box
     }
 
     /// A network share that macOS mounts (SMB, AFP, NFS).
