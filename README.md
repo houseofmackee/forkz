@@ -6,7 +6,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 
 **[Download the latest release](https://github.com/houseofmackee/forkz/releases/latest)** (Apple silicon, macOS 14 or later): signed with a Developer ID, notarized by Apple, and it updates itself. Or install it with Homebrew: `brew install --cask houseofmackee/tap/forkz`.
 
-**Status:** early development. The local dual-pane file manager, SFTP, FTP and FTPS, WebDAV, S3, and SMB, AFP, and NFS shares work; cloud drives come later. See [PLAN.md](PLAN.md) for what is done and what is planned, and [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
+**Status:** early development. The local dual-pane file manager, SFTP, FTP and FTPS, WebDAV, S3, Google Cloud Storage, Azure Blob Storage, and SMB, AFP, and NFS shares work; cloud drives come later. See [PLAN.md](PLAN.md) for what is done and what is planned, and [CHANGELOG.md](CHANGELOG.md) for what changed in each release.
 
 ## Features
 
@@ -25,6 +25,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - Moving an app to the Trash offers to remove the settings, caches, and support files it left in your Library folder
 - Sounds as in Finder for moving items to the Trash and deleting them, and a chime when a long transfer finishes (or a different sound if something failed); they follow macOS's "Play user interface sound effects" setting and can be turned off in Settings > General
 - Folder sizes, checksums (MD5, SHA-1, SHA-256, SHA-384, and SHA-512), Export Folder Tree (a text listing of a folder and everything in it), a built-in compare for files and folders (or your own diff tool), Compare Panes, and Open in Terminal with your terminal app
+- A terminal pane below the panes (View > Show Terminal, Control-`) that follows the active pane's folder
 - Workspaces: saved sets of tabs for both panes, including server folders
 - A transfer queue: speed limits, Pause and Resume, Pause All and Stop All, and waiting transfers that can be started now or moved up and down (right-click a transfer), plus rules for errors
 - Zoom (Command-= and Command-minus) and a Settings window (Command-comma) with color themes, text size, row spacing, and your own keyboard shortcuts
@@ -67,6 +68,8 @@ A search on the Mac can be saved as a smart folder ("Save as a smart folder in t
 ![Two versions of a JavaScript file side by side, with changed lines in blue, the changed words marked, and added lines in green](docs/images/compare-files.png)
 
 Compare Files (Control-Command-C) compares two selected files, or one selected in each pane, in a window of its own: side by side, line by line, with changed lines in blue (and the words that changed marked), removed lines in red, and added lines in green. Command-Down Arrow and Command-Up Arrow move to the next and previous change, and whitespace or case can be ignored. Binary files are compared byte by byte. It works on the Mac, on servers, and in archives.
+
+The terminal pane (View > Show Terminal, Control-`) runs your login shell, with your shell settings, below the panes, starting in the active pane's folder. While the shell waits for a command, it follows the active pane to each folder you go to (View > Terminal Follows Active Pane turns that off). Control-` gives it the focus, and again hides it; it keeps its height. Copy, Paste, and Command-K (clear) work as in Terminal, and typing `exit` closes it.
 
 ![Two website folders compared: files only on one side, files of different sizes, and identical files, with each folder's contents indented below it](docs/images/compare-folders.png)
 
@@ -180,7 +183,7 @@ The same things work as `forkz://` links, for scripts, launchers such as Raycast
 - **Interrupted transfers resume** from their partial file, if the original has not changed since.
 - **Drag to Finder:** files and folders dragged from a server pane download where you drop them.
 
-## FTP, WebDAV, S3, and network shares
+## FTP, WebDAV, S3, cloud storage, and network shares
 
 Choose the protocol in Connect to Server; sites keep it.
 
@@ -188,8 +191,10 @@ Choose the protocol in Connect to Server; sites keep it.
 - **FXP:** copies between two FTP servers go straight from one server to the other when both allow it, without passing through your Mac (the activity shows "server to server"). Many servers refuse this; forkz checks once per pair of servers and otherwise copies through the Mac as usual. With FTPS, one of the servers must support SSCN; FXP is never used when only one of the two connections is encrypted.
 - **WebDAV** over HTTPS or HTTP, with Basic login. Put the server's WebDAV path in Remote folder (for Nextcloud, `/remote.php/dav/files/USER`).
 - **S3 and S3-compatible storage:** the access key ID goes in User and the secret key in Password (kept in the Keychain). The top level lists your buckets. The region comes from an AWS server name (`s3.eu-west-1.amazonaws.com`); for other providers, set it in Region (Cloudflare R2 uses `auto`). Files up to 5 GB; folders can be created and deleted, files renamed.
+- **Google Cloud Storage** through its S3-compatible XML API: create an HMAC key (Cloud Storage > Settings > Interoperability) and put the access key in User and the secret in Password. Server defaults to `storage.googleapis.com`.
+- **Azure Blob Storage:** the storage account name goes in User and an access key in Password. Server defaults to `ACCOUNT.blob.core.windows.net`; the top level lists the account's containers, and Remote folder can start in one (`/container/folder`). Files up to 5000 MiB; folders work as in the Azure portal. For the Azurite emulator, set Server to `127.0.0.1` and Port to `10000`.
 - **SMB, AFP, and NFS** shares are mounted by macOS, as in Finder (its sign-in and share-picker dialogs included), and browsed like folders on the Mac. Put the share in Remote folder (for example `Public` or `Public/Photos`), or leave it empty to choose. A share that is already mounted is used as it is. Disconnect (Command-E) unmounts the share.
-- Addresses work in Go to Folder and on the command line: `sftp://`, `ftp://`, `ftps://`, `dav://`, `davs://`, `s3://`, `smb://`, `afp://`, and `nfs://`.
+- Addresses work in Go to Folder and on the command line: `sftp://`, `ftp://`, `ftps://`, `dav://`, `davs://`, `s3://`, `gs://`, `azure://`, `smb://`, `afp://`, and `nfs://`.
 
 ### Importing from FileZilla
 
@@ -253,6 +258,7 @@ Settings > Tools holds your own commands, run by zsh in the pane's folder on the
 | Shift-Command-H, Shift-Command-D, Shift-Command-O, Option-Command-L, Shift-Command-A | Home, Desktop, Documents, Downloads, Applications |
 | Shift-Command-R | Show in Finder |
 | Option-Command-T | Open in Terminal |
+| Control-` | Show the terminal pane (again: hide it) |
 | Control-Command-T | Add to the sidebar |
 | Command-U | Swap panes |
 | Option-Command-= | Same folder in the other pane |
@@ -287,7 +293,7 @@ Settings > Shortcuts changes any of the menu shortcuts. To find a command, type 
 cargo run                # run from source
 cargo test               # unit tests
 scripts/test_sftp.sh     # live SFTP tests against a throwaway local sshd
-scripts/test_protocols.sh  # live FTP/FTPS, WebDAV, and S3 tests against throwaway local servers (Python)
+scripts/test_protocols.sh  # live FTP/FTPS, WebDAV, S3, and Azure tests against throwaway local servers (Python; Azurite through npx)
 scripts/bundle.sh        # dist/forkz.app with Sparkle, signed (Developer ID if available)
 scripts/make_icon.sh     # macos/AppIcon.svg to AppIcon.icns (needs librsvg)
 ```

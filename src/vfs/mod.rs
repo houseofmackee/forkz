@@ -2,6 +2,7 @@
 //! call blocks, so remote ones run off the main thread.
 
 pub mod archive;
+pub mod azure;
 pub mod ftp;
 pub mod fxp;
 pub mod http;

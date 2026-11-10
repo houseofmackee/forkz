@@ -7,6 +7,13 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-10
+
+### Added
+
+- A terminal pane below the panes (View > Show Terminal, Control-`): your shell, starting in the active pane's folder and following it to each folder you go to while it waits for a command. View > Terminal Follows Active Pane turns that off.
+- Google Cloud Storage (with HMAC keys) and Azure Blob Storage (with the storage account's access key) in Connect to Server, as `gs://` and `azure://` addresses too.
+
 ## [0.16.4] - 2026-11-08
 
 ### Fixed
@@ -342,7 +349,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.16.4...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/houseofmackee/forkz/compare/v0.16.4...v0.17.0
 [0.16.4]: https://github.com/houseofmackee/forkz/compare/v0.16.3...v0.16.4
 [0.16.3]: https://github.com/houseofmackee/forkz/compare/v0.16.2...v0.16.3
 [0.16.2]: https://github.com/houseofmackee/forkz/compare/v0.16.1...v0.16.2

@@ -101,6 +101,8 @@ pub enum Command {
     ExportTree,
     DiskUsage,
     ShowDropStack,
+    ToggleTerminal,
+    TerminalFollows,
 }
 
 impl Command {
@@ -221,6 +223,8 @@ impl Command {
         Command::ExportTree,
         Command::DiskUsage,
         Command::ShowDropStack,
+        Command::ToggleTerminal,
+        Command::TerminalFollows,
     ];
 
     pub fn tag(self) -> isize {
@@ -345,6 +349,8 @@ impl Command {
             Command::ExportTree => "Export Folder Tree\u{2026}",
             Command::DiskUsage => "Disk Usage",
             Command::ShowDropStack => "Show Drop Stack",
+            Command::ToggleTerminal => "Show Terminal",
+            Command::TerminalFollows => "Terminal Follows Active Pane",
         }
     }
 
@@ -450,6 +456,9 @@ impl Command {
             Command::ExportTree => ("", cmd),
             Command::DiskUsage => ("", cmd),
             Command::ShowDropStack => ("", cmd),
+            // As in Visual Studio Code.
+            Command::ToggleTerminal => ("`", NSEventModifierFlags::Control),
+            Command::TerminalFollows => ("", cmd),
             // F3, as in Total Commander (also handled in the lists).
             Command::ViewFile => ("\u{f706}", NSEventModifierFlags::empty()),
         }
@@ -520,6 +529,7 @@ impl Command {
             FindDuplicates => "doc.on.doc.fill",
             DiskUsage => "chart.pie",
             ShowDropStack => "tray.and.arrow.down",
+            ToggleTerminal => "apple.terminal",
             FlatView => "list.bullet.rectangle",
             ViewAsList => "list.bullet",
             ViewAsIcons => "square.grid.2x2",
@@ -553,6 +563,7 @@ impl Command {
             Command::TogglePreview => "sidebar.right",
             Command::ToggleSidebar => "sidebar.left",
             Command::ShowDropStack => "tray.and.arrow.down",
+            Command::ToggleTerminal => "apple.terminal",
             _ => "questionmark",
         }
     }
@@ -562,6 +573,7 @@ impl Command {
         match self {
             Command::CopyToOther => "Copy to",
             Command::ShowDropStack => "Drop Stack",
+            Command::ToggleTerminal => "Terminal",
             Command::MoveToOther => "Move to",
             Command::Trash => "Delete",
             Command::ToggleHidden => "Hidden Files",

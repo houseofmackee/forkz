@@ -56,6 +56,10 @@ pub enum Protocol {
     S3,
     /// S3 over plain HTTP (local MinIO and test servers).
     S3Http,
+    /// Google Cloud Storage, through its S3-compatible API (HMAC keys).
+    Gcs,
+    /// Azure Blob Storage (account name and access key).
+    Azure,
     /// Network shares, mounted by macOS.
     Smb,
     Afp,
@@ -63,7 +67,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub const ALL: [Protocol; 11] = [
+    pub const ALL: [Protocol; 13] = [
         Protocol::Sftp,
         Protocol::Ftp,
         Protocol::Ftps,
@@ -72,6 +76,8 @@ impl Protocol {
         Protocol::Webdav,
         Protocol::S3,
         Protocol::S3Http,
+        Protocol::Gcs,
+        Protocol::Azure,
         Protocol::Smb,
         Protocol::Afp,
         Protocol::Nfs,
@@ -87,6 +93,8 @@ impl Protocol {
             Protocol::Webdavs => "WebDAV (HTTPS)",
             Protocol::S3 => "Amazon S3 or compatible",
             Protocol::S3Http => "S3 (HTTP, unencrypted)",
+            Protocol::Gcs => "Google Cloud Storage",
+            Protocol::Azure => "Azure Blob Storage",
             Protocol::Smb => "SMB (Windows and Mac sharing)",
             Protocol::Afp => "AFP (older Mac sharing)",
             Protocol::Nfs => "NFS",
@@ -102,6 +110,8 @@ impl Protocol {
             Protocol::Webdav => "dav",
             Protocol::Webdavs => "davs",
             Protocol::S3 | Protocol::S3Http => "s3",
+            Protocol::Gcs => "gcs",
+            Protocol::Azure => "azure",
             Protocol::Smb => "smb",
             Protocol::Afp => "afp",
             Protocol::Nfs => "nfs",
@@ -116,6 +126,8 @@ impl Protocol {
             "dav" | "webdav" | "http" => Protocol::Webdav,
             "davs" | "webdavs" | "https" => Protocol::Webdavs,
             "s3" => Protocol::S3,
+            "gcs" | "gs" => Protocol::Gcs,
+            "azure" | "azblob" => Protocol::Azure,
             "smb" | "cifs" => Protocol::Smb,
             "afp" => Protocol::Afp,
             "nfs" => Protocol::Nfs,
@@ -128,7 +140,7 @@ impl Protocol {
             Protocol::Sftp => 22,
             Protocol::Ftp | Protocol::Ftps | Protocol::FtpPlain => 21,
             Protocol::Webdav | Protocol::S3Http => 80,
-            Protocol::Webdavs | Protocol::S3 => 443,
+            Protocol::Webdavs | Protocol::S3 | Protocol::Gcs | Protocol::Azure => 443,
             Protocol::Smb => 445,
             Protocol::Afp => 548,
             Protocol::Nfs => 2049,
@@ -137,6 +149,21 @@ impl Protocol {
 
     pub fn is_sftp(self) -> bool {
         self == Protocol::Sftp
+    }
+
+    /// Cloud object storage: S3, Google Cloud Storage, or Azure (keys, not
+    /// a user and password; buckets or containers at the top).
+    pub fn is_object_storage(self) -> bool {
+        matches!(self, Protocol::S3 | Protocol::S3Http | Protocol::Gcs | Protocol::Azure)
+    }
+
+    /// The server a site uses when it names none (the cloud services').
+    pub fn default_host(self, user: &str) -> Option<String> {
+        match self {
+            Protocol::Gcs => Some("storage.googleapis.com".into()),
+            Protocol::Azure if !user.trim().is_empty() => Some(crate::vfs::azure::account_host(user.trim())),
+            _ => None,
+        }
     }
 
     /// A network share that macOS mounts (SMB, AFP, NFS).

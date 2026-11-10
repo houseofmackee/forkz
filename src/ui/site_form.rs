@@ -113,6 +113,7 @@ impl FormTarget {
         let protocol = Self::protocol(fields);
         let sftp = protocol.is_sftp();
         let s3 = matches!(protocol, Protocol::S3 | Protocol::S3Http);
+        let cloud = protocol.is_object_storage();
         let webdav = matches!(protocol, Protocol::Webdav | Protocol::Webdavs);
         let share = protocol.is_share();
         let auth = if sftp {
@@ -125,16 +126,20 @@ impl FormTarget {
         fields.auth.setEnabled(sftp);
         fields.key_file.setEnabled(key);
         fields.choose.setEnabled(key);
-        fields.region.setEnabled(s3);
+        fields.region.setEnabled(s3 || protocol == Protocol::Gcs);
         // The password field doubles as the key's passphrase.
         fields.password.setEnabled(auth != Some(AuthMethod::Agent));
         let password_hint = match () {
+            _ if protocol == Protocol::Gcs => "HMAC secret",
+            _ if protocol == Protocol::Azure => "Account access key",
             _ if s3 => "Secret access key",
             _ if key => "Passphrase (if any)",
             _ => "Optional",
         };
         fields.password.setPlaceholderString(Some(&ns(password_hint)));
         let user_hint = match protocol {
+            Protocol::Gcs => "HMAC access key".to_string(),
+            Protocol::Azure => "Storage account name".to_string(),
             _ if s3 => "Access key ID".to_string(),
             Protocol::Ftp | Protocol::Ftps | Protocol::FtpPlain => "anonymous".to_string(),
             _ if webdav || share => "Optional (asked for if needed)".to_string(),
@@ -145,7 +150,8 @@ impl FormTarget {
             _ if webdav => "WebDAV path, for example /remote.php/dav/files/me",
             _ if protocol == Protocol::Nfs => "Export, for example /exports/media",
             _ if share => "Share (or Share/folder); empty to choose",
-            _ if s3 => "Optional: /bucket/folder",
+            _ if protocol == Protocol::Azure => "Optional: /container/folder",
+            _ if cloud => "Optional: /bucket/folder",
             _ => "Login folder",
         };
         fields.remote.setPlaceholderString(Some(&ns(remote_hint)));
@@ -309,13 +315,26 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
             AuthMethod::Password
         };
         let s3 = matches!(protocol_choice, Protocol::S3 | Protocol::S3Http);
+        let cloud = protocol_choice.is_object_storage();
+        // Google's and Azure's servers when none is typed.
+        let host_text = if host_text.is_empty() {
+            protocol_choice.default_host(&user.stringValue().to_string()).unwrap_or_default()
+        } else {
+            host_text
+        };
         let key_text = key_file.stringValue().to_string().trim().to_string();
-        let problem = if host_text.is_empty() {
+        let problem = if host_text.is_empty() && protocol_choice == Protocol::Azure {
+            Some("Enter the storage account name as the user.")
+        } else if host_text.is_empty() {
             Some("Enter the server\u{2019}s name or address.")
         } else if port_number.is_none() {
             Some("The port must be a number from 1 to 65535.")
-        } else if s3 && user.stringValue().to_string().trim().is_empty() && !host_text.contains('@') {
-            Some("Enter the access key ID as the user.")
+        } else if cloud && user.stringValue().to_string().trim().is_empty() && !host_text.contains('@') {
+            Some(match protocol_choice {
+                Protocol::Azure => "Enter the storage account name as the user.",
+                Protocol::Gcs => "Enter the HMAC access key as the user.",
+                _ => "Enter the access key ID as the user.",
+            })
         } else if auth_choice == AuthMethod::Key && key_text.is_empty() {
             Some("Choose a key file, or log in another way.")
         } else {
@@ -335,7 +354,7 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
         result.host = host_text.clone();
         result.port = port_number.unwrap_or(protocol_choice.default_port());
         let region_text = region.stringValue().to_string().trim().to_string();
-        result.region = (s3 && !region_text.is_empty()).then_some(region_text);
+        result.region = ((s3 || protocol_choice == Protocol::Gcs) && !region_text.is_empty()).then_some(region_text);
         result.user = user_text;
         result.auth = auth_choice;
         result.key_file = (!key_text.is_empty()).then(|| PathBuf::from(key_text));

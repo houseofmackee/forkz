@@ -77,6 +77,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] FTP and FTPS (`suppaftp`, with macOS TLS)
 - [x] FXP between FTP servers (direct server-to-server copies when both allow it; SSCN for FTPS)
 - [x] S3 and S3-compatible (Backblaze B2, R2, MinIO), with Signature Version 4
+- [x] Google Cloud Storage (S3-compatible XML API, HMAC keys) and Azure Blob Storage (Shared Key)
 - [x] WebDAV
 - [x] SMB, AFP, and NFS shares (mounted through NetFS, as Finder does)
 - [x] Server addresses in Go to Folder and the command palette
@@ -115,7 +116,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 ## Phase 4: extras
 
 - [x] Built-in diff for text and folders; Compare Panes (selects what differs)
-- [ ] Terminal pane that follows the current folder
+- [x] Terminal pane that follows the current folder
 - [x] Command palette (commands, places, sites, synclets, workspaces, rename presets, Open With)
 - [x] Transfer speed limits, Pause and Resume, and error rules
 - [x] Expandable preview pane; zoom

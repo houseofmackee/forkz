@@ -1,6 +1,6 @@
 [package]
 name = "forkz"
-version = "0.16.4"
+version = "0.17.0"
 edition = "2024"
 description = "A native dual-pane file manager for macOS"
 license = "MIT OR Apache-2.0"
@@ -47,6 +47,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 similar = "3.2.1"
 sha1 = "0.11"
+alacritty_terminal = "0.26.0"
 
 [dev-dependencies]
 tempfile = "3"

@@ -57,6 +57,8 @@ pub struct Settings {
     pub sidebar_order: std::collections::BTreeMap<String, Vec<String>>,
     /// The drop stack's files (where they are).
     pub drop_stack: Vec<PathBuf>,
+    /// The terminal pane goes where the active pane goes.
+    pub terminal_follows: bool,
 }
 
 /// A shell command run on the selection (Settings > Tools).
@@ -434,6 +436,7 @@ impl Default for Settings {
             tools: example_tools(),
             sidebar_order: std::collections::BTreeMap::new(),
             drop_stack: Vec::new(),
+            terminal_follows: true,
         }
     }
 }

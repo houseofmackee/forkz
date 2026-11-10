@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use forkz::fs::ops::{self, Answer, CancelToken, Conflict, ErrorAnswer, Job, JobKind, Observer, Progress, Resolution};
 use forkz::vfs::known_hosts::Status;
 use forkz::vfs::sftp::Prompter;
-use forkz::vfs::{self, FsRef, Vfs, ftp, s3, webdav};
+use forkz::vfs::{self, FsRef, Vfs, azure, ftp, s3, webdav};
 
 /// Trusts certificates and gives the password when asked.
 struct Answers {
@@ -361,6 +361,33 @@ fn webdav() {
     let fs: FsRef = fs;
     assert!(!fs.supports_permissions());
     exercise(fs, Path::new("/dav-run"), true);
+}
+
+#[test]
+#[ignore = "needs Azurite (scripts/test_protocols.sh)"]
+fn azure_blob() {
+    let Some((host, port)) = address("FORKZ_TEST_AZURE") else { return };
+    // Azurite's well-known development account.
+    let params = azure::AzureParams {
+        host,
+        port,
+        secure: false,
+        account: "devstoreaccount1".into(),
+        key: Some("Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFr/KBHBeksoGMGw==".into()),
+        timeout: Duration::from_secs(10),
+    };
+    let fs: FsRef = azure::connect(params, &answers()).unwrap();
+    let container = Path::new("/forkz-test");
+    fs.create_dir(container).unwrap();
+    assert!(names(&fs, Path::new("/")).contains(&("forkz-test".to_string(), true)));
+    assert!(fs.stat(container).unwrap().is_folder_like());
+    exercise(fs.clone(), &container.join("run"), false);
+    // Folders cannot be renamed (blob storage has no folders, only names).
+    fs.create_dir(&container.join("f")).unwrap();
+    assert!(fs.stat(&container.join("f")).unwrap().is_folder_like());
+    assert!(ops::rename(&fs, &container.join("f"), "g").is_err());
+    fs.remove_dir(&container.join("f")).unwrap();
+    fs.remove_dir(container).unwrap();
 }
 
 #[test]

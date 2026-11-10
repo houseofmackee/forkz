@@ -83,8 +83,17 @@ PIDS="$PIDS $!"
 "$DIR/venv/bin/moto_server" -H 127.0.0.1 -p 9555 > "$DIR/s3.log" 2>&1 &
 PIDS="$PIDS $!"
 
+# Azurite (Microsoft's Azure Storage emulator), if Node is installed.
+AZURE=""
+if command -v npx >/dev/null 2>&1; then
+    npx --yes --package=azurite azurite-blob --blobHost 127.0.0.1 --blobPort 10000 --location "$DIR/azurite" --silent \
+        > "$DIR/azure.log" 2>&1 &
+    PIDS="$PIDS $!"
+    AZURE=127.0.0.1:10000
+fi
+
 # Wait for all of them to listen.
-for port in 2121 2122 2123 8080 9555; do
+for port in 2121 2122 2123 8080 9555 ${AZURE:+10000}; do
     for _ in $(seq 1 50); do
         nc -z 127.0.0.1 "$port" 2>/dev/null && break
         sleep 0.2
@@ -93,10 +102,10 @@ done
 
 status=0
 FORKZ_TEST_FTP=127.0.0.1:2121 FORKZ_TEST_FTP2=127.0.0.1:2122 FORKZ_TEST_FTP_NO_FXP=127.0.0.1:2123 \
-FORKZ_TEST_DAV=127.0.0.1:8080 FORKZ_TEST_S3=127.0.0.1:9555 \
+FORKZ_TEST_DAV=127.0.0.1:8080 FORKZ_TEST_S3=127.0.0.1:9555 FORKZ_TEST_AZURE="$AZURE" \
     cargo test --test protocols_live -- --ignored --test-threads=1 "$@" || status=$?
 if [ "$status" -ne 0 ]; then
-    for log in ftp ftp2 ftp3 dav s3; do
+    for log in ftp ftp2 ftp3 dav s3 azure; do
         echo "--- $log.log (last lines)"
         tail -n 30 "$DIR/$log.log"
     done

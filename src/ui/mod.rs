@@ -28,6 +28,7 @@ mod site_form;
 mod site_transfer;
 mod sounds;
 mod sync_window;
+mod terminal;
 mod theme_editor;
 mod themed;
 mod tools;
@@ -427,6 +428,10 @@ pub fn prepare_item(item: &NSMenuItem, command: Command, pane: usize) {
         let on = app().is_some_and(|a| a.panes[pane].group_by() == group);
         item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
     }
+    if command == Command::TerminalFollows {
+        let on = app().is_some_and(|a| a.settings.borrow().terminal_follows);
+        item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+    }
     if command == Command::ToggleFilters {
         let on = app().is_some_and(|a| a.settings.borrow().filters_on);
         item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
@@ -461,6 +466,7 @@ pub fn command_title(command: Command, pane: usize) -> String {
         Command::CloseTab if app.panes[pane].tab_count() <= 1 => "Close Window",
         Command::TogglePreview if !app.preview.view().isHidden() => "Hide Preview Pane",
         Command::ShowDropStack if drop_stack::is_shown() => "Hide Drop Stack",
+        Command::ToggleTerminal if terminal::current().is_some_and(|t| !t.isHidden()) => "Hide Terminal",
         Command::Disconnect if app.panes[pane].fs().outside().is_some() => "Close Archive",
         Command::ToggleLeftPane | Command::ToggleRightPane if app.settings.borrow().stacked_panes => {
             let hidden = app.panes[usize::from(command == Command::ToggleRightPane)].view().isHidden();
@@ -500,6 +506,7 @@ const TOOLBAR: &[Command] = &[
     Command::TogglePreview,
     Command::ToggleSidebar,
     Command::ShowDropStack,
+    Command::ToggleTerminal,
 ];
 
 /// Toolbar items added in later versions, by `toolbar_version`, with
@@ -723,12 +730,22 @@ fn build_window(
     panes_split.setAutosaveName(Some(&ns("ForkzPanes")));
     panes_split.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
 
+    // The terminal pane goes below the panes (added when first shown).
+    let terminal_split = NSSplitView::new(mtm);
+    terminal_split.setVertical(false);
+    terminal_split.setDividerStyle(NSSplitViewDividerStyle::Thin);
+    terminal_split.addSubview(&panes_split);
+    terminal_split
+        .setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Vertical);
+
     let right = NSStackView::new(mtm);
     right.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
     right.setSpacing(0.0);
-    right.addArrangedSubview(&panes_split);
+    // The panes (and terminal) take all the height the activity bar leaves.
+    right.setDistribution(objc2_app_kit::NSStackViewDistribution::Fill);
+    right.addArrangedSubview(&terminal_split);
     right.addArrangedSubview(&activity.view());
-    for view in [&*panes_split as &NSView, &activity.view()] {
+    for view in [&*terminal_split as &NSView, &activity.view()] {
         view.leadingAnchor().constraintEqualToAnchor(&right.leadingAnchor()).setActive(true);
         view.trailingAnchor().constraintEqualToAnchor(&right.trailingAnchor()).setActive(true);
     }
@@ -774,7 +791,16 @@ fn first_launch_layout(window: &NSWindow) {
     main_split.setPosition_ofDividerAtIndex(180.0, 0);
     let subviews = main_split.subviews();
     let Some(right) = subviews.iter().nth(1) else { return };
-    let Some(panes_split) = right.subviews().iter().find_map(|v| v.downcast::<NSSplitView>().ok()) else { return };
+    let Some(split) = right.subviews().iter().find_map(|v| v.downcast::<NSSplitView>().ok()) else { return };
+    // The panes are inside the terminal's split (the first part).
+    let panes_split = if split.isVertical() {
+        split
+    } else {
+        match split.subviews().iter().next().and_then(|v| v.downcast::<NSSplitView>().ok()) {
+            Some(panes) => panes,
+            None => return,
+        }
+    };
     panes_split.layoutSubtreeIfNeeded();
     let width = panes_split.frame().size.width;
     panes_split.setPosition_ofDividerAtIndex((width / 2.0).round(), 0);
@@ -931,6 +957,10 @@ fn main_menu(
     }
     separator(&view);
     for c in [Command::ToggleHidden, Command::ToggleFilters, Command::FlatView, Command::Refresh] {
+        command(&view, c);
+    }
+    separator(&view);
+    for c in [Command::ToggleTerminal, Command::TerminalFollows] {
         command(&view, c);
     }
     separator(&view);
@@ -1427,6 +1457,8 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::ReopenClosedTab => reopen_closed_tab(),
         Command::ExportTree => export_tree(&pane),
         Command::ShowDropStack => drop_stack::toggle(),
+        Command::ToggleTerminal => toggle_terminal(),
+        Command::TerminalFollows => update_settings(|s| s.terminal_follows = !s.terminal_follows),
         Command::DiskUsage => {
             let fs = pane.fs();
             let fs = fs.browse_fs().unwrap_or(fs);
@@ -2030,6 +2062,116 @@ fn watch_mouse_buttons() {
     let monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(NSEventMask::OtherMouseDown, &block) };
     // Watched for as long as forkz runs.
     std::mem::forget(monitor);
+}
+
+/// Where the terminal's height is kept between launches.
+const TERMINAL_HEIGHT_KEY: &str = "ForkzTerminalHeight";
+
+thread_local! {
+    /// The terminal's height when it was last hidden.
+    static TERMINAL_HEIGHT: Cell<f64> = const { Cell::new(0.0) };
+}
+
+/// The split with the panes above and the terminal below.
+fn terminal_split(app: &App) -> Option<Retained<NSSplitView>> {
+    let panes = unsafe { app.panes[0].view().superview() }?;
+    unsafe { panes.superview() }?.downcast::<NSSplitView>().ok()
+}
+
+/// View > Show Terminal (Control-`): shows the terminal (starting a shell
+/// in the active pane's folder), gives it the focus, or hides it if it
+/// has the focus.
+fn toggle_terminal() {
+    let Some(app) = app() else { return };
+    let Some(split) = terminal_split(&app) else { return };
+    let focused = |view: &terminal::TerminalView| {
+        app.window.firstResponder().is_some_and(|r| {
+            std::ptr::eq(
+                Retained::as_ptr(&r).cast::<AnyObject>(),
+                (view as *const terminal::TerminalView).cast::<AnyObject>(),
+            )
+        })
+    };
+    match terminal::current() {
+        Some(view) if !view.isHidden() && focused(&view) => {
+            let height = view.frame().size.height;
+            TERMINAL_HEIGHT.with(|h| h.set(height));
+            objc2_foundation::NSUserDefaults::standardUserDefaults().setDouble_forKey(height, &ns(TERMINAL_HEIGHT_KEY));
+            view.setHidden(true);
+            split.adjustSubviews();
+            app.panes[app.active.get()].focus();
+        }
+        Some(view) if !view.isHidden() => {
+            app.window.makeFirstResponder(Some(&view));
+        }
+        existing => {
+            let pane = &app.panes[app.active.get()];
+            let folder = if pane.is_local() && !pane.showing_results() {
+                pane.location()
+            } else {
+                dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+            };
+            app.window.layoutIfNeeded();
+            let frame = NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(split.frame().size.width, (split.frame().size.height * 0.38).round()),
+            );
+            let remembered = match TERMINAL_HEIGHT.with(Cell::get) {
+                0.0 => objc2_foundation::NSUserDefaults::standardUserDefaults().doubleForKey(&ns(TERMINAL_HEIGHT_KEY)),
+                height => height,
+            };
+            let view = match existing {
+                Some(view) => view,
+                None => match terminal::view_for(&folder, frame, mtm()) {
+                    Ok(view) => {
+                        split.addSubview(&view);
+                        view
+                    }
+                    Err(e) => {
+                        dialogs::show_error("The terminal could not be started.".into(), e.to_string());
+                        return;
+                    }
+                },
+            };
+            view.setHidden(false);
+            split.adjustSubviews();
+            // In the folder the pane went to while it was hidden.
+            terminal_follow(&app);
+            // Placed once AppKit has laid the window out (sizes are not
+            // final before that): its height from before, or about a
+            // third of the space.
+            DispatchQueue::main().exec_async(move || {
+                let Some(app) = self::app() else { return };
+                let Some(split) = terminal_split(&app) else { return };
+                app.window.layoutIfNeeded();
+                let height = split.frame().size.height;
+                let wanted = if remembered >= 80.0 { remembered.min(height - 120.0) } else { (height * 0.38).round() };
+                split.setPosition_ofDividerAtIndex((height - wanted - split.dividerThickness()).max(120.0), 0);
+            });
+            app.window.makeFirstResponder(Some(&view));
+        }
+    }
+}
+
+/// The shell in the terminal ended: the terminal closes.
+pub fn terminal_exited() {
+    let Some(app) = app() else { return };
+    terminal::forget();
+    if let Some(split) = terminal_split(&app) {
+        split.adjustSubviews();
+    }
+    app.panes[app.active.get()].focus();
+}
+
+/// The terminal goes to the active pane's folder (on this Mac).
+fn terminal_follow(app: &App) {
+    if !app.settings.borrow().terminal_follows {
+        return;
+    }
+    let pane = &app.panes[app.active.get()];
+    if pane.is_local() && !pane.showing_results() {
+        terminal::follow(&pane.location());
+    }
 }
 
 /// Remembers a closed tab, for Reopen Closed Tab.
@@ -3788,6 +3930,7 @@ pub fn toggle_preview() {
 pub fn set_active(index: usize) {
     let Some(app) = app() else { return };
     app.active.set(index);
+    terminal_follow(&app);
     app.panes[index].set_active(true);
     app.panes[1 - index].set_active(false);
     selection_changed(index);
@@ -3840,6 +3983,9 @@ pub fn location_changed(index: usize) {
     follow_sync_browsing(index);
     let Some(app) = app() else { return };
     let pane = &app.panes[index];
+    if index == app.active.get() {
+        terminal_follow(&app);
+    }
     {
         // Folders on the Mac are remembered (server tabs are not).
         let tabs: Vec<(FsRef, PathBuf)> = pane.tab_locations();
@@ -4130,7 +4276,7 @@ fn open_connection(
     prompter: &UiPrompter,
 ) -> std::io::Result<(FsRef, Option<String>)> {
     use crate::sites::Protocol;
-    let user = if site.user.is_empty() && !matches!(site.protocol, Protocol::S3 | Protocol::S3Http) {
+    let user = if site.user.is_empty() && !site.protocol.is_object_storage() {
         std::env::var("USER").unwrap_or_default()
     } else {
         site.user.clone()
@@ -4192,6 +4338,42 @@ fn open_connection(
             let fs = vfs::s3::connect(params, prompter)?;
             let secret = fs.secret().map(str::to_string);
             Ok((fs, secret))
+        }
+        // Google's S3-compatible API, with HMAC keys (region "auto").
+        Protocol::Gcs => {
+            let host =
+                if site.host.trim().is_empty() { "storage.googleapis.com".to_string() } else { site.host.clone() };
+            let params = vfs::s3::S3Params {
+                host,
+                port: site.port,
+                secure: true,
+                access_key: site.user.clone(),
+                secret_key: password,
+                region: site.region.clone().filter(|r| !r.trim().is_empty()).unwrap_or_else(|| "auto".into()),
+                timeout,
+            };
+            let fs = vfs::s3::connect(params, prompter)?;
+            let secret = fs.secret().map(str::to_string);
+            Ok((fs, secret))
+        }
+        Protocol::Azure => {
+            let host = Protocol::Azure
+                .default_host(&site.user)
+                .filter(|_| site.host.trim().is_empty())
+                .unwrap_or_else(|| site.host.clone());
+            // Azurite (the emulator) answers over plain HTTP.
+            let local = host == "localhost" || host.parse::<std::net::IpAddr>().is_ok();
+            let params = vfs::azure::AzureParams {
+                host,
+                port: site.port,
+                secure: !local,
+                account: site.user.clone(),
+                key: password,
+                timeout,
+            };
+            let fs = vfs::azure::connect(params, prompter)?;
+            let key = fs.key().map(str::to_string);
+            Ok((fs, key))
         }
     }
 }
