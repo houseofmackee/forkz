@@ -28,9 +28,11 @@ use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Rgb};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
+use objc2::runtime::ProtocolObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSAppearanceCustomization, NSBezierPath, NSColor, NSEvent, NSEventModifierFlags, NSFont, NSPasteboard, NSView,
+    NSAppearanceCustomization, NSBezierPath, NSColor, NSDragOperation, NSDraggingInfo, NSEvent, NSEventModifierFlags,
+    NSFont, NSPasteboard, NSView,
 };
 use objc2_foundation::{NSMutableAttributedString, NSPoint, NSRange, NSRect, NSSize};
 
@@ -189,6 +191,21 @@ define_class!(
         fn paste(&self, _sender: Option<&AnyObject>) {
             self.paste_text();
         }
+
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.drop_operation(info)
+        }
+
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.drop_operation(info)
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            self.drop(info)
+        }
     }
 );
 
@@ -217,6 +234,9 @@ impl TerminalView {
         if let Some(symbols) = symbols {
             let _ = this.ivars().symbols.set(symbols);
         }
+        let mut types = super::pane_view::drag_types();
+        types.push(objc2::Message::retain(unsafe { objc2_app_kit::NSPasteboardTypeString }));
+        this.registerForDraggedTypes(&objc2_foundation::NSArray::from_retained_slice(&types));
         let (columns, lines) = this.grid_size();
         let term = Arc::new(FairMutex::new(Term::new(Config::default(), &TermSize::new(columns, lines), Listener)));
         let mut options = tty::Options { working_directory: Some(folder.to_path_buf()), ..tty::Options::default() };
@@ -324,10 +344,52 @@ impl TerminalView {
     fn paste_text(&self) {
         let pasteboard = NSPasteboard::generalPasteboard();
         let Some(text) = pasteboard.stringForType(unsafe { objc2_app_kit::NSPasteboardTypeString }) else { return };
-        let text = text.to_string().replace("\r\n", "\r").replace('\n', "\r");
+        self.paste_string(&text.to_string());
+    }
+
+    /// Text as if typed, but in one piece (a bracketed paste where the
+    /// program asked for it, so a shell does not run it line by line).
+    fn paste_string(&self, text: &str) {
+        let text = text.replace("\r\n", "\r").replace('\n', "\r");
         let bracketed = self.with_term(|t| t.mode().contains(TermMode::BRACKETED_PASTE)).unwrap_or(false);
         let bytes = if bracketed { format!("\x1b[200~{text}\x1b[201~") } else { text };
         self.write(bytes.into_bytes());
+    }
+
+    /// Files and folders (from Finder or a pane) and text can be dropped.
+    fn drop_operation(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+        let text = info.draggingPasteboard().stringForType(unsafe { objc2_app_kit::NSPasteboardTypeString }).is_some();
+        if text || super::pane_view::dragged_items(info).is_some_and(|(_, paths)| !paths.is_empty()) {
+            NSDragOperation::Copy
+        } else {
+            NSDragOperation::None
+        }
+    }
+
+    /// Types the paths of dropped items (quoted for the shell, as Terminal
+    /// does), or pastes dropped text. Items from a server pane give their
+    /// paths on the server (for an ssh session there).
+    fn drop(&self, info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+        let pasted = match super::pane_view::dragged_items(info) {
+            Some((_, paths)) if !paths.is_empty() => {
+                let quoted: Vec<String> = paths.iter().map(|p| shell_quote(&p.to_string_lossy())).collect();
+                self.write(format!("{} ", quoted.join(" ")).into_bytes());
+                true
+            }
+            _ => match info.draggingPasteboard().stringForType(unsafe { objc2_app_kit::NSPasteboardTypeString }) {
+                Some(text) => {
+                    self.paste_string(&text.to_string());
+                    true
+                }
+                None => false,
+            },
+        };
+        if pasted && let Some(window) = self.window() {
+            objc2_app_kit::NSApplication::sharedApplication(self.mtm()).activate();
+            window.makeKeyAndOrderFront(None);
+            window.makeFirstResponder(Some(self));
+        }
+        pasted
     }
 
     fn key_equivalent(&self, event: &NSEvent) -> bool {
@@ -391,7 +453,7 @@ impl TerminalView {
         // The end of the line, then clear it (anything typed but not run),
         // then the cd (a leading space keeps it out of the history where
         // the shell is set up for that).
-        let quoted = format!("'{}'", folder.to_string_lossy().replace('\'', "'\\''"));
+        let quoted = shell_quote(&folder.to_string_lossy());
         self.write(format!("\x05\x15 cd -- {quoted}\r").into_bytes());
     }
 
@@ -680,6 +742,13 @@ fn symbol_font(mtm: MainThreadMarker) -> Option<String> {
     })
 }
 
+/// A word for the shell: as it is if it is safe, otherwise in single
+/// quotes ("it's" becomes 'it'\''s').
+fn shell_quote(text: &str) -> String {
+    let safe = !text.is_empty() && text.chars().all(|c| c.is_ascii_alphanumeric() || "_./:@%+=,-".contains(c));
+    if safe { text.to_string() } else { format!("'{}'", text.replace('\'', "'\\''")) }
+}
+
 /// Whether the font has glyphs for all of `text` (no fallback needed).
 fn has_glyphs(font: &NSFont, text: &str) -> bool {
     #[link(name = "CoreText", kind = "framework")]
@@ -809,6 +878,15 @@ pub fn follow(folder: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quotes_for_the_shell() {
+        assert_eq!(shell_quote("/Users/me/notes.txt"), "/Users/me/notes.txt");
+        assert_eq!(shell_quote("/Users/me/My Files"), "'/Users/me/My Files'");
+        assert_eq!(shell_quote("/tmp/it's here"), "'/tmp/it'\\''s here'");
+        assert_eq!(shell_quote("/tmp/$HOME;rm"), "'/tmp/$HOME;rm'");
+        assert_eq!(shell_quote("~/a"), "'~/a'");
+    }
 
     #[test]
     fn has_a_full_palette() {

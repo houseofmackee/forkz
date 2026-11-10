@@ -7,6 +7,12 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-11-10
+
+### Added
+
+- Drag files and folders into the terminal pane (from the panes or Finder) to type their paths, quoted for the shell. Items from a server pane give their paths on the server. Dropped text is pasted.
+
 ## [0.18.1] - 2026-11-10
 
 ### Fixed
@@ -366,7 +372,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.18.1...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.18.2...HEAD
+[0.18.2]: https://github.com/houseofmackee/forkz/compare/v0.18.1...v0.18.2
 [0.18.1]: https://github.com/houseofmackee/forkz/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/houseofmackee/forkz/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/houseofmackee/forkz/compare/v0.16.4...v0.17.0
