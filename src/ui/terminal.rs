@@ -92,6 +92,8 @@ pub struct TerminalIvars {
     master_fd: Cell<i32>,
     font: OnceCell<Retained<NSFont>>,
     bold: OnceCell<Retained<NSFont>>,
+    /// A Nerd Font for the icons shell prompts use, if one is installed.
+    symbols: OnceCell<Retained<NSFont>>,
     /// Cell width and height.
     cell: Cell<(f64, f64)>,
     /// Scrolling smaller than a line, carried over.
@@ -196,6 +198,7 @@ impl TerminalView {
         let size = super::current_settings().map_or(12.0, |s| s.appearance.text_size).clamp(9.0, 24.0) - 1.0;
         let font = NSFont::monospacedSystemFontOfSize_weight(size, unsafe { objc2_app_kit::NSFontWeightRegular });
         let bold = NSFont::monospacedSystemFontOfSize_weight(size, unsafe { objc2_app_kit::NSFontWeightBold });
+        let symbols = symbol_font(mtm).and_then(|name| NSFont::fontWithName_size(&ns(&name), size));
         let cell = cell_size(&font);
         let this = Self::alloc(mtm).set_ivars(TerminalIvars {
             term: OnceCell::new(),
@@ -203,6 +206,7 @@ impl TerminalView {
             master_fd: Cell::new(-1),
             font: OnceCell::new(),
             bold: OnceCell::new(),
+            symbols: OnceCell::new(),
             cell: Cell::new(cell),
             scroll_rest: Cell::new(0.0),
             folder: RefCell::new(folder.to_path_buf()),
@@ -210,6 +214,9 @@ impl TerminalView {
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
         let _ = this.ivars().font.set(font);
         let _ = this.ivars().bold.set(bold);
+        if let Some(symbols) = symbols {
+            let _ = this.ivars().symbols.set(symbols);
+        }
         let (columns, lines) = this.grid_size();
         let term = Arc::new(FairMutex::new(Term::new(Config::default(), &TermSize::new(columns, lines), Listener)));
         let mut options = tty::Options { working_directory: Some(folder.to_path_buf()), ..tty::Options::default() };
@@ -392,6 +399,7 @@ impl TerminalView {
         let Some(term) = self.ivars().term.get() else { return };
         let (Some(font), Some(bold)) = (self.ivars().font.get(), self.ivars().bold.get()) else { return };
         let (width, height) = self.ivars().cell.get();
+        let (advance, bold_advance) = (advance_of(font), advance_of(bold));
         let dark = self.effectiveAppearance().name().to_string().contains("Dark");
         let palette = Palette::new(dark);
         palette.background.setFill();
@@ -403,9 +411,15 @@ impl TerminalView {
         let selection = content.selection;
         let cursor = content.cursor;
         // Runs of cells that look alike, per row: drawn as one string.
+        // Characters other than plain ASCII (icons, accents, emoji, wide
+        // characters) get a run of their own, at their cell: their glyphs
+        // may not be exactly a cell wide.
         struct Run {
             row: i32,
             column: usize,
+            /// Cells covered (a wide character covers two).
+            cells: usize,
+            single: bool,
             text: String,
             fg: Rgb,
             bg: Option<Rgb>,
@@ -430,23 +444,30 @@ impl TerminalView {
                 std::mem::swap(&mut fg, &mut bg);
             }
             let bg = (bg != palette.bg_rgb).then_some(bg);
-            let text = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
+            // Tabs are kept in the cell (for copying) but are only spacing.
+            let text = if cell.flags.contains(Flags::HIDDEN) || cell.c.is_control() { ' ' } else { cell.c };
+            let cells = if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
             let is_bold = cell.flags.contains(Flags::BOLD);
             let underline = cell.flags.contains(Flags::UNDERLINE);
             match runs.last_mut() {
                 Some(run)
                     if run.row == row
+                        && !run.single
+                        && text.is_ascii()
                         && run.fg == fg
                         && run.bg == bg
                         && run.bold == is_bold
                         && run.underline == underline
-                        && run.column + run.text.chars().count() == point.column.0 =>
+                        && run.column + run.cells == point.column.0 =>
                 {
                     run.text.push(text);
+                    run.cells += 1;
                 }
                 _ => runs.push(Run {
                     row,
                     column: point.column.0,
+                    cells,
+                    single: !text.is_ascii(),
                     text: text.to_string(),
                     fg,
                     bg,
@@ -460,24 +481,37 @@ impl TerminalView {
             let y = PAD + f64::from(run.row) * height;
             if let Some(bg) = run.bg {
                 rgb(bg).setFill();
-                NSBezierPath::fillRect(NSRect::new(
-                    NSPoint::new(x, y),
-                    NSSize::new(run.text.chars().count() as f64 * width, height),
-                ));
+                NSBezierPath::fillRect(NSRect::new(NSPoint::new(x, y), NSSize::new(run.cells as f64 * width, height)));
             }
             if run.text.trim().is_empty() {
                 continue;
+            }
+            let mut draw_font: &NSFont = if run.bold { bold } else { font };
+            let mut y = y;
+            // An icon the font does not have: from the Nerd Font, on the
+            // same baseline.
+            if run.single
+                && let Some(symbols) = self.ivars().symbols.get()
+                && !has_glyphs(draw_font, &run.text)
+                && has_glyphs(symbols, &run.text)
+            {
+                y += draw_font.ascender() - symbols.ascender();
+                draw_font = symbols;
             }
             let attributed = NSMutableAttributedString::new();
             attributed.replaceCharactersInRange_withString(NSRange::new(0, 0), &ns(&run.text));
             let all = NSRange::new(0, attributed.length());
             unsafe {
+                attributed.addAttribute_value_range(objc2_app_kit::NSFontAttributeName, draw_font, all);
+                attributed.addAttribute_value_range(objc2_app_kit::NSForegroundColorAttributeName, &rgb(run.fg), all);
+                // Each character exactly one cell wide (the cells are
+                // whole points; the font's characters are not).
+                let spacing = width - if run.bold { bold_advance } else { advance };
                 attributed.addAttribute_value_range(
-                    objc2_app_kit::NSFontAttributeName,
-                    if run.bold { bold } else { font },
+                    objc2_app_kit::NSKernAttributeName,
+                    &objc2_foundation::NSNumber::new_f64(spacing),
                     all,
                 );
-                attributed.addAttribute_value_range(objc2_app_kit::NSForegroundColorAttributeName, &rgb(run.fg), all);
                 if run.underline {
                     attributed.addAttribute_value_range(
                         objc2_app_kit::NSUnderlineStyleAttributeName,
@@ -603,14 +637,71 @@ fn rgb(color: Rgb) -> Retained<NSColor> {
 
 /// The size of one character cell of a monospaced font.
 fn cell_size(font: &NSFont) -> (f64, f64) {
+    let height = (font.ascender() - font.descender() + font.leading()).ceil() + 2.0;
+    (advance_of(font).ceil(), height)
+}
+
+/// How far one character moves on (a fraction of a point).
+fn advance_of(font: &NSFont) -> f64 {
     let attributed = NSMutableAttributedString::new();
     attributed.replaceCharactersInRange_withString(NSRange::new(0, 0), &ns("MMMMMMMMMM"));
     unsafe {
         attributed.addAttribute_value_range(objc2_app_kit::NSFontAttributeName, font, NSRange::new(0, 10));
     }
     let size: NSSize = unsafe { msg_send![&attributed, size] };
-    let height = (font.ascender() - font.descender() + font.leading()).ceil() + 2.0;
-    ((size.width / 10.0).ceil(), height)
+    size.width / 10.0
+}
+
+/// An installed Nerd Font, for the icons shell prompts use (MesloLGS NF,
+/// the one Powerlevel10k installs, if there).
+fn symbol_font(mtm: MainThreadMarker) -> Option<String> {
+    thread_local! {
+        static FOUND: OnceCell<Option<String>> = const { OnceCell::new() };
+    }
+    FOUND.with(|found| {
+        found
+            .get_or_init(|| {
+                let names: Vec<String> = objc2_app_kit::NSFontManager::sharedFontManager(mtm)
+                    .availableFonts()
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect();
+                let preferred = ["MesloLGS-NF-Regular", "MesloLGSNF-Regular", "MesloLGSNerdFontMono-Regular"];
+                preferred
+                    .iter()
+                    .find(|p| names.iter().any(|n| n == *p))
+                    .map(|p| p.to_string())
+                    .or_else(|| {
+                        names.iter().find(|n| n.contains("NerdFontMono") || n.contains("NerdFontCompleteM")).cloned()
+                    })
+                    .or_else(|| names.iter().find(|n| n.contains("NerdFont") || n.contains("-NF-")).cloned())
+            })
+            .clone()
+    })
+}
+
+/// Whether the font has glyphs for all of `text` (no fallback needed).
+fn has_glyphs(font: &NSFont, text: &str) -> bool {
+    #[link(name = "CoreText", kind = "framework")]
+    unsafe extern "C" {
+        fn CTFontGetGlyphsForCharacters(
+            font: *const std::ffi::c_void,
+            characters: *const u16,
+            glyphs: *mut u16,
+            count: isize,
+        ) -> bool;
+    }
+    let units: Vec<u16> = text.encode_utf16().collect();
+    let mut glyphs = vec![0u16; units.len()];
+    // NSFont is the same object as a CTFont.
+    unsafe {
+        CTFontGetGlyphsForCharacters(
+            (font as *const NSFont).cast(),
+            units.as_ptr(),
+            glyphs.as_mut_ptr(),
+            units.len() as isize,
+        )
+    }
 }
 
 fn window_size(columns: usize, lines: usize, cell: (f64, f64)) -> WindowSize {

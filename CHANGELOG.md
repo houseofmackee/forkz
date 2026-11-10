@@ -7,6 +7,13 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-11-10
+
+### Fixed
+
+- The terminal pane lined up columns wrongly (as in `ls`): text after a tab, and after characters such as icons or accented letters, drifted. Each character now sits in its cell.
+- Shell prompt icons (Powerlevel10k, Oh My Posh, and similar) showed as boxes with question marks. The terminal now draws them with an installed Nerd Font, such as MesloLGS NF.
+
 ## [0.18.0] - 2026-11-10
 
 ### Added
@@ -359,7 +366,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.18.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.18.1...HEAD
+[0.18.1]: https://github.com/houseofmackee/forkz/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/houseofmackee/forkz/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/houseofmackee/forkz/compare/v0.16.4...v0.17.0
 [0.16.4]: https://github.com/houseofmackee/forkz/compare/v0.16.3...v0.16.4
