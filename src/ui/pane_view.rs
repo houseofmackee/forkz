@@ -903,8 +903,15 @@ impl PaneController {
             _ => return false,
         };
         let Some((source_fs, sources)) = self.drag_sources(info) else { return false };
-        super::start_job(super::transfer_job(kind, source_fs, sources, self.fs(), target));
+        super::start_job(super::transfer_job(kind, source_fs, sources, self.drop_fs(), target));
         true
+    }
+
+    /// Where dropped items go: the pane's file system, or the one under
+    /// its search results, tags, or Flat View.
+    fn drop_fs(&self) -> FsRef {
+        let fs = self.fs();
+        fs.browse_fs().unwrap_or(fs)
     }
 
     fn cell_for(
@@ -2379,11 +2386,17 @@ impl PaneController {
         entry_at(&state, row as usize).filter(|e| e.is_folder_like()).map(|e| e.path.clone())
     }
 
-    /// Move within a volume, copy across volumes, like Finder; Option
-    /// forces a copy, Command a move.
+    /// Move within a volume, copy across volumes, like Finder (or move
+    /// anywhere on the Mac or one server, with Settings > General >
+    /// Dragging); Option forces a copy, Command a move.
     pub fn drop_operation(&self, info: &ProtocolObject<dyn NSDraggingInfo>, target: &Path) -> NSDragOperation {
         let Some((source_fs, sources)) = self.drag_sources(info) else { return NSDragOperation::None };
-        let target_fs = self.fs();
+        // Search results, tags, and Flat View are lists, not a folder:
+        // items go into a folder in them, on the file system underneath.
+        if self.showing_results() && target == self.location() {
+            return NSDragOperation::None;
+        }
+        let target_fs = self.drop_fs();
         if target_fs.read_only() {
             return NSDragOperation::None;
         }
@@ -2405,14 +2418,17 @@ impl PaneController {
             };
         }
         let same_volume = same_fs && (!target_fs.is_local() || fs::device_of(&sources[0]) == fs::device_of(target));
+        let drag_moves =
+            same_fs && dragged_from_pane(info) && super::current_settings().is_some_and(|s| s.general.drag_moves);
         if mask == NSDragOperation::Copy {
             NSDragOperation::Copy
-        } else if mask == NSDragOperation::Move || (same_volume && mask.contains(NSDragOperation::Move)) {
+        } else if mask == NSDragOperation::Move || ((same_volume || drag_moves) && mask.contains(NSDragOperation::Move))
+        {
             NSDragOperation::Move
         } else if mask.contains(NSDragOperation::Copy) {
             NSDragOperation::Copy
         } else if mask.contains(NSDragOperation::Generic) {
-            if same_volume { NSDragOperation::Move } else { NSDragOperation::Copy }
+            if same_volume || drag_moves { NSDragOperation::Move } else { NSDragOperation::Copy }
         } else {
             NSDragOperation::None
         }
@@ -2507,16 +2523,23 @@ pub fn dragged_items(info: &ProtocolObject<dyn NSDraggingInfo>) -> Option<(FsRef
     // From a pane of this app (its list, columns, or icons): what DRAG says
     // (server items are file promises on the pasteboard, which panes do
     // not need).
-    let from_pane = info.draggingSource().is_some_and(|source| {
-        source.downcast_ref::<FileTable>().is_some()
-            || source.downcast_ref::<super::column_view::ColumnBrowser>().is_some()
-            || source.downcast_ref::<super::icon_view::IconView>().is_some()
-    });
-    if from_pane || types.iter().any(|t| t == ITEMS_TYPE) {
-        return DRAG.with(|d| d.borrow().clone());
+    if dragged_from_pane(info) || types.iter().any(|t| t == ITEMS_TYPE) {
+        // Search results and Flat View list the items of the file system
+        // underneath: the drag is from there (so a drop on that file
+        // system is within it, a move).
+        return DRAG.with(|d| d.borrow().clone()).map(|(fs, paths)| (fs.browse_fs().unwrap_or(fs), paths));
     }
     let paths = paths_on_pasteboard(&pasteboard);
     if paths.is_empty() { None } else { Some((vfs::local(), paths)) }
+}
+
+/// A drag from a pane of this app (its list, columns, or icons).
+pub fn dragged_from_pane(info: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+    info.draggingSource().is_some_and(|source| {
+        source.downcast_ref::<FileTable>().is_some()
+            || source.downcast_ref::<super::column_view::ColumnBrowser>().is_some()
+            || source.downcast_ref::<super::icon_view::IconView>().is_some()
+    })
 }
 
 pub fn paths_on_pasteboard(pasteboard: &objc2_app_kit::NSPasteboard) -> Vec<PathBuf> {

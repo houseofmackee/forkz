@@ -7,6 +7,16 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.18.3] - 2026-11-11
+
+### Added
+
+- Settings > General > Dragging: "Always move items dragged between panes" moves them anywhere on this Mac (also to another disk) or within one server. Hold Option to copy. When off, dragging works as in Finder: a move on the same disk, a copy to another.
+
+### Fixed
+
+- Dragging to or from search results, a tag, a Smart Folder, or Flat View copied items even within one disk (it counted as another location). It now moves on the same disk, as from a folder. Dropping on the empty part of such a list, which is no folder, is no longer possible.
+
 ## [0.18.2] - 2026-11-10
 
 ### Added
@@ -372,7 +382,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.18.2...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.18.3...HEAD
+[0.18.3]: https://github.com/houseofmackee/forkz/compare/v0.18.2...v0.18.3
 [0.18.2]: https://github.com/houseofmackee/forkz/compare/v0.18.1...v0.18.2
 [0.18.1]: https://github.com/houseofmackee/forkz/compare/v0.18.0...v0.18.1
 [0.18.0]: https://github.com/houseofmackee/forkz/compare/v0.17.0...v0.18.0

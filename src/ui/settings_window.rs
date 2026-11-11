@@ -46,6 +46,7 @@ struct Controls {
     app_leftovers: Retained<NSButton>,
     sound_effects: Retained<NSButton>,
     transfer_sounds: Retained<NSButton>,
+    drag_moves: Retained<NSButton>,
     terminal: Retained<NSPopUpButton>,
     terminals: Vec<&'static str>,
     compare: Retained<NSPopUpButton>,
@@ -305,6 +306,7 @@ impl SettingsWindow {
             ),
             sound_effects: checkbox("Play sounds when moving items to the Trash and deleting them", self, mtm),
             transfer_sounds: checkbox("Play a sound when a long transfer finishes", self, mtm),
+            drag_moves: checkbox("Always move items dragged between panes", self, mtm),
             terminal: popup(&terminal_names, self, mtm),
             terminals: terminals.iter().map(|t| t.0).collect(),
             compare: popup(&compare_names, self, mtm),
@@ -402,6 +404,14 @@ impl SettingsWindow {
                 (label("Apps:", mtm), view(&*controls.app_leftovers)),
                 (label("Sounds:", mtm), view(&*controls.sound_effects)),
                 (empty(mtm), view(&*controls.transfer_sounds)),
+                (label("Dragging:", mtm), view(&*controls.drag_moves)),
+                (
+                    empty(mtm),
+                    note(
+                        "On this Mac (also to another disk) or within one server. Hold Option to copy. When off, dragging moves on the same disk and copies to another, as in Finder.",
+                        mtm,
+                    ),
+                ),
                 (label("Open in Terminal uses:", mtm), view(&*controls.terminal)),
                 (label("Compare Files uses:", mtm), view(&*controls.compare)),
                 (label("Updates:", mtm), view(&*controls.auto_updates)),
@@ -607,6 +617,7 @@ impl SettingsWindow {
         set(&c.app_leftovers, settings.general.app_leftovers);
         set(&c.sound_effects, settings.general.sound_effects);
         set(&c.transfer_sounds, settings.general.transfer_sounds);
+        set(&c.drag_moves, settings.general.drag_moves);
         let terminal = c.terminals.iter().position(|k| *k == settings.general.terminal).unwrap_or(0);
         c.terminal.selectItemAtIndex(terminal as isize);
         let compare = c.compare_tools.iter().position(|k| *k == settings.general.compare_tool).unwrap_or(0);
@@ -664,6 +675,7 @@ impl SettingsWindow {
             s.general.app_leftovers = on(&c.app_leftovers);
             s.general.sound_effects = on(&c.sound_effects);
             s.general.transfer_sounds = on(&c.transfer_sounds);
+            s.general.drag_moves = on(&c.drag_moves);
             if let Some(key) = c.terminals.get(index(&c.terminal)) {
                 s.general.terminal = key.to_string();
             }

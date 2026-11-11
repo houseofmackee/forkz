@@ -225,6 +225,10 @@ pub struct GeneralSettings {
     pub sound_effects: bool,
     /// A sound when a long transfer finishes.
     pub transfer_sounds: bool,
+    /// Dragging between panes moves items when both are on this Mac or on
+    /// the same server (any disk), instead of following Finder (move on
+    /// the same disk, copy across disks). Option still copies.
+    pub drag_moves: bool,
 }
 
 impl Default for GeneralSettings {
@@ -236,6 +240,7 @@ impl Default for GeneralSettings {
             app_leftovers: true,
             sound_effects: true,
             transfer_sounds: true,
+            drag_moves: false,
         }
     }
 }
