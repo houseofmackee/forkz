@@ -25,6 +25,8 @@
 	<string>forkz</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>forkz asks Finder to move items to the Trash when they need an administrator's permission, such as apps installed for all users.</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.github.houseofmackee.forkz</string>
 	<key>CFBundleName</key>
@@ -32,9 +34,9 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.19.0</string>
+	<string>0.20.0</string>
 	<key>CFBundleVersion</key>
-	<string>36</string>
+	<string>37</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key>

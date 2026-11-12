@@ -1,7 +1,8 @@
 //! Leftovers of apps: the settings, caches, and support files an app keeps
-//! in `~/Library`, found by its bundle identifier (and, in a few places,
-//! its name), so they can go to the Trash with it. Apple's own apps are
-//! left alone.
+//! in `~/Library`, and what installers put in `/Library` for all users
+//! (background services and helper tools too), found by its bundle
+//! identifier (and, in a few places, its name), so they can go to the
+//! Trash with it, as AppCleaner does. Apple's own apps are left alone.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -62,30 +63,89 @@ pub fn leftovers(home: &Path, app: &AppInfo) -> Vec<PathBuf> {
     .iter()
     .map(|relative| library.join(relative))
     .collect();
-    // By name too, where apps often use it (long enough to be specific,
-    // and never a folder macOS itself uses).
-    let name = app.name.trim();
-    let reserved = ["Apple", "Caches", "Logs", "Preferences", "CrashReporter", "com.apple"];
-    if name.chars().count() >= 4 && !name.contains('/') && !reserved.contains(&name) {
+    // By name too, where apps often use it.
+    if let Some(name) = specific_name(app) {
         for folder in ["Application Support", "Caches", "Logs"] {
             found.push(library.join(folder).join(name));
         }
+        // Crash reports ("Writer Pro-2026-11-12-101500.ips").
+        found.extend(scan(&library, "Logs/DiagnosticReports", &|n| {
+            (n.starts_with(&format!("{name}-")) || n.starts_with(&format!("{name}_")))
+                && [".ips", ".crash", ".diag", ".hang"].iter().any(|ext| n.ends_with(ext))
+        }));
     }
-    // Names that only start or end with the identifier.
-    let scan = |folder: &str, matches: &dyn Fn(&str) -> bool| -> Vec<PathBuf> {
-        std::fs::read_dir(library.join(folder))
-            .map(|items| {
-                items
-                    .filter_map(Result::ok)
-                    .filter(|item| matches(&item.file_name().to_string_lossy()))
-                    .map(|item| item.path())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    found.extend(scan("Preferences/ByHost", &|n| n.starts_with(&format!("{id}.")) && n.ends_with(".plist")));
-    found.extend(scan("LaunchAgents", &|n| n == format!("{id}.plist") || n.starts_with(&format!("{id}."))));
-    found.extend(scan("Group Containers", &|n| n == format!("group.{id}") || n.ends_with(&format!(".{id}"))));
+    found.extend(scan(&library, "Preferences/ByHost", &|n| n.starts_with(&format!("{id}.")) && n.ends_with(".plist")));
+    found.extend(scan(&library, "LaunchAgents", &starts_with_id(id)));
+    found.extend(scan(&library, "Group Containers", &|n| n == format!("group.{id}") || n.ends_with(&format!(".{id}"))));
+    tidy(found)
+}
+
+/// The leftovers of an app for all users, in `root`/Library (`root` is "/"
+/// but for tests): support files, settings, background services
+/// (LaunchDaemons, LaunchAgents), and helper tools. Changing these takes an
+/// administrator's password.
+pub fn system_leftovers(root: &Path, app: &AppInfo) -> Vec<PathBuf> {
+    if !is_safe_id(&app.id) {
+        return Vec::new();
+    }
+    let library = root.join("Library");
+    let id = &app.id;
+    let mut found: Vec<PathBuf> = [
+        format!("Application Support/{id}"),
+        format!("Caches/{id}"),
+        format!("Preferences/{id}.plist"),
+        format!("Logs/{id}"),
+    ]
+    .iter()
+    .map(|relative| library.join(relative))
+    .collect();
+    if let Some(name) = specific_name(app) {
+        for folder in ["Application Support", "Logs"] {
+            found.push(library.join(folder).join(name));
+        }
+    }
+    for folder in ["LaunchDaemons", "LaunchAgents", "PrivilegedHelperTools"] {
+        found.extend(scan(&library, folder, &starts_with_id(id)));
+    }
+    tidy(found)
+}
+
+/// Whether a leftover is a background service or helper tool (it may run
+/// until the Mac restarts, even once in the Trash).
+pub fn is_service(path: &Path) -> bool {
+    path.parent()
+        .and_then(Path::file_name)
+        .is_some_and(|folder| ["LaunchDaemons", "LaunchAgents", "PrivilegedHelperTools"].iter().any(|f| folder == *f))
+}
+
+/// The app's name where it is specific enough to find its files by (long
+/// enough, and never a folder macOS itself uses).
+fn specific_name(app: &AppInfo) -> Option<&str> {
+    let name = app.name.trim();
+    let reserved = ["Apple", "Caches", "Logs", "Preferences", "CrashReporter", "com.apple", "DiagnosticReports"];
+    (name.chars().count() >= 4 && !name.contains('/') && !reserved.contains(&name)).then_some(name)
+}
+
+/// "com.example.App.plist", or anything that starts "com.example.App.".
+fn starts_with_id(id: &str) -> impl Fn(&str) -> bool + '_ {
+    move |n: &str| n == format!("{id}.plist") || n == id || n.starts_with(&format!("{id}."))
+}
+
+/// The items in a folder of `library` whose names match.
+fn scan(library: &Path, folder: &str, matches: &dyn Fn(&str) -> bool) -> Vec<PathBuf> {
+    std::fs::read_dir(library.join(folder))
+        .map(|items| {
+            items
+                .filter_map(Result::ok)
+                .filter(|item| matches(&item.file_name().to_string_lossy()))
+                .map(|item| item.path())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What exists, sorted, once each.
+fn tidy(mut found: Vec<PathBuf>) -> Vec<PathBuf> {
     found.retain(|path| path.symlink_metadata().is_ok());
     found.sort();
     found.dedup();
@@ -141,6 +201,58 @@ mod tests {
                 "Saved Application State/com.example.Writer.savedState",
             ]
         );
+    }
+
+    #[test]
+    fn finds_leftovers_for_all_users_and_crash_reports() {
+        let root = tempfile::tempdir().unwrap();
+        let lib = root.path().join("Library");
+        for dir in [
+            "Application Support/com.example.Writer",
+            "Application Support/Writer Pro",
+            "Logs/DiagnosticReports",
+            "LaunchDaemons",
+            "LaunchAgents",
+            "PrivilegedHelperTools",
+        ] {
+            std::fs::create_dir_all(lib.join(dir)).unwrap();
+        }
+        for file in [
+            "Preferences/com.example.Writer.plist",
+            "LaunchDaemons/com.example.Writer.helper.plist",
+            "LaunchDaemons/com.example.WriterX.plist",
+            "LaunchAgents/com.example.Writer.plist",
+            "PrivilegedHelperTools/com.example.Writer.helper",
+            "Logs/DiagnosticReports/Writer Pro-2026-11-12-101500.ips",
+            "Logs/DiagnosticReports/Writer Professional-2026.ips",
+        ] {
+            std::fs::create_dir_all(lib.join(file).parent().unwrap()).unwrap();
+            std::fs::write(lib.join(file), "").unwrap();
+        }
+        let app = AppInfo { name: "Writer Pro".into(), id: "com.example.Writer".into() };
+        let relative = |paths: Vec<PathBuf>| -> Vec<String> {
+            paths.iter().map(|p| p.strip_prefix(&lib).unwrap().to_string_lossy().into_owned()).collect()
+        };
+        assert_eq!(
+            relative(system_leftovers(root.path(), &app)),
+            [
+                "Application Support/Writer Pro",
+                "Application Support/com.example.Writer",
+                "LaunchAgents/com.example.Writer.plist",
+                "LaunchDaemons/com.example.Writer.helper.plist",
+                "Preferences/com.example.Writer.plist",
+                "PrivilegedHelperTools/com.example.Writer.helper",
+            ]
+        );
+        // A home folder's crash reports, by the app's name (not a longer one).
+        let user = relative(leftovers(root.path(), &app));
+        assert!(user.contains(&"Logs/DiagnosticReports/Writer Pro-2026-11-12-101500.ips".to_string()), "{user:?}");
+        assert!(!user.iter().any(|p| p.contains("Professional")));
+        assert!(is_service(&lib.join("LaunchDaemons/com.example.Writer.helper.plist")));
+        assert!(is_service(&lib.join("PrivilegedHelperTools/com.example.Writer.helper")));
+        assert!(!is_service(&lib.join("Preferences/com.example.Writer.plist")));
+        let apple = AppInfo { name: "Safari".into(), id: "com.apple.Safari".into() };
+        assert!(system_leftovers(root.path(), &apple).is_empty());
     }
 
     #[test]

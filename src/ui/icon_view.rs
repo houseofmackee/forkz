@@ -6,6 +6,7 @@
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::ProtocolObject;
@@ -47,6 +48,29 @@ pub fn strip_height() -> f64 {
 }
 
 const STRIP_INSET: f64 = 8.0;
+
+/// A pause this long starts a new type-to-select name (as in the list).
+const TYPING_PAUSE: Duration = Duration::from_millis(1000);
+
+/// The item type-to-select picks: the first whose name starts with what
+/// was typed (ignoring case), or else the name that sorts right after it
+/// (as Finder does).
+pub fn type_select_index(names: &[&str], typed: &str) -> Option<usize> {
+    let typed = typed.to_lowercase();
+    if typed.is_empty() {
+        return None;
+    }
+    let lower: Vec<String> = names.iter().map(|n| n.to_lowercase()).collect();
+    if let Some(index) = lower.iter().position(|n| n.starts_with(&typed)) {
+        return Some(index);
+    }
+    lower
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| crate::fs::natural_cmp(n, &typed) == std::cmp::Ordering::Greater)
+        .min_by(|(_, a), (_, b)| crate::fs::natural_cmp(a, b))
+        .map(|(i, _)| i)
+}
 
 define_class!(
     /// An icon's view: clicks anywhere on it are its own (not its image
@@ -250,6 +274,8 @@ pub struct IconIvars {
     drop_index: Cell<Option<NSInteger>>,
     /// The gallery's strip (one row, sideways) rather than the grid.
     strip: bool,
+    /// Type-to-select: what was typed, and when last.
+    typed: RefCell<(String, Option<Instant>)>,
 }
 
 define_class!(
@@ -263,6 +289,9 @@ define_class!(
         /// The list's keys: Space, Return, Tab, F-keys (arrows move).
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
+            if self.type_select(event) {
+                return;
+            }
             match (self.pane(), key_command(event)) {
                 (Some(pane), Some(command)) => super::run_command(command, Some(pane.index())),
                 _ => unsafe { msg_send![super(self), keyDown: event] },
@@ -465,6 +494,7 @@ impl IconView {
             syncing: Cell::new(false),
             drop_index: Cell::new(None),
             strip,
+            typed: RefCell::new((String::new(), None)),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         let _ = this.ivars().pane.set(Weak::from_retained(&pane.retain()));
@@ -491,6 +521,56 @@ impl IconView {
 
     fn pane(&self) -> Option<Retained<PaneController>> {
         self.ivars().pane.get().and_then(Weak::load)
+    }
+
+    /// Typing a name selects the item it starts (letters typed in quick
+    /// succession add up; a Space while typing is part of the name, not
+    /// Quick Look). False for keys that are not typing.
+    fn type_select(&self, event: &NSEvent) -> bool {
+        use objc2_app_kit::NSEventModifierFlags as M;
+        if event.modifierFlags().intersects(M::Command | M::Control | M::Option) {
+            return false;
+        }
+        let Some(text) = event.characters().map(|c| c.to_string()) else { return false };
+        // Letters and the like (not arrows, Return, Tab, or function keys).
+        let typing =
+            !text.is_empty() && text.chars().all(|c| !c.is_control() && !('\u{f700}'..='\u{f8ff}').contains(&c));
+        if !typing {
+            return false;
+        }
+        let now = Instant::now();
+        let mut typed = self.ivars().typed.borrow_mut();
+        let recent = typed.1.is_some_and(|last| now.duration_since(last) < TYPING_PAUSE);
+        if text == " " && !recent {
+            return false;
+        }
+        if !recent {
+            typed.0.clear();
+        }
+        typed.0.push_str(&text);
+        typed.1 = Some(now);
+        let wanted = typed.0.clone();
+        drop(typed);
+        let index = {
+            let entries = self.ivars().entries.borrow();
+            let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+            type_select_index(&names, &wanted)
+        };
+        if let Some(index) = index {
+            let set: Retained<NSMutableSet<NSIndexPath>> = NSMutableSet::new();
+            set.addObject(&NSIndexPath::indexPathForItem_inSection(index as NSInteger, 0));
+            unsafe { self.deselectAll(None) };
+            let scroll = if self.ivars().strip {
+                objc2_app_kit::NSCollectionViewScrollPosition::CenteredHorizontally
+            } else {
+                objc2_app_kit::NSCollectionViewScrollPosition::NearestHorizontalEdge
+            };
+            self.selectItemsAtIndexPaths_scrollPosition(&set, scroll);
+            // Selected by forkz, so the delegate is not told: the pane is.
+            self.selection_changed();
+            self.refresh_highlights();
+        }
+        true
     }
 
     /// A thumbnail is ready: the item showing that file gets it.
@@ -681,4 +761,21 @@ pub fn scroll_view(icons: &IconView, mtm: MainThreadMarker) -> Retained<objc2_ap
     scroll.setAutohidesScrollers(true);
     scroll.registerForDraggedTypes(&NSArray::from_retained_slice(&super::pane_view::drag_types()));
     scroll.into_super()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::type_select_index;
+
+    #[test]
+    fn typing_picks_an_item() {
+        let names = ["Subfolder", "Bundle.zip", "Calculator icon.png", "notes.txt", "Notes icon.png", "zeta"];
+        assert_eq!(type_select_index(&names, "cal"), Some(2));
+        assert_eq!(type_select_index(&names, "NOTES"), Some(3));
+        assert_eq!(type_select_index(&names, "notes i"), Some(4));
+        // Nothing starts with it: the name right after it.
+        assert_eq!(type_select_index(&names, "d"), Some(4));
+        assert_eq!(type_select_index(&names, "zz"), None);
+        assert_eq!(type_select_index(&names, ""), None);
+    }
 }

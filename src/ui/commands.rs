@@ -105,6 +105,13 @@ pub enum Command {
     ShowDropStack,
     ToggleTerminal,
     TerminalFollows,
+    GitStage,
+    GitUnstage,
+    GitCommit,
+    GitPull,
+    GitPush,
+    GitSwitchBranch,
+    AppCleaner,
 }
 
 impl Command {
@@ -230,6 +237,13 @@ impl Command {
         Command::ShowDropStack,
         Command::ToggleTerminal,
         Command::TerminalFollows,
+        Command::GitStage,
+        Command::GitUnstage,
+        Command::GitCommit,
+        Command::GitPull,
+        Command::GitPush,
+        Command::GitSwitchBranch,
+        Command::AppCleaner,
     ];
 
     pub fn tag(self) -> isize {
@@ -358,6 +372,13 @@ impl Command {
             Command::ShowDropStack => "Show Drop Stack",
             Command::ToggleTerminal => "Show Terminal",
             Command::TerminalFollows => "Terminal Follows Active Pane",
+            Command::GitStage => "Stage",
+            Command::GitUnstage => "Unstage",
+            Command::GitCommit => "Commit\u{2026}",
+            Command::GitPull => "Pull",
+            Command::GitPush => "Push",
+            Command::GitSwitchBranch => "Switch Branch\u{2026}",
+            Command::AppCleaner => "App Cleaner\u{2026}",
         }
     }
 
@@ -468,6 +489,13 @@ impl Command {
             // As in Visual Studio Code.
             Command::ToggleTerminal => ("`", NSEventModifierFlags::Control),
             Command::TerminalFollows => ("", cmd),
+            Command::GitStage
+            | Command::GitUnstage
+            | Command::GitCommit
+            | Command::GitPull
+            | Command::GitPush
+            | Command::GitSwitchBranch
+            | Command::AppCleaner => ("", cmd),
             // F3, as in Total Commander (also handled in the lists).
             Command::ViewFile => ("\u{f706}", NSEventModifierFlags::empty()),
         }
@@ -478,6 +506,13 @@ impl Command {
         use Command::*;
         Some(match self {
             Open => "arrow.up.right.square",
+            GitStage => "plus.circle",
+            GitUnstage => "minus.circle",
+            GitCommit => "checkmark.circle",
+            GitPull => "arrow.down.circle",
+            GitPush => "arrow.up.circle",
+            GitSwitchBranch => "arrow.triangle.branch",
+            AppCleaner => "trash.square",
             OpenInNewTab | NewTab => "plus.rectangle.on.rectangle",
             QuickLook => "eye",
             ViewFile => "doc.text.magnifyingglass",

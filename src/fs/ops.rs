@@ -395,13 +395,45 @@ impl Runner<'_> {
 
     fn trash_all(&mut self, sources: &[PathBuf]) -> Result<(), Stopped> {
         self.progress.total_items = sources.len();
+        // Items that need an administrator's permission go together at the
+        // end (one password, not one for each).
+        let mut need_permission = Vec::new();
         for source in sources {
             self.progress.current = file_name(source);
             self.report();
-            if self.attempt(source, |_| trash(source))? {
-                self.outcome.created.push(source.clone());
+            match trash_plainly(source) {
+                Ok(()) => self.outcome.created.push(source.clone()),
+                Err(e) if e.kind() == io::ErrorKind::PermissionDenied && TRASH_WITH_PERMISSION.get().is_some() => {
+                    need_permission.push(source.clone());
+                    continue;
+                }
+                Err(_) => {
+                    if self.attempt(source, |_| trash_plainly(source))? {
+                        self.outcome.created.push(source.clone());
+                    }
+                }
             }
             self.progress.done_items += 1;
+            self.report();
+        }
+        if let (false, Some(trash)) = (need_permission.is_empty(), TRASH_WITH_PERMISSION.get()) {
+            self.check_cancel()?;
+            self.progress.current = "Asking for permission\u{2026}".into();
+            self.report();
+            let result = trash(&need_permission);
+            // What went is what is no longer there (a cancelled password
+            // prompt moves nothing).
+            for source in need_permission {
+                if source.symlink_metadata().is_err() {
+                    self.outcome.created.push(source);
+                } else {
+                    let why = result.as_ref().err().map_or_else(|| "It is still there.".to_string(), |e| e.to_string());
+                    if !matches!(&result, Err(e) if e.kind() == io::ErrorKind::Interrupted) {
+                        self.outcome.failed.push((source, why));
+                    }
+                }
+                self.progress.done_items += 1;
+            }
             self.report();
         }
         Ok(())
@@ -934,13 +966,42 @@ pub fn remove_tree(fs: &FsRef, path: &Path) -> io::Result<()> {
     }
 }
 
-/// Moves an item to the Trash (so it can be put back from Finder).
+/// How to move items to the Trash when the plain way is not allowed (an
+/// app installed for all users belongs to the system): the app sets one
+/// that lets macOS ask for an administrator's password, as Finder does.
+pub type TrashWithPermission = fn(&[PathBuf]) -> io::Result<()>;
+
+static TRASH_WITH_PERMISSION: std::sync::OnceLock<TrashWithPermission> = std::sync::OnceLock::new();
+
+pub fn set_trash_with_permission(trash: TrashWithPermission) {
+    let _ = TRASH_WITH_PERMISSION.set(trash);
+}
+
+/// Moves an item to the Trash (so it can be put back from Finder),
+/// asking for permission if it needs it.
 pub fn trash(path: &Path) -> io::Result<()> {
+    match trash_plainly(path) {
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => match TRASH_WITH_PERMISSION.get() {
+            Some(trash) => trash(&[path.to_path_buf()]),
+            None => Err(e),
+        },
+        other => other,
+    }
+}
+
+/// Moves an item to the Trash as the user (PermissionDenied if that is not
+/// allowed).
+fn trash_plainly(path: &Path) -> io::Result<()> {
     use objc2_foundation::{NSFileManager, NSString, NSURL};
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-    NSFileManager::defaultManager()
-        .trashItemAtURL_resultingItemURL_error(&url, None)
-        .map_err(|e| io::Error::other(e.localizedDescription().to_string()))
+    match NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, None) {
+        Ok(()) => Ok(()),
+        // NSFileWriteNoPermissionError, NSFileReadNoPermissionError.
+        Err(e) if matches!(e.code(), 513 | 257) => {
+            Err(io::Error::new(io::ErrorKind::PermissionDenied, e.localizedDescription().to_string()))
+        }
+        Err(e) => Err(io::Error::other(e.localizedDescription().to_string())),
+    }
 }
 
 /// Creates "untitled folder" (or "untitled folder 2", ...) in `parent`.

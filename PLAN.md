@@ -101,7 +101,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Changing archives in place (zip, tar, tar.gz, tar.bz2, tar.xz, and 7z on the Mac)
 - [x] App deleter (leftover files when trashing an app)
 - [x] Git status in the list
-- [ ] Git add, commit, push, pull
+- [x] Git add, commit, push, pull (and branches)
 - [x] Filename filters for listings and copies
 - [x] Open in Terminal for iTerm, Warp, Ghostty, Kitty (and SSH sessions in them)
 - [x] Tags (column and editing)

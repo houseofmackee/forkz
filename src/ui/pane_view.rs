@@ -310,6 +310,8 @@ pub struct PaneIvars {
     git: RefCell<crate::fs::git::Statuses>,
     git_running: Cell<bool>,
     git_again: Cell<bool>,
+    /// The repository's branch, for the status line ("main \u{2191}1").
+    branch: RefCell<Option<String>>,
     /// A thin accent-colored line along the top, shown while this is the
     /// active pane (where commands, connections, and Go to Folder go).
     active_bar: OnceCell<Retained<objc2_app_kit::NSBox>>,
@@ -868,6 +870,43 @@ impl PaneController {
             add(Some(Compress));
             add(None);
         }
+        // In a repository: its actions, in a submenu.
+        if super::git_actions::repository_of(self).is_some() {
+            let sub = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Git"));
+            sub.setAutoenablesItems(false);
+            let groups: [&[Command]; 4] =
+                [&[GitStage, GitUnstage], &[GitCommit], &[GitPull, GitPush], &[GitSwitchBranch]];
+            for (number, group) in groups.iter().enumerate() {
+                if number > 0 {
+                    sub.addItem(&NSMenuItem::separatorItem(mtm));
+                }
+                for command in *group {
+                    let item = unsafe {
+                        NSMenuItem::initWithTitle_action_keyEquivalent(
+                            NSMenuItem::alloc(mtm),
+                            &ns(command.title()),
+                            Some(sel!(command:)),
+                            &ns(""),
+                        )
+                    };
+                    item.setTag(command.tag());
+                    unsafe { item.setTarget(Some(self)) };
+                    if let Some(icon) = command.menu_symbol().and_then(|n| super::util::symbol(n, command.title())) {
+                        item.setImage(Some(&icon));
+                    }
+                    item.setEnabled(super::is_enabled_in(*command, index, has_items));
+                    sub.addItem(&item);
+                }
+            }
+            let item = NSMenuItem::new(mtm);
+            item.setTitle(&ns("Git"));
+            item.setSubmenu(Some(&sub));
+            if let Some(icon) = super::util::symbol("arrow.triangle.branch", "Git") {
+                item.setImage(Some(&icon));
+            }
+            menu.addItem(&item);
+            menu.addItem(&NSMenuItem::separatorItem(mtm));
+        }
         let commands: &[Option<Command>] = match (self.is_local(), has_items) {
             (true, true) => &[
                 Some(Rename),
@@ -1133,6 +1172,7 @@ impl PaneController {
             git: RefCell::new(crate::fs::git::Statuses::default()),
             git_running: Cell::new(false),
             git_again: Cell::new(false),
+            branch: RefCell::new(None),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.build();
@@ -2036,30 +2076,46 @@ impl PaneController {
         }
     }
 
-    /// Runs `git status` in the background for the Git column (when it
-    /// shows, on the Mac); one at a time, again if asked meanwhile.
+    /// Runs `git status` in the background, in a repository on the Mac:
+    /// for the Git column (when it shows) and the branch in the status
+    /// line. One at a time, again if asked meanwhile.
     fn update_git(&self) {
-        let shown = self.is_local() && super::visible_columns(true).iter().any(|c| c == "git");
-        if !shown {
+        let in_repository = super::git_actions::repository_of(self).is_some();
+        if !in_repository {
+            if self.ivars().branch.borrow_mut().take().is_some() {
+                self.update_status();
+            }
             return;
         }
         if self.ivars().git_running.replace(true) {
             self.ivars().git_again.set(true);
             return;
         }
+        let column = super::visible_columns(true).iter().any(|c| c == "git");
         let (location, index) = (self.location(), self.index());
         std::thread::spawn(move || {
-            let statuses = crate::fs::git::repository_root(&location)
-                .and_then(|root| crate::fs::git::status(&root).ok())
-                .unwrap_or_default();
-            DispatchQueue::main().exec_async(move || super::git_status_arrived(index, statuses));
+            let root = crate::fs::git::repository_root(&location);
+            let statuses =
+                root.as_ref().filter(|_| column).and_then(|root| crate::fs::git::status(root).ok()).unwrap_or_default();
+            let branch = root.and_then(|root| crate::fs::git::branch(&root).ok()).map(|b| b.summary());
+            DispatchQueue::main().exec_async(move || super::git_status_arrived(index, statuses, branch));
         });
     }
 
-    /// `git status` finished: the Git column shows it.
-    pub fn git_arrived(&self, statuses: crate::fs::git::Statuses) {
+    /// The repository changed (a Git action): the Git column and branch
+    /// again.
+    pub fn git_changed(&self) {
+        self.update_git();
+    }
+
+    /// `git status` finished: the Git column and status line show it.
+    pub fn git_arrived(&self, statuses: crate::fs::git::Statuses, branch: Option<String>) {
         *self.ivars().git.borrow_mut() = statuses;
         self.ivars().git_running.set(false);
+        if *self.ivars().branch.borrow() != branch {
+            *self.ivars().branch.borrow_mut() = branch;
+            self.update_status();
+        }
         let table = self.table();
         let column = table.columnWithIdentifier(&ns("git"));
         if column >= 0 {
@@ -2273,6 +2329,10 @@ impl PaneController {
                     text.push_str(&format!(", {}", state.fs().label()));
                 } else if let Some(free) = fs::available_space(state.location()) {
                     text.push_str(&format!(", {} available", fs::format_size(free)));
+                }
+                // In a repository: its branch ("main \u{2191}1").
+                if let Some(branch) = self.ivars().branch.borrow().as_ref() {
+                    text.push_str(&format!("  \u{b7}  {branch}"));
                 }
                 text
             }

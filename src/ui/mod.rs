@@ -2,6 +2,7 @@
 //! the bottom; the menu bar and toolbar; and folder watching.
 
 mod activity;
+mod app_cleaner;
 mod column_view;
 pub mod commands;
 mod custom_tools;
@@ -12,6 +13,7 @@ mod duplicates_window;
 mod file_viewer;
 mod filters_editor;
 mod gallery_view;
+mod git_actions;
 mod icon_view;
 pub mod intents;
 mod listing_cache;
@@ -590,6 +592,7 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     let delegate: Retained<AppDelegate> = unsafe { msg_send![AppDelegate::alloc(mtm), init] };
     ns_app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     file_viewer::install(&delegate);
+    crate::fs::ops::set_trash_with_permission(trash_with_permission);
     // No macOS window tabs (forkz has tabs in each pane): this also
     // drops Show Tab Bar and Show All Tabs from the View menu.
     NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
@@ -1052,6 +1055,8 @@ fn main_menu(
     let commands = submenu("Commands");
     command(&commands, Command::CommandPalette);
     separator(&commands);
+    command(&commands, Command::AppCleaner);
+    separator(&commands);
     for c in [Command::CopyToOther, Command::MoveToOther] {
         command(&commands, c);
     }
@@ -1096,6 +1101,19 @@ fn main_menu(
     limits_item.setTitle(&ns("Simultaneous Transfers"));
     limits_item.setSubmenu(Some(&limits));
     commands.addItem(&limits_item);
+
+    let git_menu = submenu("Git");
+    for c in [Command::GitStage, Command::GitUnstage] {
+        command(&git_menu, c);
+    }
+    separator(&git_menu);
+    command(&git_menu, Command::GitCommit);
+    separator(&git_menu);
+    for c in [Command::GitPull, Command::GitPush] {
+        command(&git_menu, c);
+    }
+    separator(&git_menu);
+    command(&git_menu, Command::GitSwitchBranch);
 
     let window = submenu("Window");
     standard(&window, "Minimize", sel!(performMiniaturize:), "m");
@@ -1254,6 +1272,12 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         // Servers, and mounted shares (which count as local).
         Command::Disconnect => !local || pane.fs().key().starts_with("mount:"),
         Command::OpenWithApp => has_selection,
+        Command::GitStage
+        | Command::GitUnstage
+        | Command::GitCommit
+        | Command::GitPull
+        | Command::GitPush
+        | Command::GitSwitchBranch => git_actions::is_enabled(command, pane, has_selection),
         Command::NewFile => !pane.fs().read_only() && !pane.showing_results(),
         Command::ComparePanes => !app.panes[0].showing_results() && !app.panes[1].showing_results(),
         // On the Mac (duplicates go to the Trash).
@@ -1302,6 +1326,14 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::MultiRename => multi_rename(&pane),
         Command::TogglePreview => toggle_preview(),
         Command::OpenWithApp => open_with_app(&pane),
+        Command::GitStage
+        | Command::GitUnstage
+        | Command::GitCommit
+        | Command::GitPull
+        | Command::GitPush
+        | Command::GitSwitchBranch => git_actions::run(command, &pane),
+        // The apps selected on this Mac, or chosen.
+        Command::AppCleaner => app_cleaner::run(if pane.is_local() { targets() } else { Vec::new() }),
         Command::Compress => compress(&pane),
         Command::EditTags => edit_tags(&pane),
         Command::CommandPalette => command_palette(),
@@ -2497,13 +2529,14 @@ fn delete(pane: &PaneController, paths: Vec<PathBuf>) {
         start_job(Job::local(JobKind::Trash, paths.clone(), pane.location()));
         if !apps.is_empty() {
             // Once the apps are in the Trash (not if that failed or was
-            // stopped).
+            // stopped). Finder may first ask for a password, so this waits
+            // a while (a sleeping thread costs nothing).
             std::thread::spawn(move || {
-                for _ in 0..120 {
+                for _ in 0..2400 {
                     std::thread::sleep(std::time::Duration::from_millis(250));
                     if apps.iter().all(|(path, _)| path.symlink_metadata().is_err()) {
                         let apps: Vec<_> = apps.into_iter().map(|(_, app)| app).collect();
-                        DispatchQueue::main().exec_async(move || offer_app_leftovers(&apps, &paths));
+                        DispatchQueue::main().exec_async(move || app_cleaner::offer_leftovers(&apps, &paths));
                         return;
                     }
                 }
@@ -2525,30 +2558,6 @@ fn delete(pane: &PaneController, paths: Vec<PathBuf>) {
     };
     if dialogs::confirm(&message, &why, "Delete", true) {
         start_job(Job::between(JobKind::Delete, fs.clone(), paths, fs, pane.location()));
-    }
-}
-
-/// After apps went to the Trash: offers to move their leftover files
-/// (settings, caches, and support files in ~/Library) there too.
-fn offer_app_leftovers(apps: &[crate::fs::apps::AppInfo], trashed: &[PathBuf]) {
-    let Some(home) = dirs::home_dir() else { return };
-    let found: Vec<PathBuf> = apps
-        .iter()
-        .flat_map(|app| crate::fs::apps::leftovers(&home, app))
-        .filter(|p| !trashed.iter().any(|t| p.starts_with(t)))
-        .collect();
-    if found.is_empty() {
-        return;
-    }
-    let names = match apps {
-        [one] => format!("\u{201c}{}\u{201d}", one.name),
-        _ => "these apps".to_string(),
-    };
-    let message = format!("Also move the leftover files of {names} to the Trash?");
-    let informative =
-        "Settings, caches, and support files the app kept in your Library folder. Uncheck any you want to keep.";
-    if let Some(chosen) = dialogs::choose_paths(&message, informative, "Move to Trash", "Keep", &found, &home) {
-        start_job(Job::local(JobKind::Trash, chosen, home.join("Library")));
     }
 }
 
@@ -3378,6 +3387,71 @@ pub fn choose_app() -> Option<PathBuf> {
         return None;
     }
     panel.URL().and_then(|u| util::url_path(&u))
+}
+
+/// Moves items to the Trash through Finder, which asks for an
+/// administrator's password when they need it (apps installed for all
+/// users, files in /Library) and which App Management does not restrict.
+/// All in one request: one password. macOS asks once whether forkz may
+/// control Finder. Runs from a job's thread.
+fn trash_with_permission(paths: &[PathBuf]) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    // The paths as arguments: nothing in them is read as script.
+    let output = std::process::Command::new("/usr/bin/osascript")
+        .args([
+            "-e",
+            "on run argv",
+            "-e",
+            "set chosen to {}",
+            "-e",
+            "repeat with item_path in argv",
+            "-e",
+            "set end of chosen to (POSIX file (contents of item_path) as alias)",
+            "-e",
+            "end repeat",
+            "-e",
+            "tell application \"Finder\" to delete chosen",
+            "-e",
+            "end run",
+        ])
+        .args(paths)
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let error = String::from_utf8_lossy(&output.stderr);
+    tracing::debug!("Finder could not move {} items to the Trash: {}", paths.len(), error.trim());
+    Err(match finder_error(&error) {
+        FinderError::Cancelled => Error::new(ErrorKind::Interrupted, "Cancelled."),
+        FinderError::NotAllowed => Error::new(
+            ErrorKind::PermissionDenied,
+            "forkz needs to ask Finder to move this to the Trash. Allow forkz to control Finder in System Settings > Privacy & Security > Automation, then try again.",
+        ),
+        FinderError::Other => Error::new(
+            ErrorKind::PermissionDenied,
+            "You do not have permission to move this to the Trash, and Finder could not do it either.",
+        ),
+    })
+}
+
+#[derive(Debug, PartialEq)]
+enum FinderError {
+    /// The password prompt was cancelled.
+    Cancelled,
+    /// forkz may not control Finder (Privacy & Security > Automation).
+    NotAllowed,
+    Other,
+}
+
+/// What osascript's error says (it ends with the error number).
+fn finder_error(stderr: &str) -> FinderError {
+    if stderr.contains("(-128)") {
+        FinderError::Cancelled
+    } else if stderr.contains("(-1743)") || stderr.contains("(-10004)") {
+        FinderError::NotAllowed
+    } else {
+        FinderError::Other
+    }
 }
 
 /// Opens a file in a chosen app.
@@ -4566,9 +4640,9 @@ fn focus_pane(index: usize) {
 }
 
 /// `git status` for a pane's Git column.
-fn git_status_arrived(index: usize, statuses: crate::fs::git::Statuses) {
+fn git_status_arrived(index: usize, statuses: crate::fs::git::Statuses, branch: Option<String>) {
     if let Some(pane) = app().and_then(|a| a.panes.get(index).cloned()) {
-        pane.git_arrived(statuses);
+        pane.git_arrived(statuses, branch);
     }
 }
 
@@ -4991,6 +5065,15 @@ mod tests {
             owner: None,
             group: None,
         }
+    }
+
+    #[test]
+    fn reads_finders_errors() {
+        let cancelled = "0:84: execution error: Finder got an error: User canceled. (-128)";
+        assert_eq!(finder_error(cancelled), FinderError::Cancelled);
+        let refused = "execution error: Not authorized to send Apple events to Finder. (-1743)";
+        assert_eq!(finder_error(refused), FinderError::NotAllowed);
+        assert_eq!(finder_error("execution error: something else (-1728)"), FinderError::Other);
     }
 
     /// The apps for Open With, from macOS: Preview opens PNG images.

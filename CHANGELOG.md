@@ -7,6 +7,19 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-11-12
+
+### Added
+
+- Git: a Git menu (and a Git submenu in the context menu, in a repository) to stage and unstage the selected items, commit (with a message, optionally staging everything first), pull, push (the first push of a branch sets its upstream), and switch branches or make a new one. git never waits for a password or an editor: if something is needed, its message says so. The status line shows the branch, and how far it is ahead of or behind its upstream.
+- Type-to-select in icon view and the gallery: typing a name selects the item, as in the list.
+- App Cleaner (Commands > App Cleaner): choose apps (or select them first) to see everything they left on the Mac, as the AppCleaner app shows it, and move the app and the files you keep checked to the Trash in one go. Besides your Library (now with crash reports too), it finds what installers put in /Library for all users: support files, settings, background services, and helper tools. Those start unchecked, and Finder asks for an administrator's password once for all of them. Moving an app to the Trash offers the same list.
+
+### Fixed
+
+- Moving an app installed for all users (from the App Store, or with an installer) to the Trash failed with "you don't have permission". forkz now asks Finder to do it, as Finder itself would: macOS asks for an administrator's password (once for all such items), and the first time, whether forkz may control Finder.
+- The offer to remove an app's leftover files could fail to appear when moving the app to the Trash took more than 30 seconds (answering a password prompt, say).
+
 ## [0.19.0] - 2026-11-12
 
 ### Added
@@ -392,7 +405,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.20.0...HEAD
+[0.20.0]: https://github.com/houseofmackee/forkz/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/houseofmackee/forkz/compare/v0.18.3...v0.19.0
 [0.18.3]: https://github.com/houseofmackee/forkz/compare/v0.18.2...v0.18.3
 [0.18.2]: https://github.com/houseofmackee/forkz/compare/v0.18.1...v0.18.2
