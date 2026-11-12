@@ -11,8 +11,10 @@ mod drop_stack;
 mod duplicates_window;
 mod file_viewer;
 mod filters_editor;
+mod gallery_view;
 mod icon_view;
 pub mod intents;
+mod listing_cache;
 mod multi_rename;
 mod oplog;
 mod palette;
@@ -31,6 +33,7 @@ mod sync_window;
 mod terminal;
 mod theme_editor;
 mod themed;
+mod thumbnails;
 mod tools;
 mod tools_editor;
 mod usage_window;
@@ -501,6 +504,7 @@ const TOOLBAR: &[Command] = &[
     Command::OpenInTerminal,
     Command::SwapPanes,
     Command::Refresh,
+    Command::RefreshAll,
     Command::ToggleLeftPane,
     Command::ToggleRightPane,
     Command::TogglePreview,
@@ -509,14 +513,29 @@ const TOOLBAR: &[Command] = &[
     Command::ToggleTerminal,
 ];
 
-/// Toolbar items added in later versions, by `toolbar_version`, with
-/// where they go (None: at the end).
-/// A toolbar item and where it goes (None: at the end).
-type NewItem = (Command, Option<isize>);
+/// Where a toolbar item added in a later version goes.
+#[derive(Clone, Copy)]
+enum Place {
+    At(isize),
+    /// After this item (at the end if it is not there).
+    After(Command),
+    End,
+}
+
+/// Toolbar items added in later versions, by `toolbar_version`.
+type NewItem = (Command, Place);
 
 const NEW_TOOLBAR_ITEMS: &[(u32, &[NewItem])] = &[
-    (1, &[(Command::ToggleLeftPane, None), (Command::ToggleRightPane, None), (Command::TogglePreview, None)]),
-    (2, &[(Command::ToggleSidebar, Some(0))]),
+    (
+        1,
+        &[
+            (Command::ToggleLeftPane, Place::End),
+            (Command::ToggleRightPane, Place::End),
+            (Command::TogglePreview, Place::End),
+        ],
+    ),
+    (2, &[(Command::ToggleSidebar, Place::At(0))]),
+    (3, &[(Command::RefreshAll, Place::After(Command::Forward))]),
 ];
 
 fn toolbar_id(command: Command) -> String {
@@ -534,6 +553,7 @@ fn toolbar_identifiers(default: bool) -> Retained<NSArray<NSString>> {
             space.clone(),
             id(Command::Back),
             id(Command::Forward),
+            id(Command::RefreshAll),
             space.clone(),
             id(Command::CopyToOther),
             id(Command::MoveToOther),
@@ -952,11 +972,11 @@ fn main_menu(
     command(&edit, Command::Search);
 
     let view = submenu("View");
-    for c in [Command::ViewAsList, Command::ViewAsIcons, Command::ViewAsColumns] {
+    for c in [Command::ViewAsList, Command::ViewAsIcons, Command::ViewAsColumns, Command::ViewAsGallery] {
         command(&view, c);
     }
     separator(&view);
-    for c in [Command::ToggleHidden, Command::ToggleFilters, Command::FlatView, Command::Refresh] {
+    for c in [Command::ToggleHidden, Command::ToggleFilters, Command::FlatView, Command::Refresh, Command::RefreshAll] {
         command(&view, c);
     }
     separator(&view);
@@ -1305,7 +1325,7 @@ pub fn run_command(command: Command, pane: Option<usize>) {
             set_panes_stacked(&app, stacked);
             update_settings(|s| s.stacked_panes = stacked);
         }
-        Command::ViewAsList | Command::ViewAsIcons | Command::ViewAsColumns => {
+        Command::ViewAsList | Command::ViewAsIcons | Command::ViewAsColumns | Command::ViewAsGallery => {
             if let Some(mode) = command.view_mode() {
                 pane.set_view_mode(mode);
                 update_settings(|s| {
@@ -1408,6 +1428,12 @@ pub fn run_command(command: Command, pane: Option<usize>) {
             }
         }
         Command::Refresh => pane.reload(),
+        // Every pane (each shows its active tab).
+        Command::RefreshAll => {
+            for pane in &app.panes {
+                pane.reload();
+            }
+        }
         Command::Back => pane.go_back(),
         Command::Forward => pane.go_forward(),
         Command::Up => pane.go_up(),
@@ -2528,6 +2554,12 @@ fn offer_app_leftovers(apps: &[crate::fs::apps::AppInfo], trashed: &[PathBuf]) {
 
 /// Downloads remote files to a temporary folder and opens them.
 pub fn open_remote(fs: FsRef, files: Vec<PathBuf>) {
+    open_remote_with(fs, files, None);
+}
+
+/// Downloads server (or archive) files and opens them in `app` (None:
+/// each file's default app).
+pub fn open_remote_with(fs: FsRef, files: Vec<PathBuf>, app: Option<PathBuf>) {
     if files.is_empty() {
         return;
     }
@@ -2542,6 +2574,7 @@ pub fn open_remote(fs: FsRef, files: Vec<PathBuf>) {
         let mut job = Job::between(JobKind::Copy, fs.clone(), vec![file], vfs::local(), folder);
         job.on_conflict = Some(Resolution::Replace);
         job.open_when_done = true;
+        job.open_with = app.clone();
         start_job(job);
     }
 }
@@ -2827,6 +2860,14 @@ fn job_finished(id: isize, job: Job, outcome: Outcome, took: std::time::Duration
     let Some(app) = app() else { return };
     app.activity.remove(id);
     app.activity.job_done(id);
+    // The folders it changed, shown or not: their last listings are out of
+    // date (where items went, and where they came from).
+    listing_cache::forget(&job.dest_fs, &job.destination);
+    for source in &job.sources {
+        if let Some(parent) = source.parent() {
+            listing_cache::forget(&job.source_fs, parent);
+        }
+    }
     // Sound cues (downloads to open a file are not transfers to hear).
     let cue = match job.kind {
         _ if outcome.cancelled => None,
@@ -2864,7 +2905,12 @@ fn job_finished(id: isize, job: Job, outcome: Outcome, took: std::time::Duration
             {
                 remote_edit::track(job.source_fs.clone(), remote.clone(), path.clone());
             }
-            workspace.openURL(&file_url(path));
+            match &job.open_with {
+                Some(app) => open_with(path, app),
+                None => {
+                    workspace.openURL(&file_url(path));
+                }
+            }
         }
     }
     activity::report_problems(&outcome);
@@ -3251,6 +3297,87 @@ fn open_with_app(pane: &PaneController) {
             pane.entries_for(&paths).into_iter().filter(|e| !e.is_folder_like()).map(|e| e.path).collect();
         open_remote(pane.fs(), files);
     }
+}
+
+/// The apps that can open all of `entries` (the first 20): the default
+/// app of the first, if it is one of them, and the rest by name. Items on
+/// this Mac are asked about directly; others by their file name extension.
+pub fn apps_to_open(entries: &[crate::fs::Entry], local: bool) -> (Option<PathBuf>, Vec<PathBuf>) {
+    let workspace = NSWorkspace::sharedWorkspace();
+    let lists: Vec<(Option<PathBuf>, Vec<PathBuf>)> = entries
+        .iter()
+        .take(20)
+        .map(|entry| {
+            let (default, all) = if local {
+                let url = file_url(&entry.path);
+                (workspace.URLForApplicationToOpenURL(&url), Some(workspace.URLsForApplicationsToOpenURL(&url)))
+            } else {
+                let extension = entry.path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
+                match objc2_uniform_type_identifiers::UTType::typeWithFilenameExtension(&ns(&extension)) {
+                    Some(kind) => (
+                        workspace.URLForApplicationToOpenContentType(&kind),
+                        Some(workspace.URLsForApplicationsToOpenContentType(&kind)),
+                    ),
+                    None => (None, None),
+                }
+            };
+            let all: Vec<PathBuf> =
+                all.map(|a| a.iter().filter_map(|u| util::url_path(&u)).collect()).unwrap_or_default();
+            (default.and_then(|u| util::url_path(&u)), all)
+        })
+        .collect();
+    let Some((default, first)) = lists.first() else { return (None, Vec::new()) };
+    let mut common: Vec<PathBuf> =
+        first.iter().filter(|app| lists.iter().all(|(_, all)| all.contains(app))).cloned().collect();
+    let default = default.clone().filter(|d| common.contains(d));
+    // One of each app (the first copy, the one macOS prefers), by name.
+    let mut seen = std::collections::HashSet::new();
+    common.retain(|app| Some(app) != default.as_ref() && seen.insert(app_name(app)));
+    common.sort_by_key(|app| app_name(app).to_lowercase());
+    (default, common)
+}
+
+/// An app's name as Finder shows it ("Preview").
+pub fn app_name(app: &Path) -> String {
+    objc2_foundation::NSFileManager::defaultManager().displayNameAtPath(&ns(&app.to_string_lossy())).to_string()
+}
+
+/// Opens items in an app: items on this Mac directly, others downloaded
+/// first (folders on servers cannot be).
+pub fn open_entries_with(fs: FsRef, entries: Vec<crate::fs::Entry>, app: PathBuf) {
+    if fs.is_local() {
+        let urls: Vec<_> = entries.iter().map(|e| file_url(&e.path)).collect();
+        let configuration = objc2_app_kit::NSWorkspaceOpenConfiguration::configuration();
+        NSWorkspace::sharedWorkspace().openURLs_withApplicationAtURL_configuration_completionHandler(
+            &NSArray::from_retained_slice(&urls),
+            &file_url(&app),
+            &configuration,
+            None,
+        );
+    } else {
+        let files = entries.into_iter().filter(|e| !e.is_folder_like()).map(|e| e.path).collect();
+        open_remote_with(fs, files, Some(app));
+    }
+}
+
+/// Asks for an app (Open With > Other).
+pub fn choose_app() -> Option<PathBuf> {
+    let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm());
+    panel.setCanChooseFiles(true);
+    panel.setCanChooseDirectories(false);
+    panel.setAllowsMultipleSelection(false);
+    panel.setTreatsFilePackagesAsDirectories(false);
+    panel.setMessage(Some(&ns("Choose an app to open the items with.")));
+    panel.setPrompt(Some(&ns("Open")));
+    if let Some(kind) = objc2_uniform_type_identifiers::UTType::typeWithIdentifier(&ns("com.apple.application-bundle"))
+    {
+        panel.setAllowedContentTypes(&NSArray::from_retained_slice(&[kind]));
+    }
+    panel.setDirectoryURL(Some(&file_url(Path::new("/Applications"))));
+    if panel.runModal() != objc2_app_kit::NSModalResponseOK {
+        return None;
+    }
+    panel.URL().and_then(|u| util::url_path(&u))
 }
 
 /// Opens a file in a chosen app.
@@ -3820,7 +3947,14 @@ fn add_new_toolbar_items(app: &App) {
         let present: Vec<String> = toolbar.items().iter().map(|i| i.itemIdentifier().to_string()).collect();
         for (command, at) in *commands {
             if !present.contains(&toolbar_id(*command)) {
-                let at = at.unwrap_or(toolbar.items().count() as isize);
+                let end = toolbar.items().count() as isize;
+                let at = match at {
+                    Place::At(index) => *index,
+                    Place::After(other) => {
+                        present.iter().position(|id| *id == toolbar_id(*other)).map_or(end, |i| i as isize + 1)
+                    }
+                    Place::End => end,
+                };
                 toolbar.insertItemWithItemIdentifier_atIndex(&ns(&toolbar_id(*command)), at);
             }
         }
@@ -4438,6 +4572,15 @@ fn git_status_arrived(index: usize, statuses: crate::fs::git::Statuses) {
     }
 }
 
+/// A file's thumbnail is ready (for the icon views showing it).
+fn thumbnail_ready(path: &Path) {
+    if let Some(app) = app() {
+        for pane in &app.panes {
+            pane.thumbnail_ready(path);
+        }
+    }
+}
+
 /// The icon view's selection colors, after the focus moved.
 fn refresh_icon_highlights(index: usize) {
     if let Some(icons) = app().and_then(|a| a.panes.get(index).and_then(|p| p.icon_view())) {
@@ -4606,6 +4749,7 @@ fn disconnect(key: &str) {
         oplog::record(oplog::Kind::Connection, format!("Disconnected from {}", fs.label()), "");
     }
     app.connections.borrow_mut().retain(|(_, fs)| fs.key() != key);
+    listing_cache::forget_all(key);
     for pane in &app.panes {
         pane.leave(key);
     }
@@ -4827,5 +4971,48 @@ fn folder_changed(paths: &[PathBuf]) {
                 current.panes[index].reload();
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &Path) -> crate::fs::Entry {
+        crate::fs::Entry {
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            path: path.to_path_buf(),
+            kind: crate::fs::EntryKind::File,
+            size: 1,
+            modified: None,
+            hidden: false,
+            package: false,
+            permissions: None,
+            owner: None,
+            group: None,
+        }
+    }
+
+    /// The apps for Open With, from macOS: Preview opens PNG images.
+    #[test]
+    fn finds_apps_to_open_with() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("a.png");
+        let txt = dir.path().join("b.txt");
+        std::fs::write(&png, b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::write(&txt, b"text").unwrap();
+        let (default, others) = apps_to_open(&[entry(&png)], true);
+        let default = default.expect("PNG images have a default app");
+        assert!(!others.contains(&default), "the default is listed once");
+        let names: Vec<String> = std::iter::once(&default).chain(&others).map(|a| app_name(a)).collect();
+        assert!(names.iter().any(|n| n == "Preview"), "{names:?}");
+        // By name only (a file on a server): the same apps.
+        let (remote_default, _) = apps_to_open(&[entry(Path::new("/srv/photos/c.png"))], false);
+        assert_eq!(remote_default.as_ref(), Some(&default));
+        // Several items: only apps that open all of them.
+        let (_, both) = apps_to_open(&[entry(&png), entry(&txt)], true);
+        let (_, png_only) = apps_to_open(&[entry(&png)], true);
+        assert!(both.len() <= png_only.len() + 1);
+        assert!(apps_to_open(&[], true).0.is_none());
     }
 }

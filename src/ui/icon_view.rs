@@ -1,5 +1,6 @@
 //! Icon view (View > as Icons): a pane's folder as a grid of large icons,
-//! with NSCollectionView. As with the column view, the list stays
+//! with NSCollectionView. The gallery (View > as Gallery) uses one as its
+//! strip: a single row of smaller icons that scrolls sideways. As with the column view, the list stays
 //! underneath (hidden) and follows the selection, so every command, the
 //! status line, Quick Look, and the preview pane work as in the list.
 
@@ -32,6 +33,20 @@ fn metrics() -> (f64, NSSize) {
     let icon = (64.0 * text / 13.0).round();
     (icon, NSSize::new((icon * 1.65).round(), (icon + text * 2.6 + 16.0).round()))
 }
+
+/// The gallery strip's items: icons only (the name is under the preview).
+fn strip_metrics() -> (f64, NSSize) {
+    let (text, _) = super::pane_view::look_metrics();
+    let icon = (48.0 * text / 13.0).round();
+    (icon, NSSize::new(icon + 16.0, icon + 16.0))
+}
+
+/// The height the gallery strip needs (its items, insets, and scroller).
+pub fn strip_height() -> f64 {
+    strip_metrics().1.height + 2.0 * STRIP_INSET + 14.0
+}
+
+const STRIP_INSET: f64 = 8.0;
 
 define_class!(
     /// An icon's view: clicks anywhere on it are its own (not its image
@@ -177,14 +192,40 @@ impl IconItem {
         self.view().subviews().firstObject().and_then(|v| v.downcast::<NSBox>().ok())
     }
 
-    fn show(&self, entry: &Entry, local: bool) {
-        let (icon, _) = metrics();
-        let picture = icon_of(entry, local);
-        let copy: Retained<objc2_app_kit::NSImage> = unsafe { msg_send![&picture, copy] };
-        copy.setSize(NSSize::new(icon, icon));
-        let alpha = if entry.hidden { 0.5 } else { 1.0 };
+    /// Shows a picture (an icon or a thumbnail) at the icon size, keeping
+    /// its shape.
+    fn set_picture(&self, picture: &objc2_app_kit::NSImage, strip: bool) {
+        let (icon, _) = if strip { strip_metrics() } else { metrics() };
+        let copy: Retained<objc2_app_kit::NSImage> = unsafe { msg_send![picture, copy] };
+        copy.setSize(super::thumbnails::fitted(picture, icon));
         if let Some(image) = self.imageView() {
             image.setImage(Some(&copy));
+        }
+    }
+
+    /// Places the picture, name, and highlight for the grid or the strip.
+    fn lay_out(&self, strip: bool) {
+        let (Some(image), Some(label), Some(highlight)) = (self.imageView(), self.textField(), self.highlight()) else {
+            return;
+        };
+        let (icon, size) = if strip { strip_metrics() } else { metrics() };
+        let (text, _) = super::pane_view::look_metrics();
+        self.view().setFrameSize(size);
+        highlight.setFrame(NSRect::new(NSPoint::new(2.0, 2.0), NSSize::new(size.width - 4.0, size.height - 4.0)));
+        let top = if strip { ((size.height - icon) / 2.0).floor() } else { size.height - icon - 8.0 };
+        image.setFrame(NSRect::new(NSPoint::new(((size.width - icon) / 2.0).floor(), top), NSSize::new(icon, icon)));
+        label.setFrame(NSRect::new(NSPoint::new(4.0, 6.0), NSSize::new(size.width - 8.0, (text * 2.6).round())));
+        label.setHidden(strip);
+    }
+
+    fn show(&self, entry: &Entry, local: bool, strip: bool) {
+        self.lay_out(strip);
+        // The contents' thumbnail when there is one (it may come later).
+        let thumbnail = super::thumbnails::applies(entry, local).then(|| super::thumbnails::get(entry)).flatten();
+        let picture = thumbnail.unwrap_or_else(|| icon_of(entry, local));
+        self.set_picture(&picture, strip);
+        let alpha = if entry.hidden { 0.5 } else { 1.0 };
+        if let Some(image) = self.imageView() {
             image.setAlphaValue(alpha);
         }
         if let Some(label) = self.textField() {
@@ -192,6 +233,8 @@ impl IconItem {
             label.setToolTip(Some(&ns(&entry.name)));
             label.setAlphaValue(alpha);
         }
+        // The strip has no names: the icon's tooltip gives it.
+        self.view().setToolTip(strip.then(|| ns(&entry.name)).as_deref());
     }
 }
 
@@ -205,6 +248,8 @@ pub struct IconIvars {
     syncing: Cell<bool>,
     /// The folder icon highlighted under a drag.
     drop_index: Cell<Option<NSInteger>>,
+    /// The gallery's strip (one row, sideways) rather than the grid.
+    strip: bool,
 }
 
 define_class!(
@@ -293,7 +338,7 @@ define_class!(
                 && let Some(icon) = item.downcast_ref::<IconItem>()
                 && let Some(entry) = icons.entry_at(path.item())
             {
-                icon.show(&entry, icons.ivars().local.get());
+                icon.show(&entry, icons.ivars().local.get(), icons.ivars().strip);
             }
             item
         }
@@ -410,7 +455,8 @@ impl IconScroll {
 }
 
 impl IconView {
-    pub fn new(mtm: MainThreadMarker, pane: &PaneController) -> Retained<Self> {
+    /// The grid, or (`strip`) the gallery's strip.
+    pub fn new(mtm: MainThreadMarker, pane: &PaneController, strip: bool) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(IconIvars {
             pane: OnceCell::new(),
             source: OnceCell::new(),
@@ -418,6 +464,7 @@ impl IconView {
             local: Cell::new(true),
             syncing: Cell::new(false),
             drop_index: Cell::new(None),
+            strip,
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         let _ = this.ivars().pane.set(Weak::from_retained(&pane.retain()));
@@ -446,6 +493,22 @@ impl IconView {
         self.ivars().pane.get().and_then(Weak::load)
     }
 
+    /// A thumbnail is ready: the item showing that file gets it.
+    pub fn thumbnail_ready(&self, path: &Path) {
+        let Some((index, entry)) =
+            self.ivars().entries.borrow().iter().enumerate().find(|(_, e)| e.path == path).map(|(i, e)| (i, e.clone()))
+        else {
+            return;
+        };
+        let Some(thumbnail) = super::thumbnails::get(&entry) else { return };
+        if let Some(item) = self
+            .itemAtIndexPath(&NSIndexPath::indexPathForItem_inSection(index as NSInteger, 0))
+            .and_then(|item| item.downcast::<IconItem>().ok())
+        {
+            item.set_picture(&thumbnail, self.ivars().strip);
+        }
+    }
+
     pub fn refresh_highlights(&self) {
         for item in self.visibleItems().iter() {
             if let Some(icon) = item.downcast_ref::<IconItem>() {
@@ -460,12 +523,17 @@ impl IconView {
 
     /// The icon size (with the text size) and the theme's background.
     pub fn apply_look(&self) {
-        let (_, size) = metrics();
+        let strip = self.ivars().strip;
+        let (_, size) = if strip { strip_metrics() } else { metrics() };
         let layout = NSCollectionViewFlowLayout::new(self.mtm());
         layout.setItemSize(size);
         layout.setMinimumInteritemSpacing(6.0);
         layout.setMinimumLineSpacing(6.0);
-        layout.setSectionInset(NSEdgeInsets { top: 12.0, left: 12.0, bottom: 12.0, right: 12.0 });
+        let inset = if strip { STRIP_INSET } else { 12.0 };
+        layout.setSectionInset(NSEdgeInsets { top: inset, left: inset, bottom: inset, right: inset });
+        if strip {
+            layout.setScrollDirection(objc2_app_kit::NSCollectionViewScrollDirection::Horizontal);
+        }
         self.setCollectionViewLayout(Some(&layout));
         // After the layout: setting one forgets the registered item class.
         unsafe { self.registerClass_forItemWithIdentifier(Some(IconItem::class()), &ns(ITEM)) };
@@ -544,6 +612,9 @@ impl IconView {
         chosen.sort_by_key(|(index, _)| *index);
         let location = pane.location();
         pane.browse_select(location, chosen.into_iter().map(|(_, p)| p).collect());
+        if self.ivars().strip {
+            pane.gallery_selection_changed();
+        }
     }
 
     /// Shows the pane's items and selection.
@@ -579,7 +650,11 @@ impl IconView {
         }
         unsafe { self.deselectAll(None) };
         if set.count() > 0 {
-            let scroll = objc2_app_kit::NSCollectionViewScrollPosition::NearestHorizontalEdge;
+            let scroll = if self.ivars().strip {
+                objc2_app_kit::NSCollectionViewScrollPosition::CenteredHorizontally
+            } else {
+                objc2_app_kit::NSCollectionViewScrollPosition::NearestHorizontalEdge
+            };
             self.selectItemsAtIndexPaths_scrollPosition(&set, scroll);
         }
         self.ivars().syncing.set(false);
@@ -598,7 +673,11 @@ pub fn scroll_view(icons: &IconView, mtm: MainThreadMarker) -> Retained<objc2_ap
     let scroll: Retained<IconScroll> = unsafe { msg_send![super(scroll), initWithFrame: NSRect::ZERO] };
     let _ = scroll.ivars().set(Weak::from_retained(&icons.retain()));
     scroll.setDocumentView(Some(icons));
-    scroll.setHasVerticalScroller(true);
+    if icons.ivars().strip {
+        scroll.setHasHorizontalScroller(true);
+    } else {
+        scroll.setHasVerticalScroller(true);
+    }
     scroll.setAutohidesScrollers(true);
     scroll.registerForDraggedTypes(&NSArray::from_retained_slice(&super::pane_view::drag_types()));
     scroll.into_super()

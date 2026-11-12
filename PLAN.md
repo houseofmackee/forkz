@@ -28,7 +28,7 @@ A native dual-pane file manager and file transfer client for macOS on Apple sili
 | `ui::preview`, `ui::oplog` | The preview pane, and the session's operation log it shows | Yes |
 | `ui::promises` | File promises for dragging server items to Finder | Yes |
 | `ui::palette` | The command palette | Yes |
-| `ui::column_view`, `ui::icon_view` | Column view (NSBrowser) and icon view (NSCollectionView), with the hidden list following their selection | Yes |
+| `ui::column_view`, `ui::icon_view`, `ui::gallery_view`, `ui::thumbnails` | Column view (NSBrowser), icon view (NSCollectionView), and gallery (Quick Look above an icon strip), with the hidden list following their selection; content thumbnails (QuickLookThumbnailing) | Yes |
 | `ui::viewer`, `ui::filters_editor` | The text and hex viewer; Settings > Filters | Yes |
 | `ui::themed`, `ui::theme_editor` | Drawing lists in theme colors; the Customize Theme editor | Yes |
 | `ui::file_viewer` | "Show in Finder" in other apps (NSFileViewer), opened folders, and reveal requests | Yes |
@@ -88,6 +88,7 @@ The logic that can be tested without a window (`fs`, `fs::ops`, `fs::search`, `f
 - [x] Workspaces (saved sets of tabs and locations)
 - [x] Column view; Group by
 - [x] Icon view
+- [x] Gallery view, and thumbnails in icon views
 - [x] Stacked panes (one above the other)
 - [x] Preview pane (info, preview, activity, log)
 - [x] Filter field on each list

@@ -337,6 +337,9 @@ pub struct TransferSettings {
     /// Ask before uploading an opened server file that was saved (instead
     /// of uploading it right away).
     pub ask_before_upload_on_save: bool,
+    /// Server folders opened again show their last listing at once while
+    /// the fresh one loads.
+    pub cache_listings: bool,
     /// Speed limits in KB a second for all uploads and all downloads
     /// together (0: none).
     pub upload_limit_kbps: u64,
@@ -354,6 +357,7 @@ impl Default for TransferSettings {
             upload_conflict: None,
             max_transfers: 2,
             ask_before_upload_on_save: false,
+            cache_listings: true,
             upload_limit_kbps: 0,
             download_limit_kbps: 0,
             on_error: "ask".into(),

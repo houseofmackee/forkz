@@ -275,6 +275,8 @@ pub struct PaneIvars {
     menu_places: RefCell<Vec<(FsRef, PathBuf)>>,
     /// What the context menu's items apply to (taken when it opens).
     menu_items: RefCell<Vec<PathBuf>>,
+    /// The context menu's Open With apps (by item tag).
+    menu_apps: RefCell<Vec<PathBuf>>,
     /// Set while a context menu command runs: what it applies to.
     context_row: Cell<Option<usize>>,
     /// The column chooser shown on the column titles.
@@ -300,6 +302,7 @@ pub struct PaneIvars {
     columns: OnceCell<Retained<super::column_view::ColumnBrowser>>,
     icons: OnceCell<Retained<super::icon_view::IconView>>,
     icon_scroll: OnceCell<Retained<NSScrollView>>,
+    gallery: OnceCell<super::gallery_view::Gallery>,
     mode: Cell<crate::pane::ViewMode>,
     /// Set while the column view changes the pane (it shows that itself).
     from_columns: Cell<bool>,
@@ -398,6 +401,18 @@ define_class!(
         #[unsafe(method(sendTo:))]
         fn send_to(&self, sender: &NSMenuItem) {
             self.send_to_place(sender.tag());
+        }
+
+        /// The refresh button in this pane's bar.
+        #[unsafe(method(refreshPane:))]
+        fn refresh_pane(&self, _sender: Option<&AnyObject>) {
+            self.reload();
+        }
+
+        /// Open With: the tag is the app (-1: choose one).
+        #[unsafe(method(openWithApp:))]
+        fn open_with_app(&self, sender: &NSMenuItem) {
+            self.open_items_with(sender.tag());
         }
 
         #[unsafe(method(command:))]
@@ -686,6 +701,76 @@ impl PaneController {
         }
     }
 
+    /// The context menu's Open With: the default app, the other apps that
+    /// open all the items, and Other (choose one).
+    fn add_open_with(&self, menu: &NSMenu) {
+        let mtm = self.mtm();
+        let items = self.ivars().menu_items.borrow().clone();
+        let fs = self.fs();
+        let fs = fs.browse_fs().unwrap_or(fs);
+        let entries = self.entries_for(&items);
+        // Folders on servers cannot be downloaded to open.
+        let openable = fs.is_local() || entries.iter().any(|e| !e.is_folder_like());
+        let (default, others) =
+            if openable { super::apps_to_open(&entries, fs.is_local()) } else { (None, Vec::new()) };
+        let sub = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Open With"));
+        sub.setAutoenablesItems(false);
+        let mut apps = Vec::new();
+        let app_item = |title: &str, tag: isize, icon: Option<&Path>| {
+            let item = unsafe {
+                NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &ns(title),
+                    Some(sel!(openWithApp:)),
+                    &ns(""),
+                )
+            };
+            item.setTag(tag);
+            unsafe { item.setTarget(Some(self)) };
+            if let Some(app) = icon {
+                let image = objc2_app_kit::NSWorkspace::sharedWorkspace().iconForFile(&ns(&app.to_string_lossy()));
+                image.setSize(NSSize::new(16.0, 16.0));
+                item.setImage(Some(&image));
+            }
+            sub.addItem(&item);
+        };
+        if let Some(app) = &default {
+            app_item(&format!("{} (default)", super::app_name(app)), 0, Some(app));
+            apps.push(app.clone());
+            if !others.is_empty() {
+                sub.addItem(&NSMenuItem::separatorItem(mtm));
+            }
+        }
+        for app in others {
+            app_item(&super::app_name(&app), apps.len() as isize, Some(&app));
+            apps.push(app);
+        }
+        if !apps.is_empty() {
+            sub.addItem(&NSMenuItem::separatorItem(mtm));
+        }
+        app_item("Other\u{2026}", -1, None);
+        *self.ivars().menu_apps.borrow_mut() = apps;
+        let item = NSMenuItem::new(mtm);
+        item.setTitle(&ns("Open With"));
+        item.setSubmenu(Some(&sub));
+        item.setEnabled(openable);
+        if let Some(icon) = super::util::symbol("arrow.up.forward.app", "Open With") {
+            item.setImage(Some(&icon));
+        }
+        menu.addItem(&item);
+    }
+
+    /// An Open With app was chosen (-1: choose one).
+    fn open_items_with(&self, tag: isize) {
+        let items = self.ivars().menu_items.borrow().clone();
+        let app =
+            if tag < 0 { super::choose_app() } else { self.ivars().menu_apps.borrow().get(tag as usize).cloned() };
+        let Some(app) = app else { return };
+        let fs = self.fs();
+        let fs = fs.browse_fs().unwrap_or(fs);
+        super::open_entries_with(fs, self.entries_for(&items), app);
+    }
+
     /// The context menu: commands that work where this pane is (the Mac or
     /// a server), worded for it, and disabled when they cannot apply.
     fn build_context_menu(&self, menu: &NSMenu, has_items: bool) {
@@ -769,6 +854,7 @@ impl PaneController {
             let read_only = self.fs().read_only();
             let one_archive = matches!(self.ivars().menu_items.borrow().as_slice(), [one] if vfs::archive::is_archive_name(&crate::pane::title_of(one)));
             add(Some(Open));
+            self.add_open_with(menu);
             add(Some(OpenInNewTab));
             if self.is_local() {
                 add(Some(QuickLook));
@@ -1024,6 +1110,7 @@ impl PaneController {
             menu_row: Cell::new(None),
             menu_places: RefCell::new(Vec::new()),
             menu_items: RefCell::new(Vec::new()),
+            menu_apps: RefCell::new(Vec::new()),
             context_row: Cell::new(None),
             pending_select: RefCell::new(None),
             header_menu: OnceCell::new(),
@@ -1040,6 +1127,7 @@ impl PaneController {
             columns: OnceCell::new(),
             icons: OnceCell::new(),
             icon_scroll: OnceCell::new(),
+            gallery: OnceCell::new(),
             mode: Cell::new(crate::pane::ViewMode::List),
             from_columns: Cell::new(false),
             git: RefCell::new(crate::fs::git::Statuses::default()),
@@ -1157,8 +1245,20 @@ impl PaneController {
             filter.setTarget(Some(self));
             filter.setAction(Some(sel!(filterAction:)));
         }
+        // Refreshes this pane (the toolbar's Refresh does every pane).
+        let refresh = unsafe {
+            NSButton::buttonWithImage_target_action(
+                &super::util::symbol("arrow.clockwise", "Refresh").unwrap_or_default(),
+                Some(self),
+                Some(sel!(refreshPane:)),
+                mtm,
+            )
+        };
+        refresh.setBordered(false);
+        refresh.setToolTip(Some(&ns("Refresh this pane")));
+        refresh.setContentHuggingPriority_forOrientation(750.0, NSLayoutConstraintOrientation::Horizontal);
         let path_row = NSStackView::stackViewWithViews(
-            &NSArray::from_slice(&[&*path_control as &NSView, &*filter as &NSView]),
+            &NSArray::from_slice(&[&*path_control as &NSView, &*refresh as &NSView, &*filter as &NSView]),
             mtm,
         );
         path_row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
@@ -1455,6 +1555,14 @@ impl PaneController {
             }
             (state.fs().clone(), state.location().to_path_buf(), state.generation())
         };
+        // A server folder visited before shows at once (its last
+        // listing) while the fresh one loads.
+        if let Some(entries) = super::listing_cache::get(&fs, &location)
+            && self.ivars().state.borrow_mut().show_cached(generation, entries)
+        {
+            let pending = self.ivars().pending_select.borrow().clone();
+            self.refresh(pending.as_deref());
+        }
         let index = self.index();
         std::thread::spawn(move || {
             let result = fs.list(&location);
@@ -1464,11 +1572,25 @@ impl PaneController {
 
     /// A background listing arrived.
     pub fn listing_arrived(&self, generation: u64, result: std::io::Result<Vec<crate::fs::Entry>>) {
+        // Over the last listing: the selection made since stays.
+        let previous = {
+            let state = self.ivars().state.borrow();
+            if state.generation() != generation {
+                return;
+            }
+            if let Ok(entries) = &result {
+                super::listing_cache::put(state.fs(), state.location(), entries);
+            }
+            state.cached.then(|| (self.selected_paths(), self.first_selected_row()))
+        };
         if !self.ivars().state.borrow_mut().set_listing(generation, result) {
             return;
         }
         let pending = self.ivars().pending_select.take();
-        self.refresh(pending.as_deref());
+        match previous {
+            Some(previous) => self.refresh_from(None, Some(previous)),
+            None => self.refresh(pending.as_deref()),
+        }
     }
 
     fn path_item_clicked(&self, sender: &NSPathControl) {
@@ -1578,6 +1700,9 @@ impl PaneController {
                 window.makeFirstResponder(Some(columns))
             }
             ViewMode::Icons if let Some(icons) = self.ivars().icons.get() => window.makeFirstResponder(Some(icons)),
+            ViewMode::Gallery if let Some(gallery) = self.ivars().gallery.get() => {
+                window.makeFirstResponder(Some(&*gallery.strip))
+            }
             _ => window.makeFirstResponder(Some(self.table())),
         };
     }
@@ -1586,8 +1711,12 @@ impl PaneController {
         self.ivars().columns.get().cloned()
     }
 
+    /// The icon view shown: the grid, or the gallery's strip.
     pub fn icon_view(&self) -> Option<Retained<super::icon_view::IconView>> {
-        self.ivars().icons.get().cloned()
+        match self.ivars().mode.get() {
+            crate::pane::ViewMode::Gallery => self.ivars().gallery.get().map(|g| g.strip.clone()),
+            _ => self.ivars().icons.get().cloned(),
+        }
     }
 
     pub fn view_mode(&self) -> crate::pane::ViewMode {
@@ -1623,12 +1752,17 @@ impl PaneController {
             let _ = self.ivars().columns.set(columns);
         }
         if mode == ViewMode::Icons && self.ivars().icons.get().is_none() {
-            let icons = super::icon_view::IconView::new(self.mtm(), self);
+            let icons = super::icon_view::IconView::new(self.mtm(), self, false);
             unsafe { icons.setMenu(self.table().menu().as_deref()) };
             let icon_scroll = super::icon_view::scroll_view(&icons, self.mtm());
             place(&icon_scroll);
             let _ = self.ivars().icons.set(icons);
             let _ = self.ivars().icon_scroll.set(icon_scroll);
+        }
+        if mode == ViewMode::Gallery && self.ivars().gallery.get().is_none() {
+            let gallery = super::gallery_view::Gallery::new(self.mtm(), self);
+            place(&gallery.view);
+            let _ = self.ivars().gallery.set(gallery);
         }
         self.ivars().mode.set(mode);
         scroll.setHidden(mode != ViewMode::List);
@@ -1638,6 +1772,9 @@ impl PaneController {
         if let Some(icon_scroll) = self.ivars().icon_scroll.get() {
             icon_scroll.setHidden(mode != ViewMode::Icons);
         }
+        if let Some(gallery) = self.ivars().gallery.get() {
+            gallery.view.setHidden(mode != ViewMode::Gallery);
+        }
         match mode {
             ViewMode::Columns => {
                 self.sync_columns();
@@ -1645,7 +1782,7 @@ impl PaneController {
                 let index = self.index();
                 DispatchQueue::main().exec_async(move || super::sync_pane_columns(index));
             }
-            ViewMode::Icons => self.sync_icons(),
+            ViewMode::Icons | ViewMode::Gallery => self.sync_icons(),
             ViewMode::List => {}
         }
         if focused {
@@ -1660,20 +1797,47 @@ impl PaneController {
         std::ptr::eq(ptr, (self.table() as &FileTable as *const FileTable).cast())
             || self.ivars().columns.get().is_some_and(|c| std::ptr::eq(ptr, Retained::as_ptr(c).cast()))
             || self.ivars().icons.get().is_some_and(|i| std::ptr::eq(ptr, Retained::as_ptr(i).cast()))
+            || self.ivars().gallery.get().is_some_and(|g| std::ptr::eq(ptr, Retained::as_ptr(&g.strip).cast()))
     }
 
-    /// Shows the pane's items and selection in the icon view.
+    /// Shows the pane's items and selection in the icon view, or the
+    /// gallery.
     pub fn sync_icons(&self) {
-        if self.ivars().mode.get() != crate::pane::ViewMode::Icons {
+        use crate::pane::ViewMode;
+        let mode = self.ivars().mode.get();
+        if !matches!(mode, ViewMode::Icons | ViewMode::Gallery) {
             return;
         }
-        let Some(icons) = self.ivars().icons.get() else { return };
         let selected = self.selected_paths();
         let (entries, local) = {
             let state = self.ivars().state.borrow();
             (state.entries().to_vec(), state.is_local())
         };
-        icons.sync(entries, local, &selected);
+        match mode {
+            ViewMode::Gallery if let Some(gallery) = self.ivars().gallery.get() => {
+                gallery.sync(&entries, local, &selected)
+            }
+            ViewMode::Icons if let Some(icons) = self.ivars().icons.get() => icons.sync(entries, local, &selected),
+            _ => {}
+        }
+    }
+
+    /// A file's thumbnail is ready: the icon views showing it get it.
+    pub fn thumbnail_ready(&self, path: &Path) {
+        if let Some(icons) = self.ivars().icons.get() {
+            icons.thumbnail_ready(path);
+        }
+        if let Some(gallery) = self.ivars().gallery.get() {
+            gallery.strip.thumbnail_ready(path);
+        }
+    }
+
+    /// The selection changed in the gallery's strip: preview it.
+    pub fn gallery_selection_changed(&self) {
+        let Some(gallery) = self.ivars().gallery.get() else { return };
+        let selected = self.selected_paths();
+        let state = self.ivars().state.borrow();
+        gallery.show_selection(state.entries(), state.is_local(), &selected);
     }
 
     /// What a dragged item puts on the pasteboard: its file URL, or from a
@@ -2083,6 +2247,11 @@ impl PaneController {
             None if state.loading && state.entries().is_empty() => {
                 format!("Loading from {}\u{2026}", state.fs().label())
             }
+            None if state.cached => {
+                let mut text = selection_summary(state.entries(), &[]);
+                text.push_str(", updating\u{2026}");
+                text
+            }
             None => {
                 let rows: Vec<usize> = index_set_rows(&self.table().selectedRowIndexes())
                     .into_iter()
@@ -2150,8 +2319,11 @@ impl PaneController {
         }
         if let Some(icons) = self.ivars().icons.get() {
             icons.apply_look();
-            self.sync_icons();
         }
+        if let Some(gallery) = self.ivars().gallery.get() {
+            gallery.apply_look();
+        }
+        self.sync_icons();
     }
 
     /// The filename filters changed: the list (and columns) again.
@@ -2238,6 +2410,8 @@ impl PaneController {
         // The selection by path, before the listing changes under it (its
         // rows would then be other items).
         let previous = (self.selected_paths(), self.first_selected_row());
+        // Changed: its last listing would show the old contents.
+        super::listing_cache::forget(&self.fs(), &self.location());
         self.ivars().state.borrow_mut().load();
         self.refresh_from(None, Some(previous));
         self.start_loading();

@@ -58,6 +58,7 @@ struct Controls {
     download: Retained<NSPopUpButton>,
     upload: Retained<NSPopUpButton>,
     ask_upload: Retained<NSButton>,
+    cache_listings: Retained<NSButton>,
     upload_limit: Retained<NSTextField>,
     download_limit: Retained<NSTextField>,
     on_error: Retained<NSPopUpButton>,
@@ -325,6 +326,7 @@ impl SettingsWindow {
             download: popup(&conflict_titles, self, mtm),
             upload: popup(&conflict_titles, self, mtm),
             ask_upload: checkbox("Ask before uploading a saved server file", self, mtm),
+            cache_listings: checkbox("Show folders opened again at once, while they update", self, mtm),
             upload_limit: NSTextField::initWithFrame(
                 NSTextField::alloc(mtm),
                 NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(80.0, 22.0)),
@@ -437,6 +439,14 @@ impl SettingsWindow {
                 (
                     empty(mtm),
                     note("Saving a server file you opened uploads it back, unless you choose to be asked.", mtm),
+                ),
+                (label("Server folders:", mtm), view(&*controls.cache_listings)),
+                (
+                    empty(mtm),
+                    note(
+                        "A folder you opened before shows its last listing right away while forkz lists it again. When off, it shows once listed.",
+                        mtm,
+                    ),
                 ),
                 (label("Upload speed limit:", mtm), view(&*kbps(&controls.upload_limit, mtm))),
                 (label("Download speed limit:", mtm), view(&*kbps(&controls.download_limit, mtm))),
@@ -633,6 +643,7 @@ impl SettingsWindow {
         c.download.selectItemAtIndex(conflict(settings.transfers.download_conflict));
         c.upload.selectItemAtIndex(conflict(settings.transfers.upload_conflict));
         set(&c.ask_upload, settings.transfers.ask_before_upload_on_save);
+        set(&c.cache_listings, settings.transfers.cache_listings);
         let limit_text = |kbps: u64| if kbps == 0 { String::new() } else { kbps.to_string() };
         c.upload_limit.setStringValue(&ns(&limit_text(settings.transfers.upload_limit_kbps)));
         c.download_limit.setStringValue(&ns(&limit_text(settings.transfers.download_limit_kbps)));
@@ -687,6 +698,7 @@ impl SettingsWindow {
             s.transfers.download_conflict = CONFLICT_CHOICES.get(index(&c.download)).and_then(|c| c.1);
             s.transfers.upload_conflict = CONFLICT_CHOICES.get(index(&c.upload)).and_then(|c| c.1);
             s.transfers.ask_before_upload_on_save = on(&c.ask_upload);
+            s.transfers.cache_listings = on(&c.cache_listings);
             let limit = |f: &NSTextField| f.stringValue().to_string().trim().parse::<u64>().unwrap_or(0);
             s.transfers.upload_limit_kbps = limit(&c.upload_limit);
             s.transfers.download_limit_kbps = limit(&c.download_limit);
@@ -709,6 +721,11 @@ impl SettingsWindow {
             }
             s.appearance.alternating_rows = on(&c.alternating);
         });
+        // Turned off: the kept listings go (and are not out of date if it
+        // is turned on again).
+        if !on(&c.cache_listings) {
+            super::listing_cache::clear();
+        }
         if crate::updates::available() && auto_updates != crate::updates::checks_automatically() {
             crate::updates::set_checks_automatically(auto_updates);
         }

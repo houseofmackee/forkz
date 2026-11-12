@@ -7,6 +7,16 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-11-12
+
+### Added
+
+- Open With in the context menu: the default app, the other apps that can open the items, and Other to choose one. Items on servers and in archives are downloaded first.
+- Gallery view (View > as Gallery, Command-4): a large preview of the selected item with its name and details, above a strip of the folder's items.
+- Icon view and the gallery show thumbnails of files' contents, as Finder does.
+- Folders on servers and cloud services (SFTP, FTP, WebDAV, S3, Box, and the rest) show at once when you open them again: forkz shows their last listing ("updating" in the status line) while it lists them again in the background, then swaps in the fresh one, keeping the selection. Changes made in forkz still show immediately. Settings > Transfers > Server folders turns it off ([#8](https://github.com/houseofmackee/forkz/issues/8)).
+- Refresh buttons: one in each pane's bar (next to Filter) refreshes that pane, and one in the toolbar (also View > Refresh All Panes, Control-Command-R) refreshes both. Refreshing lists a server folder again, skipping its last listing.
+
 ## [0.18.3] - 2026-11-11
 
 ### Added
@@ -382,7 +392,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.18.3...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.19.0...HEAD
+[0.19.0]: https://github.com/houseofmackee/forkz/compare/v0.18.3...v0.19.0
 [0.18.3]: https://github.com/houseofmackee/forkz/compare/v0.18.2...v0.18.3
 [0.18.2]: https://github.com/houseofmackee/forkz/compare/v0.18.1...v0.18.2
 [0.18.1]: https://github.com/houseofmackee/forkz/compare/v0.18.0...v0.18.1

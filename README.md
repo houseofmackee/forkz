@@ -37,7 +37,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 
 ![Column view in the top pane, and below it a list grouped by kind with a Git column showing modified and untracked items](docs/images/columns.png)
 
-Each pane shows a list (Command-1), icons (Command-2), or columns (Command-3), as in Finder. Icons grow with the text size (zoom); in column view, choosing a folder opens its contents in the next column, and the arrow keys browse. In every view, commands, Quick Look, the preview pane, and drag and drop work as in the list: drag items out to another pane or to Finder, or drop them on a folder (or a column or the view itself) to copy or move them there. As in Finder, dragging moves items on the same disk and copies them to another (Option copies, Command moves); Settings > General > Dragging can make drags between panes always move, on this Mac or within one server. View > Group By groups the list by kind, date modified (Today, Yesterday, Previous 7 Days, and so on), or size, keeping the sort within each group. View > Stack Panes puts the panes one above the other.
+Each pane shows a list (Command-1), icons (Command-2), columns (Command-3), or a gallery (Command-4), as in Finder. The gallery shows a large preview of the selected item (Quick Look, or its icon for items on servers and in archives), its name and details, and a strip of the folder's items below; the arrow keys move along the strip. Icons and the gallery's strip show thumbnails of the files' contents, and icons grow with the text size (zoom); in column view, choosing a folder opens its contents in the next column, and the arrow keys browse. In every view, commands, Quick Look, the preview pane, and drag and drop work as in the list: drag items out to another pane or to Finder, or drop them on a folder (or a column or the view itself) to copy or move them there. As in Finder, dragging moves items on the same disk and copies them to another (Option copies, Command moves); Settings > General > Dragging can make drags between panes always move, on this Mac or within one server. View > Group By groups the list by kind, date modified (Today, Yesterday, Previous 7 Days, and so on), or size, keeping the sort within each group. View > Stack Panes puts the panes one above the other.
 
 In a Git repository, the Git column (View > Columns) shows whether each item is modified, added, untracked, renamed, ignored, or in conflict; a folder shows the most important change inside it. It uses Homebrew's git, or Apple's when the command line tools are installed.
 
@@ -173,6 +173,7 @@ The same things work as `forkz://` links, for scripts, launchers such as Raycast
 - **Log in** with a password (also keyboard-interactive), a private key file (asks for its passphrase), or the SSH agent. With nothing saved, keys from the agent and `~/.ssh` are tried before asking for a password.
 - **Host keys** are checked against `~/.ssh/known_hosts` and keys you trusted in forkz. A new server asks you to compare the SHA256 fingerprint; a changed key gets a strong warning.
 - **Sites** keep the server, login, a remote folder to open, and a local folder for the other pane. Passwords are kept in your login Keychain, never in a file. Connected sites show a green icon and an eject button in the sidebar.
+- **Folders you open again** show at once, from their last listing, while forkz lists them again in the background ("updating" in the status line); the fresh listing then takes its place (Settings > Transfers > Server folders turns this off). The refresh button in a pane's bar lists its folder again; the toolbar's refreshes both panes.
 - **Transfers** between the Mac and a server, or between two servers, run on their own connection with progress, Stop, and Pause, keep modification dates, and replace files only once the new copy is complete. Drag and drop works between panes and from Finder.
 - **On the server:** browse, rename, new folder, delete (asks first: servers have no Trash), open a file (saving it uploads it back), Copy Server Link (an `sftp://` link), and Open in Terminal (an SSH session in that folder).
 - **`~/.ssh/config`** hosts work anywhere a server name goes (HostName, User, Port, IdentityFile, IdentitiesOnly, ProxyCommand, ProxyJump, wildcards, Include); the Connect form lists them. ProxyJump uses the system `ssh` for the jump hosts (key or agent login).
@@ -232,10 +233,10 @@ Settings > Tools holds your own commands, run by zsh in the pane's folder on the
 | Tab | Switch to the other pane |
 | Return or F2 | Rename (several items: Rename Multiple Items) |
 | Command-Down or Command-O | Open |
-| Option-Command-O | Open with the default app |
+| Option-Command-O | Open with the default app (right-click > Open With for another) |
 | Command-Up, or open ".." | Enclosing folder |
 | Command-[ and Command-] | Back and forward |
-| Command-R | Refresh |
+| Command-R, Control-Command-R | Refresh the pane, refresh both panes |
 | Space or Command-Y | Quick Look |
 | F3 | View (text or hex) |
 | F5 or Shift-Command-C | Copy to the other pane |
@@ -269,7 +270,7 @@ Settings > Tools holds your own commands, run by zsh in the pane's folder on the
 | Control-Command-C | Compare files or folders |
 | Command-Down Arrow, Command-Up Arrow | Next change, previous change (when comparing files) |
 | Shift-Command-. | Show or hide hidden files |
-| Command-1, Command-2, Command-3 | Show as a list, as icons, as columns |
+| Command-1, Command-2, Command-3, Command-4 | Show as a list, as icons, as columns, as a gallery |
 | Shift-Command-P | Show or hide the preview pane |
 | Control-Command-P | Expand the preview pane to fill the window, or shrink it back |
 | Control-Command-S | Show or hide the sidebar |

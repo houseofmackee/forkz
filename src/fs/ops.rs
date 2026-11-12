@@ -37,6 +37,8 @@ pub struct Job {
     pub on_conflict: Option<Resolution>,
     /// Open what was copied when done (a downloaded remote file).
     pub open_when_done: bool,
+    /// The app to open it with (None: its default app).
+    pub open_with: Option<PathBuf>,
     /// Keep modification dates on streamed copies (uploads, downloads).
     pub keep_dates: bool,
     /// Items inside the folders copied that the filename filters leave out
@@ -65,6 +67,7 @@ impl Job {
             destination,
             on_conflict: None,
             open_when_done: false,
+            open_with: None,
             exclude: None,
             keep_dates: true,
         }

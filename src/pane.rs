@@ -9,7 +9,8 @@ use crate::vfs::{self, FsRef};
 /// A place in history: a folder on a file system.
 type Place = (FsRef, PathBuf);
 
-/// How a pane shows its folder (View > as List, as Icons, as Columns).
+/// How a pane shows its folder (View > as List, as Icons, as Columns, as
+/// Gallery).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ViewMode {
@@ -17,6 +18,8 @@ pub enum ViewMode {
     List,
     Icons,
     Columns,
+    /// A large preview of the selected item above a strip of icons.
+    Gallery,
 }
 
 /// How the list is grouped (View > Group By).
@@ -83,6 +86,8 @@ pub struct PaneState {
     pub error: Option<String>,
     /// A remote listing is on its way.
     pub loading: bool,
+    /// What shows is the folder's last listing, until the fresh one comes.
+    pub cached: bool,
     /// Counts loads, so a slow listing for a folder already left is ignored.
     generation: u64,
     /// Only names containing this are shown (case-insensitive); "" for all.
@@ -113,6 +118,7 @@ impl PaneState {
             forward: Vec::new(),
             error: None,
             loading: false,
+            cached: false,
             generation: 0,
             filter_text: String::new(),
             folder_sizes: std::collections::HashMap::new(),
@@ -147,8 +153,22 @@ impl PaneState {
             self.reload();
         } else {
             self.loading = true;
+            self.cached = false;
             self.error = None;
         }
+    }
+
+    /// Shows a remote folder's last listing while the fresh one loads
+    /// (still loading); false if the pane has moved on.
+    pub fn show_cached(&mut self, generation: u64, entries: Vec<Entry>) -> bool {
+        if generation != self.generation || !self.loading {
+            return false;
+        }
+        self.all = entries;
+        self.apply_sizes_and_sort();
+        self.cached = true;
+        self.filter();
+        true
     }
 
     /// The result of a background listing; ignored if the pane has moved on.
@@ -157,6 +177,7 @@ impl PaneState {
             return false;
         }
         self.loading = false;
+        self.cached = false;
         match result {
             Ok(entries) => {
                 self.all = entries;
@@ -732,8 +753,14 @@ mod tests {
         // The listing for the folder we left arrives late: ignored.
         assert!(!pane.set_listing(stale, remote.list(dir.path())));
         let current = pane.generation();
+        // The last listing shows at once (still loading), then the fresh one.
+        assert!(pane.show_cached(current, Vec::new()));
+        assert!(pane.loading && pane.cached && pane.entries().is_empty());
+        assert!(!pane.show_cached(stale, Vec::new()));
         assert!(pane.set_listing(current, remote.list(&dir.path().join("sub"))));
         assert_eq!(pane.entries().len(), 1);
+        assert!(!pane.loading && !pane.cached);
+        assert!(!pane.show_cached(current, Vec::new()), "only while loading");
         // Back to the Mac, and back again through history.
         pane.navigate_to(vfs::local(), dir.path().to_path_buf());
         assert!(pane.is_local() && !pane.loading);
