@@ -7,6 +7,16 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-11-12
+
+### Added
+
+- Copies and moves within one connection to S3, Google Cloud Storage, Azure Blob Storage, or Box happen on the server: nothing is downloaded and uploaded again, so large files copy in a fraction of the time. On S3, files over 5 GB are copied in parts, still on the server.
+
+### Fixed
+
+- Moving a folder within one S3 or Azure connection (to another bucket or container, say) stopped with "Folders cannot be renamed". It is now copied on the server, then deleted.
+
 ## [0.20.0] - 2026-11-12
 
 ### Added
@@ -405,7 +415,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.20.1...HEAD
+[0.20.1]: https://github.com/houseofmackee/forkz/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/houseofmackee/forkz/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/houseofmackee/forkz/compare/v0.18.3...v0.19.0
 [0.18.3]: https://github.com/houseofmackee/forkz/compare/v0.18.2...v0.18.3

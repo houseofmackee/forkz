@@ -148,6 +148,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.error(404, "not_found", "Not Found")
             port = self.server.server_address[1]
             return self.reply(302, None, [("Location", f"http://127.0.0.1:{port}/dl/{m.group(1)}?signed=1")])
+        m = re.fullmatch(r"files/(\w+)/copy", rest)
+        if m and method == "POST":
+            return self.copy(m.group(1), json.loads(self.body()))
         m = re.fullmatch(r"(files|folders)/(\w+)", rest)
         if m:
             kind, item_id = m.group(1)[:-1], m.group(2)
@@ -209,6 +212,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.error(409, "item_name_in_use", "Item with the same name already exists")
         item["name"], item["parent"] = name, parent
         self.reply(200, public(item))
+
+    def copy(self, item_id, body):
+        item = items.get(item_id)
+        if not item or item["type"] != "file":
+            return self.error(404, "not_found", "Not Found")
+        parent = body["parent"]["id"]
+        name = body.get("name", item["name"])
+        # Box does not copy over an existing item.
+        if conflict(parent, name):
+            return self.error(409, "item_name_in_use", "Item with the same name already exists")
+        copied = {"type": "file", "id": new_id(), "name": name, "parent": parent, "data": item["data"]}
+        items[copied["id"]] = copied
+        self.reply(201, public(copied))
 
     def download(self, item_id):
         item = items.get(item_id)

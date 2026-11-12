@@ -414,6 +414,22 @@ impl Vfs for AzureFs {
         self.send(request.body(()).map_err(io::Error::other)?).map(|_| ())
     }
 
+    /// Copy Blob, on the server (any size).
+    fn copy_on_server(&self, from: &Path, to: &Path) -> Option<io::Result<()>> {
+        let (Some(from_container), from_blob) = split(from) else { return Some(Err(io::Error::other("Not a file."))) };
+        let (Some(to_container), to_blob) = split(to) else {
+            return Some(Err(io::Error::other("Choose a container first.")));
+        };
+        if from_blob.is_empty() || to_blob.is_empty() {
+            return Some(Err(io::Error::other("Not a file.")));
+        }
+        Some(self.copy_blob(&format!("/{from_container}/{from_blob}"), &format!("/{to_container}/{to_blob}")))
+    }
+
+    fn renames_folders(&self) -> bool {
+        false
+    }
+
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let (Some(from_container), from_blob) = split(from) else {
             return Err(io::Error::other("Containers cannot be renamed."));
@@ -547,7 +563,7 @@ mod tests {
         assert!(text.starts_with("PUT\n\n\n12\n"));
         assert!(text.ends_with("x-ms-blob-type:BlockBlob\n/acct/c/a%20b.txt"));
         // Azurite's well-known key signs; a key that is not base64 does not.
-        let key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFr/KBHBeksoGMGw==";
+        let key = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
         assert!(signature("devstoreaccount1", key, "x").unwrap().starts_with("SharedKey devstoreaccount1:"));
         assert!(signature("a", "not base64!", "x").is_err());
         assert!(path_style("127.0.0.1") && path_style("localhost") && !path_style("acct.blob.core.windows.net"));

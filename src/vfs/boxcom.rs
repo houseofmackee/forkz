@@ -550,6 +550,45 @@ impl BoxFs {
             .collect())
     }
 
+    fn copy_file(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let (id, folder) = self.id_of(from)?;
+        if folder {
+            // The job copies folders item by item.
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "A folder."));
+        }
+        let (parent, name) = parent_and_name(to)?;
+        let (parent_id, _) = self.id_of(&parent)?;
+        let existing = match self.id_of(to) {
+            Ok((_, true)) => return Err(io::Error::new(io::ErrorKind::IsADirectory, "A folder has that name.")),
+            Ok((existing, false)) => Some(existing),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        let copy_name = if existing.is_some() { format!(".{name}.forkz-copy") } else { name.clone() };
+        let body = json!({ "parent": { "id": parent_id }, "name": copy_name });
+        let api = &self.shared.service.api;
+        let copied: Item = serde_json::from_value(self.json(
+            "POST",
+            &format!("{api}/files/{id}/copy?fields={FIELDS}"),
+            Some(&body),
+        )?)
+        .map_err(io::Error::other)?;
+        let Some(existing) = existing else {
+            self.remember(to, &copied);
+            return Ok(());
+        };
+        self.call(&self.agent, "DELETE", &self.item_url(&existing, false), None, &[])?;
+        self.forget(to);
+        let renamed: Item = serde_json::from_value(self.json(
+            "PUT",
+            &format!("{}?fields={FIELDS}", self.item_url(&copied.id, false)),
+            Some(&json!({ "name": name })),
+        )?)
+        .map_err(io::Error::other)?;
+        self.remember(to, &renamed);
+        Ok(())
+    }
+
     fn item_url(&self, id: &str, folder: bool) -> String {
         format!("{}/{}/{id}", self.shared.service.api, if folder { "folders" } else { "files" })
     }
@@ -954,6 +993,12 @@ impl Vfs for BoxFs {
 
     fn removes_folders_whole(&self) -> bool {
         true
+    }
+
+    /// Box's copy, on its servers. Box does not copy over an existing
+    /// file: the copy takes a temporary name, then replaces it.
+    fn copy_on_server(&self, from: &Path, to: &Path) -> Option<io::Result<()>> {
+        Some(self.copy_file(from, to))
     }
 
     fn deleted_items_go(&self) -> Option<&'static str> {

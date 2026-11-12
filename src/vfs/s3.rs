@@ -37,6 +37,20 @@ pub struct S3Fs {
 
 const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+/// S3 copies up to this much in one request; larger files are copied in
+/// parts (still on the server).
+const SINGLE_COPY: u64 = 5 * 1024 * 1024 * 1024;
+
+/// The size of each part of a copy in parts (S3 allows 10,000 parts).
+const COPY_PART: u64 = 512 * 1024 * 1024;
+
+/// The parts of a copy of `size` bytes: (first byte, last byte), each at
+/// most `part` (more if 10,000 would not do).
+pub fn copy_ranges(size: u64, part: u64) -> Vec<(u64, u64)> {
+    let part = part.max(size.div_ceil(10_000)).max(1);
+    (0..size.div_ceil(part)).map(|i| (i * part, ((i + 1) * part).min(size) - 1)).collect()
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -308,6 +322,120 @@ fn folder_entry(path: PathBuf, modified: Option<SystemTime>) -> Entry {
 
 use super::http::parse_iso;
 
+/// Text for XML (an ETag has quotes).
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+}
+
+impl S3Fs {
+    /// A copy request's answer: S3 can answer 200 and report an error in
+    /// the body (when the copy fails while it runs).
+    fn copy_answer(&self, request: ureq::http::Request<()>) -> io::Result<String> {
+        let text = self.send(request)?.into_body().read_to_string().map_err(http::to_io)?;
+        if let Ok(doc) = Document::parse(&text)
+            && doc.root_element().has_tag_name("Error")
+        {
+            let message = doc.descendants().find(|n| n.has_tag_name("Message")).and_then(|n| n.text()).unwrap_or("");
+            return Err(io::Error::other(format!("The copy on the server failed: {message}")));
+        }
+        Ok(text)
+    }
+
+    /// Copies an object on the server: in one request, or in parts if it
+    /// is larger than S3 allows for one (Google copies any size at once).
+    fn copy_object(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let (Some(from_bucket), from_key) = split(from) else { return Err(io::Error::other("Not a file.")) };
+        let (Some(to_bucket), to_key) = split(to) else { return Err(io::Error::other("Choose a bucket first.")) };
+        if from_key.is_empty() || to_key.is_empty() {
+            return Err(io::Error::other("Not a file."));
+        }
+        let source = http::encode_path(&format!("/{from_bucket}/{from_key}"));
+        let target = format!("/{to_bucket}/{to_key}");
+        let size = self.stat(from)?.size;
+        if size <= SINGLE_COPY || self.params.host.ends_with("googleapis.com") {
+            let request = self
+                .request("PUT", &target, &[], &[("x-amz-copy-source", source)], EMPTY_SHA256)
+                .body(())
+                .map_err(io::Error::other)?;
+            return self.copy_answer(request).map(|_| ());
+        }
+        self.copy_in_parts(&source, &target, size, COPY_PART)
+    }
+
+    /// A copy in parts of this part size (for tests: real copies only use
+    /// parts above 5 GB).
+    #[doc(hidden)]
+    pub fn copy_in_parts_of(&self, from: &Path, to: &Path, part: u64) -> io::Result<()> {
+        let (Some(from_bucket), from_key) = split(from) else { return Err(io::Error::other("Not a file.")) };
+        let source = http::encode_path(&format!("/{from_bucket}/{from_key}"));
+        let size = self.stat(from)?.size;
+        self.copy_in_parts(&source, &to.to_string_lossy(), size, part)
+    }
+
+    /// A multipart upload whose parts are copied from `source` on the
+    /// server; abandoned (not left to be billed) if anything fails.
+    fn copy_in_parts(&self, source: &str, target: &str, size: u64, part: u64) -> io::Result<()> {
+        let start =
+            self.request("POST", target, &[("uploads", "")], &[], EMPTY_SHA256).body(()).map_err(io::Error::other)?;
+        let text = self.send(start)?.into_body().read_to_string().map_err(http::to_io)?;
+        let doc = Document::parse(&text).map_err(io::Error::other)?;
+        let upload = doc
+            .descendants()
+            .find(|n| n.has_tag_name("UploadId"))
+            .and_then(|n| n.text())
+            .ok_or_else(|| io::Error::other("S3 did not start the copy."))?
+            .to_string();
+        let result = (|| {
+            let mut parts = String::new();
+            for (index, (first, last)) in copy_ranges(size, part).into_iter().enumerate() {
+                let number = (index + 1).to_string();
+                let request = self
+                    .request(
+                        "PUT",
+                        target,
+                        &[("partNumber", &number), ("uploadId", &upload)],
+                        &[
+                            ("x-amz-copy-source", source.to_string()),
+                            ("x-amz-copy-source-range", format!("bytes={first}-{last}")),
+                        ],
+                        EMPTY_SHA256,
+                    )
+                    .body(())
+                    .map_err(io::Error::other)?;
+                let answer = self.copy_answer(request)?;
+                let doc = Document::parse(&answer).map_err(io::Error::other)?;
+                let etag = doc
+                    .descendants()
+                    .find(|n| n.has_tag_name("ETag"))
+                    .and_then(|n| n.text())
+                    .ok_or_else(|| io::Error::other("S3 did not confirm a part of the copy."))?;
+                parts.push_str(&format!(
+                    "<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>",
+                    xml_escape(etag)
+                ));
+            }
+            let body = format!("<CompleteMultipartUpload>{parts}</CompleteMultipartUpload>");
+            let hash = hex(&Sha256::digest(body.as_bytes()));
+            let request = self
+                .request("POST", target, &[("uploadId", &upload)], &[], &hash)
+                .body(body.into_bytes())
+                .map_err(io::Error::other)?;
+            let text = self.send(request)?.into_body().read_to_string().map_err(http::to_io)?;
+            if text.contains("<Error>") {
+                return Err(io::Error::other("S3 could not put the copied parts together."));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let abort = self.request("DELETE", target, &[("uploadId", &upload)], &[], EMPTY_SHA256).body(());
+            if let Ok(abort) = abort {
+                let _ = self.send(abort);
+            }
+        }
+        result
+    }
+}
+
 impl Vfs for S3Fs {
     fn key(&self) -> String {
         format!("s3://{}@{}", self.params.access_key, self.host_header())
@@ -397,6 +525,14 @@ impl Vfs for S3Fs {
         let hash = hex(&Sha256::digest(body.as_bytes()));
         let request = self.request("PUT", &target, &[], &[], &hash).body(body).map_err(io::Error::other)?;
         self.send(request).map(|_| ())
+    }
+
+    fn copy_on_server(&self, from: &Path, to: &Path) -> Option<io::Result<()>> {
+        Some(self.copy_object(from, to))
+    }
+
+    fn renames_folders(&self) -> bool {
+        false
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
@@ -522,6 +658,20 @@ impl Vfs for S3Fs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copies_in_parts() {
+        assert_eq!(copy_ranges(10, 4), [(0, 3), (4, 7), (8, 9)]);
+        assert_eq!(copy_ranges(8, 4), [(0, 3), (4, 7)]);
+        assert_eq!(copy_ranges(1, 4), [(0, 0)]);
+        // Never more than 10,000 parts: they grow instead.
+        let big = 6 * 1024 * 1024 * 1024 * 1024u64;
+        let parts = copy_ranges(big, COPY_PART);
+        assert!(parts.len() <= 10_000);
+        assert_eq!(parts.last().unwrap().1, big - 1);
+        assert!(parts.windows(2).all(|w| w[0].1 + 1 == w[1].0));
+        assert_eq!(xml_escape("\"abc\""), "&quot;abc&quot;");
+    }
 
     #[test]
     fn splits_paths() {

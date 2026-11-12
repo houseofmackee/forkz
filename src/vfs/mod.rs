@@ -126,6 +126,20 @@ pub trait Vfs: Send + Sync {
         None
     }
 
+    /// Copies a file to another place on this file system without the data
+    /// passing through the Mac (S3's copy, Azure's Copy Blob, Box's copy),
+    /// replacing what is at `to`. None where the server cannot (the job
+    /// then streams it); an Unsupported error streams it too.
+    fn copy_on_server(&self, _from: &Path, _to: &Path) -> Option<io::Result<()>> {
+        None
+    }
+
+    /// Whether `rename` moves folders. Object storage has no folders to
+    /// rename (only names): a move there copies and deletes instead.
+    fn renames_folders(&self) -> bool {
+        true
+    }
+
     /// `remove_dir` takes a folder with everything in it, in one request
     /// (deleting item by item would be slow).
     fn removes_folders_whole(&self) -> bool {

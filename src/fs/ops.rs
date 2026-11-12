@@ -486,9 +486,14 @@ impl Runner<'_> {
         Ok(complete)
     }
 
-    /// A move is a rename: on one volume of the Mac, or on one server.
+    /// A move is a rename: on one volume of the Mac, or on one server (a
+    /// folder in object storage, which cannot be renamed, is copied on the
+    /// server and deleted).
     fn renames(&self, source: &Path, destination: &Path) -> bool {
         if !vfs::same(&self.src, &self.dst) {
+            return false;
+        }
+        if !self.src.renames_folders() && self.src.stat(source).is_ok_and(|e| e.kind == EntryKind::Folder) {
             return false;
         }
         !self.both_local || super::device_of(source) == super::device_of(destination)
@@ -729,6 +734,15 @@ impl Runner<'_> {
                 }
                 result
             } else {
+                // On one server: copied there, when it can (straight to the
+                // name: object storage only shows a copy once it is whole).
+                if vfs::same(&runner.src, &runner.dst) {
+                    match runner.src.copy_on_server(&source, target) {
+                        Some(Err(e)) if e.kind() == io::ErrorKind::Unsupported => {}
+                        Some(result) => return result,
+                        None => {}
+                    }
+                }
                 // A streamed copy keeps its partial file when it fails or is
                 // stopped: the next attempt resumes it.
                 match runner.copy_fxp(entry, &temporary, target, start, size) {

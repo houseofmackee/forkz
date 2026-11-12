@@ -373,7 +373,7 @@ fn azure_blob() {
         port,
         secure: false,
         account: "devstoreaccount1".into(),
-        key: Some("Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFr/KBHBeksoGMGw==".into()),
+        key: Some("Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==".into()),
         timeout: Duration::from_secs(10),
     };
     let fs: FsRef = azure::connect(params, &answers()).unwrap();
@@ -387,6 +387,21 @@ fn azure_blob() {
     assert!(fs.stat(&container.join("f")).unwrap().is_folder_like());
     assert!(ops::rename(&fs, &container.join("f"), "g").is_err());
     fs.remove_dir(&container.join("f")).unwrap();
+    // Moving a folder to another container: copied on the server (Copy
+    // Blob), then deleted.
+    let other = Path::new("/forkz-other");
+    fs.create_dir(other).unwrap();
+    let folder = container.join("moving");
+    fs.create_dir(&folder).unwrap();
+    let mut file = fs.open_write_sized(&folder.join("inside.txt"), Some(6)).unwrap();
+    file.write_all(b"inside").unwrap();
+    file.flush().unwrap();
+    drop(file);
+    run(&Job::between(JobKind::Move, fs.clone(), vec![folder.clone()], fs.clone(), other.to_path_buf()));
+    assert_eq!(read_all(&fs, &other.join("moving/inside.txt")), b"inside");
+    assert_eq!(fs.stat(&folder.join("inside.txt")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    run(&Job::between(JobKind::Delete, fs.clone(), vec![other.join("moving")], fs.clone(), other.to_path_buf()));
+    fs.remove_dir(other).unwrap();
     fs.remove_dir(container).unwrap();
 }
 
@@ -414,6 +429,22 @@ fn box_api() {
     let fs: FsRef = boxcom::connect(params.clone()).unwrap();
     assert_eq!(fs.label(), "Box: tester@example.com");
     exercise(fs.clone(), Path::new("/box-run"), true);
+    // Copies on Box's servers, also over an existing file.
+    fs.create_dir(Path::new("/box-copy")).unwrap();
+    let mut first = fs.open_write_sized(Path::new("/box-copy/a.txt"), Some(3)).unwrap();
+    first.write_all(b"one").unwrap();
+    first.flush().unwrap();
+    drop(first);
+    let mut second = fs.open_write_sized(Path::new("/box-copy/b.txt"), Some(3)).unwrap();
+    second.write_all(b"two").unwrap();
+    second.flush().unwrap();
+    drop(second);
+    fs.copy_on_server(Path::new("/box-copy/a.txt"), Path::new("/box-copy/c.txt")).unwrap().unwrap();
+    fs.copy_on_server(Path::new("/box-copy/a.txt"), Path::new("/box-copy/b.txt")).unwrap().unwrap();
+    assert_eq!(read_all(&fs, Path::new("/box-copy/c.txt")), b"one");
+    assert_eq!(read_all(&fs, Path::new("/box-copy/b.txt")), b"one");
+    assert_eq!(names(&fs, Path::new("/box-copy")).len(), 3, "no temporary copy left");
+    fs.remove_dir(Path::new("/box-copy")).unwrap();
     // Box revoked access tokens along the way; each renewal was kept, and
     // only the last one still works.
     let tokens = saved.lock().unwrap().clone();
@@ -438,7 +469,8 @@ fn s3() {
         region: "us-east-1".into(),
         timeout: Duration::from_secs(10),
     };
-    let fs: FsRef = s3::connect(params, &answers()).unwrap();
+    let s3fs = s3::connect(params, &answers()).unwrap();
+    let fs: FsRef = s3fs.clone();
     let bucket = Path::new("/forkz-test");
     fs.create_dir(bucket).unwrap();
     assert!(names(&fs, Path::new("/")).contains(&("forkz-test".to_string(), true)));
@@ -448,5 +480,39 @@ fn s3() {
     fs.create_dir(&bucket.join("f")).unwrap();
     assert!(ops::rename(&fs, &bucket.join("f"), "g").is_err());
     fs.remove_dir(&bucket.join("f")).unwrap();
+
+    // Moving a folder to another bucket of the same account: copied on the
+    // server, then deleted (it cannot be renamed).
+    let other = Path::new("/forkz-other");
+    fs.create_dir(other).unwrap();
+    let folder = bucket.join("moving");
+    fs.create_dir(&folder).unwrap();
+    let mut file = fs.open_write_sized(&folder.join("inside.txt"), Some(6)).unwrap();
+    file.write_all(b"inside").unwrap();
+    file.flush().unwrap();
+    drop(file);
+    run(&Job::between(JobKind::Move, fs.clone(), vec![folder.clone()], fs.clone(), other.to_path_buf()));
+    assert_eq!(read_all(&fs, &other.join("moving/inside.txt")), b"inside");
+    assert_eq!(fs.stat(&folder.join("inside.txt")).unwrap_err().kind(), io::ErrorKind::NotFound);
+
+    // A copy in parts on the server (as for files over 5 GB), here in 5 MB
+    // parts (S3's smallest).
+    let big: Vec<u8> = (0..11 * 1024 * 1024u32).map(|i| (i % 253) as u8).collect();
+    let mut file = fs.open_write_sized(&bucket.join("big.bin"), Some(big.len() as u64)).unwrap();
+    file.write_all(&big).unwrap();
+    file.flush().unwrap();
+    drop(file);
+    s3fs.copy_in_parts_of(&bucket.join("big.bin"), &other.join("big copy.bin"), 5 * 1024 * 1024).unwrap();
+    assert_eq!(read_all(&fs, &other.join("big copy.bin")), big);
+
+    run(&Job::between(
+        JobKind::Delete,
+        fs.clone(),
+        vec![other.join("moving"), other.join("big copy.bin")],
+        fs.clone(),
+        other.to_path_buf(),
+    ));
+    fs.remove_file(&bucket.join("big.bin")).unwrap();
+    fs.remove_dir(other).unwrap();
     fs.remove_dir(bucket).unwrap();
 }
