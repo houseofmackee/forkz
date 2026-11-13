@@ -4640,7 +4640,11 @@ fn focus_pane(index: usize) {
 }
 
 /// `git status` for a pane's Git column.
-fn git_status_arrived(index: usize, statuses: crate::fs::git::Statuses, branch: Option<String>) {
+fn git_status_arrived(
+    index: usize,
+    statuses: crate::fs::git::Statuses,
+    branch: Option<(crate::fs::git::Branch, Vec<String>)>,
+) {
     if let Some(pane) = app().and_then(|a| a.panes.get(index).cloned()) {
         pane.git_arrived(statuses, branch);
     }

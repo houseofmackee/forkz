@@ -310,8 +310,10 @@ pub struct PaneIvars {
     git: RefCell<crate::fs::git::Statuses>,
     git_running: Cell<bool>,
     git_again: Cell<bool>,
-    /// The repository's branch, for the status line ("main \u{2191}1").
-    branch: RefCell<Option<String>>,
+    /// The repository's branch and its local branches, for the branch
+    /// menu at the end of the status line.
+    branch: RefCell<Option<(crate::fs::git::Branch, Vec<String>)>>,
+    branch_menu: OnceCell<Retained<objc2_app_kit::NSPopUpButton>>,
     /// A thin accent-colored line along the top, shown while this is the
     /// active pane (where commands, connections, and Go to Folder go).
     active_bar: OnceCell<Retained<objc2_app_kit::NSBox>>,
@@ -403,6 +405,11 @@ define_class!(
         #[unsafe(method(sendTo:))]
         fn send_to(&self, sender: &NSMenuItem) {
             self.send_to_place(sender.tag());
+        }
+
+        #[unsafe(method(branchChosen:))]
+        fn branch_chosen_action(&self, _sender: Option<&AnyObject>) {
+            self.branch_chosen();
         }
 
         /// The refresh button in this pane's bar.
@@ -1173,6 +1180,7 @@ impl PaneController {
             git_running: Cell::new(false),
             git_again: Cell::new(false),
             branch: RefCell::new(None),
+            branch_menu: OnceCell::new(),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
         this.build();
@@ -1311,11 +1319,38 @@ impl PaneController {
         container.addArrangedSubview(&tab_bar);
         container.addArrangedSubview(&path_row);
         container.addArrangedSubview(&scroll);
-        container.addArrangedSubview(&status);
+        // At the end of the status line, in a repository: its branches, to
+        // switch to one.
+        let branch_menu = objc2_app_kit::NSPopUpButton::initWithFrame_pullsDown(
+            objc2_app_kit::NSPopUpButton::alloc(mtm),
+            NSRect::ZERO,
+            false,
+        );
+        branch_menu.setBordered(false);
+        branch_menu.setControlSize(objc2_app_kit::NSControlSize::Small);
+        branch_menu
+            .setFont(Some(&objc2_app_kit::NSFont::systemFontOfSize(objc2_app_kit::NSFont::smallSystemFontSize())));
+        branch_menu.setToolTip(Some(&ns("Switch to another branch")));
+        unsafe {
+            branch_menu.setTarget(Some(self));
+            branch_menu.setAction(Some(sel!(branchChosen:)));
+        }
+        branch_menu.setContentHuggingPriority_forOrientation(750.0, NSLayoutConstraintOrientation::Horizontal);
+        branch_menu.setHidden(true);
+        // The text takes the room; the menu sits at the end.
+        status.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+        let status_row = NSStackView::stackViewWithViews(
+            &NSArray::from_slice(&[&*status as &NSView, &*branch_menu as &NSView]),
+            mtm,
+        );
+        status_row.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+        status_row.setSpacing(8.0);
+        container.addArrangedSubview(&status_row);
+        let _ = self.ivars().branch_menu.set(branch_menu);
         let _ = self.ivars().filter.set(filter);
         let _ = self.ivars().tab_bar.set(tab_bar.clone());
         let _ = self.ivars().list_scroll.set(scroll.clone());
-        for view in [&*tab_bar as &NSView, &*path_row as &NSView, &scroll, &status] {
+        for view in [&*tab_bar as &NSView, &*path_row as &NSView, &scroll, &status_row] {
             view.leadingAnchor().constraintEqualToAnchor_constant(&container.leadingAnchor(), 6.0).setActive(true);
             view.trailingAnchor().constraintEqualToAnchor_constant(&container.trailingAnchor(), -6.0).setActive(true);
         }
@@ -2083,7 +2118,7 @@ impl PaneController {
         let in_repository = super::git_actions::repository_of(self).is_some();
         if !in_repository {
             if self.ivars().branch.borrow_mut().take().is_some() {
-                self.update_status();
+                self.update_branch_menu();
             }
             return;
         }
@@ -2097,9 +2132,66 @@ impl PaneController {
             let root = crate::fs::git::repository_root(&location);
             let statuses =
                 root.as_ref().filter(|_| column).and_then(|root| crate::fs::git::status(root).ok()).unwrap_or_default();
-            let branch = root.and_then(|root| crate::fs::git::branch(&root).ok()).map(|b| b.summary());
+            let branch = root.and_then(|root| {
+                let current = crate::fs::git::branch(&root).ok()?;
+                Some((current, crate::fs::git::branches(&root).unwrap_or_default()))
+            });
             DispatchQueue::main().exec_async(move || super::git_status_arrived(index, statuses, branch));
         });
+    }
+
+    /// The branch menu: the local branches, the current one chosen (with
+    /// how far it is ahead of or behind its upstream); hidden outside a
+    /// repository.
+    fn update_branch_menu(&self) {
+        let Some(menu) = self.ivars().branch_menu.get() else { return };
+        let branch = self.ivars().branch.borrow();
+        let Some((current, all)) = branch.as_ref() else {
+            menu.setHidden(true);
+            return;
+        };
+        menu.removeAllItems();
+        for name in all {
+            menu.addItemWithTitle(&ns(name));
+        }
+        match current.name.as_ref().and_then(|name| all.iter().position(|b| b == name)) {
+            Some(index) => {
+                menu.selectItemAtIndex(index as isize);
+                if let Some(item) = menu.itemAtIndex(index as isize) {
+                    item.setTitle(&ns(&current.summary()));
+                    // Shown in the status line with the branch symbol.
+                    if let Some(icon) = super::util::symbol("arrow.triangle.branch", "Branch") {
+                        item.setImage(Some(&icon));
+                    }
+                }
+            }
+            // Not on a branch: shown, but not one to choose.
+            None => {
+                menu.insertItemWithTitle_atIndex(&ns(&current.summary()), 0);
+                if let Some(item) = menu.itemAtIndex(0) {
+                    item.setEnabled(false);
+                }
+                menu.selectItemAtIndex(0);
+            }
+        }
+        menu.setHidden(false);
+    }
+
+    /// A branch was chosen in the branch menu: switch to it.
+    fn branch_chosen(&self) {
+        let Some(menu) = self.ivars().branch_menu.get() else { return };
+        let chosen = {
+            let branch = self.ivars().branch.borrow();
+            let Some((current, all)) = branch.as_ref() else { return };
+            let offset = if current.name.as_ref().is_some_and(|n| all.contains(n)) { 0 } else { 1 };
+            let index = usize::try_from(menu.indexOfSelectedItem()).ok().and_then(|i| i.checked_sub(offset));
+            index.and_then(|i| all.get(i)).filter(|name| current.name.as_ref() != Some(*name)).cloned()
+        };
+        // The menu shows the current branch until the switch is done.
+        self.update_branch_menu();
+        if let Some(name) = chosen {
+            super::git_actions::switch_to(self, name);
+        }
     }
 
     /// The repository changed (a Git action): the Git column and branch
@@ -2109,12 +2201,16 @@ impl PaneController {
     }
 
     /// `git status` finished: the Git column and status line show it.
-    pub fn git_arrived(&self, statuses: crate::fs::git::Statuses, branch: Option<String>) {
+    pub fn git_arrived(
+        &self,
+        statuses: crate::fs::git::Statuses,
+        branch: Option<(crate::fs::git::Branch, Vec<String>)>,
+    ) {
         *self.ivars().git.borrow_mut() = statuses;
         self.ivars().git_running.set(false);
         if *self.ivars().branch.borrow() != branch {
             *self.ivars().branch.borrow_mut() = branch;
-            self.update_status();
+            self.update_branch_menu();
         }
         let table = self.table();
         let column = table.columnWithIdentifier(&ns("git"));
@@ -2329,10 +2425,6 @@ impl PaneController {
                     text.push_str(&format!(", {}", state.fs().label()));
                 } else if let Some(free) = fs::available_space(state.location()) {
                     text.push_str(&format!(", {} available", fs::format_size(free)));
-                }
-                // In a repository: its branch ("main \u{2191}1").
-                if let Some(branch) = self.ivars().branch.borrow().as_ref() {
-                    text.push_str(&format!("  \u{b7}  {branch}"));
                 }
                 text
             }

@@ -7,6 +7,12 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-11-13
+
+### Added
+
+- In a Git repository, the end of a pane's status line shows the branch (and how far it is ahead of or behind its upstream) as a menu of the repository's branches: choose one to switch to it.
+
 ## [0.20.1] - 2026-11-12
 
 ### Added
@@ -415,7 +421,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.20.1...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.20.2...HEAD
+[0.20.2]: https://github.com/houseofmackee/forkz/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/houseofmackee/forkz/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/houseofmackee/forkz/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/houseofmackee/forkz/compare/v0.18.3...v0.19.0

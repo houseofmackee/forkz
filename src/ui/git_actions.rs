@@ -196,6 +196,18 @@ fn commit(root: PathBuf) {
     }
 }
 
+/// Switches the pane's repository to another branch (the status line's
+/// branch menu).
+pub fn switch_to(pane: &PaneController, name: String) {
+    let Some(root) = repository_of(pane) else { return };
+    in_background(
+        root,
+        format!("Switching to \u{201c}{name}\u{201d}\u{2026}"),
+        format!("Switched to branch \u{201c}{name}\u{201d}"),
+        move |root| git::switch(root, &name, false),
+    );
+}
+
 /// Picks a branch to switch to, or names a new one.
 fn switch_branch(root: PathBuf) {
     let (branches, current) = match (git::branches(&root), git::branch(&root)) {
