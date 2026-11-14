@@ -8,7 +8,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 use crate::fs::{Entry, EntryKind};
@@ -676,19 +676,32 @@ impl Runner<'_> {
             self.outcome.failed.push((source.to_path_buf(), error.to_string()));
             return Ok(false);
         };
+        self.copy_entry(&entry, target)
+    }
+
+    /// Copies an item as a listing describes it (inside a folder: no
+    /// request to look each item up again, which on a server is one per
+    /// item).
+    fn copy_entry(&mut self, entry: &Entry, target: &Path) -> Result<bool, Stopped> {
+        let source = entry.path.as_path();
         match entry.kind {
-            EntryKind::Folder => self.copy_folder(&entry, target),
+            EntryKind::Folder => self.copy_folder(entry, target),
             EntryKind::Symlink { target_is_folder: true } if !self.both_local => {
                 // Following links to folders across file systems risks
                 // endless loops; they are left out.
                 self.outcome.failed.push((source.to_path_buf(), "Links to folders are not copied.".into()));
                 Ok(false)
             }
-            _ => self.copy_file(&entry, target),
+            _ => self.copy_file(entry, target),
         }
     }
 
     fn copy_folder(&mut self, entry: &Entry, target: &Path) -> Result<bool, Stopped> {
+        // To or from a server: the files several at a time (FXP keeps its
+        // own way, one file after another).
+        if !self.both_local && matches!(self.fxp, Fxp::Off) {
+            return self.copy_folder_together(entry, target);
+        }
         let dst = self.dst.clone();
         if !self.attempt(&entry.path, |_| dst.create_dir(target))? {
             return Ok(false);
@@ -704,7 +717,7 @@ impl Runner<'_> {
         let mut complete = true;
         let children: Vec<Entry> = children.into_iter().filter(|c| !self.excluded(c)).collect();
         for child in children {
-            complete &= self.copy_item(&child.path, &target.join(&child.name))?;
+            complete &= self.copy_entry(&child, &target.join(&child.name))?;
         }
         // Dates (and on the Mac, permissions and extended attributes) of
         // the folder, after its contents (which change its date).
@@ -714,6 +727,120 @@ impl Runner<'_> {
             let _ = self.dst.set_attributes(target, entry.modified, None);
         }
         Ok(complete)
+    }
+
+    /// Copies a folder to or from a server: its folders first (made one
+    /// by one), then its files several at a time. Files that fail are
+    /// tried again one by one, the usual way (which asks what to do, and
+    /// resumes partial files).
+    fn copy_folder_together(&mut self, entry: &Entry, target: &Path) -> Result<bool, Stopped> {
+        let mut complete = true;
+        let mut files: Vec<(Entry, PathBuf)> = Vec::new();
+        let mut made: Vec<(Entry, PathBuf)> = Vec::new();
+        let mut pending = vec![(entry.clone(), target.to_path_buf())];
+        while let Some((folder, into)) = pending.pop() {
+            self.check_cancel()?;
+            self.progress.current = folder.name.clone();
+            self.report();
+            let dst = self.dst.clone();
+            if !self.attempt(&folder.path, |_| dst.create_dir(&into))? {
+                complete = false;
+                continue;
+            }
+            self.progress.done_items += 1;
+            let children = match self.src.list(&folder.path) {
+                Ok(children) => children,
+                Err(e) => {
+                    self.outcome.failed.push((folder.path.clone(), e.to_string()));
+                    complete = false;
+                    continue;
+                }
+            };
+            let children: Vec<Entry> = children.into_iter().filter(|c| !self.excluded(c)).collect();
+            for child in children {
+                let to = into.join(&child.name);
+                match child.kind {
+                    EntryKind::Folder => pending.push((child, to)),
+                    // Following links to folders across file systems risks
+                    // endless loops; they are left out.
+                    EntryKind::Symlink { target_is_folder: true } => {
+                        self.outcome.failed.push((child.path.clone(), "Links to folders are not copied.".into()));
+                        complete = false;
+                    }
+                    _ => files.push((child, to)),
+                }
+            }
+            made.push((folder, into));
+        }
+        for (file, to) in self.copy_files_together(files)? {
+            complete &= self.copy_file(&file, &to)?;
+        }
+        // Folders' dates after their contents (which change them),
+        // deepest first.
+        if self.keep_dates {
+            for (folder, into) in made.iter().rev() {
+                let _ = self.dst.set_attributes(into, folder.modified, None);
+            }
+        }
+        Ok(complete)
+    }
+
+    /// Copies files with several connections at once. Returns those that
+    /// were not copied (failed, or never reached), for the usual way.
+    fn copy_files_together(&mut self, files: Vec<(Entry, PathBuf)>) -> Result<Vec<(Entry, PathBuf)>, Stopped> {
+        if files.len() < 2 {
+            return Ok(files);
+        }
+        let workers = TOGETHER.min(files.len());
+        let next = AtomicUsize::new(0);
+        let bytes = AtomicU64::new(0);
+        let start = self.progress.done_bytes;
+        let (sender, results) = std::sync::mpsc::channel::<(usize, io::Result<()>)>();
+        let mut done = vec![false; files.len()];
+        let (src, dst) = (self.src.clone(), self.dst.clone());
+        let same = vfs::same(&src, &dst);
+        let (limiter, keep_dates, cancel) = (self.limiter(), self.keep_dates, self.cancel.clone());
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                let sender = sender.clone();
+                let (src, dst, cancel, files, next, bytes) =
+                    (src.clone(), dst.clone(), cancel.clone(), &files, &next, &bytes);
+                scope.spawn(move || {
+                    // Each its own connection (a worker that cannot get one
+                    // leaves its share to the others).
+                    let connect = |fs: &FsRef| if fs.is_local() { Ok(fs.clone()) } else { fs.connect_another() };
+                    let (Ok(src), Ok(dst)) = (connect(&src), connect(&dst)) else { return };
+                    loop {
+                        if cancel.is_cancelled() {
+                            return;
+                        }
+                        let index = next.fetch_add(1, Ordering::Relaxed);
+                        let Some((entry, target)) = files.get(index) else { return };
+                        let result = transfer_one(&src, &dst, entry, target, same, limiter, keep_dates, &cancel, bytes);
+                        if sender.send((index, result)).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+            drop(sender);
+            loop {
+                match results.recv_timeout(std::time::Duration::from_millis(150)) {
+                    Ok((index, Ok(()))) => {
+                        done[index] = true;
+                        self.progress.done_items += 1;
+                        self.progress.current = files[index].0.name.clone();
+                    }
+                    Ok(_) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+                self.progress.done_bytes = start + bytes.load(Ordering::Relaxed);
+                self.report();
+            }
+        });
+        self.check_cancel()?;
+        Ok(files.into_iter().zip(done).filter(|(_, done)| !done).map(|(file, _)| file).collect())
     }
 
     fn copy_file(&mut self, entry: &Entry, target: &Path) -> Result<bool, Stopped> {
@@ -918,16 +1045,60 @@ pub fn measure_excluding(fs: &FsRef, path: &Path, exclude: Option<&crate::fs::fi
     if entry.kind != EntryKind::Folder {
         return (entry.size, 1);
     }
+    // Object storage lists the whole tree at once.
+    if let Some(Ok(all)) = fs.list_tree(path) {
+        return measure_listed(path, &all, exclude);
+    }
+    measure_folder(fs, path, exclude)
+}
+
+/// A folder's bytes and items, from its listings (what a listing says of
+/// an item is all it takes: no request for each).
+fn measure_folder(fs: &FsRef, folder: &Path, exclude: Option<&crate::fs::filters::Exclusions>) -> (u64, usize) {
     let mut total = (0, 1);
-    for child in fs.list(path).unwrap_or_default() {
+    for child in fs.list(folder).unwrap_or_default() {
         if exclude.is_some_and(|x| x.excludes(&child.name, child.is_folder_like())) {
             continue;
         }
-        let (bytes, items) = measure_excluding(fs, &child.path, exclude);
+        let (bytes, items) =
+            if child.kind == EntryKind::Folder { measure_folder(fs, &child.path, exclude) } else { (child.size, 1) };
         total.0 += bytes;
         total.1 += items;
     }
     total
+}
+
+/// A folder's bytes and items from a listing of everything in it (as
+/// `measure_folder` counts them: the folder, each folder in it, each file).
+fn measure_listed(root: &Path, all: &[Entry], exclude: Option<&crate::fs::filters::Exclusions>) -> (u64, usize) {
+    let mut folders: std::collections::HashSet<&Path> = std::collections::HashSet::new();
+    let (mut bytes, mut files) = (0u64, 0usize);
+    'entries: for entry in all {
+        let Ok(inside) = entry.path.strip_prefix(root) else { continue };
+        let names: Vec<String> = inside.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
+        if names.is_empty() {
+            continue;
+        }
+        // Left out if it, or a folder it is in, is.
+        for (index, name) in names.iter().enumerate() {
+            let is_folder = index + 1 < names.len() || entry.kind == EntryKind::Folder;
+            if exclude.is_some_and(|x| x.excludes(name, is_folder)) {
+                continue 'entries;
+            }
+        }
+        let mut folder = entry.path.parent();
+        while let Some(dir) = folder.filter(|d| *d != root && d.starts_with(root)) {
+            folders.insert(dir);
+            folder = dir.parent();
+        }
+        if entry.kind == EntryKind::Folder {
+            folders.insert(&entry.path);
+        } else {
+            bytes += entry.size;
+            files += 1;
+        }
+    }
+    (bytes, 1 + folders.len() + files)
 }
 
 /// "name 2.ext", "name 3.ext", and so on: the first that does not exist.
@@ -989,6 +1160,83 @@ static TRASH_WITH_PERMISSION: std::sync::OnceLock<TrashWithPermission> = std::sy
 
 pub fn set_trash_with_permission(trash: TrashWithPermission) {
     let _ = TRASH_WITH_PERMISSION.set(trash);
+}
+
+/// Files copied at once to or from a server, each with its own connection
+/// (many small files go far faster; a server rarely minds four).
+const TOGETHER: usize = 4;
+
+/// Copies one file for `copy_files_together`: on the server where it can,
+/// otherwise streamed (into a temporary name, renamed when complete,
+/// unless the server only shows whole files anyway). The bytes go to
+/// `bytes` as they are copied (and back out if it fails).
+#[allow(clippy::too_many_arguments)]
+fn transfer_one(
+    src: &FsRef,
+    dst: &FsRef,
+    entry: &Entry,
+    target: &Path,
+    same: bool,
+    limiter: Option<&'static Limiter>,
+    keep_dates: bool,
+    cancel: &CancelToken,
+    bytes: &AtomicU64,
+) -> io::Result<()> {
+    if same {
+        match src.copy_on_server(&entry.path, target) {
+            Some(Err(e)) if e.kind() == io::ErrorKind::Unsupported => {}
+            Some(result) => {
+                if result.is_ok() {
+                    bytes.fetch_add(entry.size, Ordering::Relaxed);
+                }
+                return result;
+            }
+            None => {}
+        }
+    }
+    let direct = dst.writes_whole();
+    let temporary = if direct { target.to_path_buf() } else { temporary_name(target) };
+    let mut copied = 0u64;
+    let result = (|| {
+        let mut reader = src.open_read(&entry.path)?;
+        let mut writer = dst.open_write_sized(&temporary, Some(entry.size))?;
+        let mut buffer = vec![0u8; 256 * 1024];
+        loop {
+            cancel.wait_while_paused();
+            if cancel.is_cancelled() {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "Cancelled"));
+            }
+            let n = match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            };
+            if let Some(limiter) = limiter {
+                limiter.take(n);
+            }
+            writer.write_all(&buffer[..n])?;
+            copied += n as u64;
+            bytes.fetch_add(n as u64, Ordering::Relaxed);
+        }
+        writer.flush()?;
+        drop(writer);
+        if keep_dates {
+            let _ = dst.set_attributes(&temporary, entry.modified, None);
+        }
+        if !direct {
+            // SFTP servers may refuse to rename over an existing file.
+            if dst.stat(target).is_ok() {
+                dst.remove_file(target)?;
+            }
+            dst.rename(&temporary, target)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        bytes.fetch_sub(copied, Ordering::Relaxed);
+    }
+    result
 }
 
 /// Moves an item to the Trash (so it can be put back from Finder),
@@ -1115,6 +1363,45 @@ fn copyfile(source: &Path, target: &Path, extra: u32, on_bytes: Option<ProgressF
 mod tests {
     use super::*;
 
+    /// Counting from one listing of everything gives what counting folder
+    /// by folder gives, filters included.
+    #[test]
+    fn counts_a_listing_of_everything_as_folder_by_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        for folder in ["a/b", "a/node_modules/x", "empty"] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        for (file, size) in
+            [("one.txt", 3), ("a/two.txt", 5), ("a/b/three.txt", 7), ("a/node_modules/x/dep.js", 11), ("skip.log", 13)]
+        {
+            std::fs::write(root.join(file), vec![0u8; size]).unwrap();
+        }
+        let local = vfs::local();
+        // Everything at any depth, as object storage lists it.
+        let mut all = Vec::new();
+        let mut folders = vec![root.clone()];
+        while let Some(folder) = folders.pop() {
+            for entry in local.list(&folder).unwrap() {
+                if entry.kind == EntryKind::Folder {
+                    folders.push(entry.path.clone());
+                }
+                all.push(entry);
+            }
+        }
+        assert_eq!(measure_listed(&root, &all, None), measure_folder(&local, &root, None));
+        assert_eq!(measure_listed(&root, &all, None), (39, 11));
+        let filters = [crate::fs::filters::NameFilter {
+            patterns: "node_modules;*.log".into(),
+            listings: false,
+            transfers: true,
+            ..Default::default()
+        }];
+        let exclude = crate::fs::filters::Exclusions::new(&filters, |f| f.transfers).unwrap();
+        assert_eq!(measure_listed(&root, &all, Some(&exclude)), measure_folder(&local, &root, Some(&exclude)));
+        assert_eq!(measure_listed(&root, &all, Some(&exclude)).0, 15);
+    }
+
     #[test]
     fn limiter_spreads_bytes_over_time() {
         let limiter = Limiter::new();
@@ -1175,6 +1462,60 @@ mod tests {
         fn error(&mut self, _path: &Path, _error: &io::Error) -> ErrorAnswer {
             ErrorAnswer::Skip
         }
+    }
+
+    /// Many files to or from a server go several at a time; one that
+    /// cannot be read is tried again the usual way, then reported, and the
+    /// rest arrive whole.
+    #[test]
+    fn copies_many_files_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let mut expected = Vec::new();
+        for folder in 0..10 {
+            for file in 0..20 {
+                let path = root.join(format!("src/many/f{folder}/sub/file{file}.txt"));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let content = format!("{folder}-{file}-").repeat(folder * 7 + file + 1);
+                std::fs::write(&path, &content).unwrap();
+                expected.push((format!("many/f{folder}/sub/file{file}.txt"), content));
+            }
+        }
+        let locked = root.join("src/many/f3/sub/file5.txt");
+        std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+        std::fs::create_dir(root.join("dst")).unwrap();
+        let mut observer = Scripted::new(Resolution::Replace);
+        let outcome = run(&download(JobKind::Copy, root, &["many"]), &mut observer, CancelToken::default());
+        std::fs::set_permissions(&locked, std::os::unix::fs::PermissionsExt::from_mode(0o644)).unwrap();
+        assert_eq!(outcome.failed.len(), 1, "{:?}", outcome.failed);
+        assert_eq!(outcome.failed[0].0, locked);
+        for (relative, content) in &expected {
+            let copied = root.join("dst").join(relative);
+            if relative == "many/f3/sub/file5.txt" {
+                assert!(!copied.exists());
+            } else {
+                assert_eq!(&std::fs::read_to_string(&copied).unwrap(), content, "{relative}");
+            }
+        }
+        // No temporary files left, and progress ends at the total (a file
+        // given up on counts as dealt with, as always).
+        let leftovers: Vec<_> =
+            walk(&root.join("dst")).into_iter().filter(|p| p.to_string_lossy().contains("forkz-partial")).collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        assert_eq!(observer.last.done_bytes, observer.last.total_bytes);
+        assert_eq!(observer.last.done_items, observer.last.total_items);
+    }
+
+    fn walk(dir: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(walk(&path));
+            }
+            found.push(path);
+        }
+        found
     }
 
     fn tree(root: &Path) {

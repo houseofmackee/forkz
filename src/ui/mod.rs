@@ -4538,14 +4538,25 @@ fn open_connection(
             Ok((fs, params.password))
         }
         Protocol::S3 | Protocol::S3Http => {
+            let bucket = first_folder(site.remote_dir.as_deref());
+            // AWS's general server with no region: the bucket's region, and
+            // its server there (requests are signed for a region).
+            let general = site.host.eq_ignore_ascii_case("s3.amazonaws.com")
+                && site.region.as_deref().is_none_or(|r| r.trim().is_empty());
+            let found = bucket.as_deref().filter(|_| general).and_then(|b| vfs::s3::bucket_region(b, timeout));
+            let (host, region) = match found {
+                Some(region) => (format!("s3.{region}.amazonaws.com"), region),
+                None => (site.host.clone(), site.s3_region()),
+            };
             let params = vfs::s3::S3Params {
-                host: site.host.clone(),
+                host,
                 port: site.port,
                 secure: site.protocol == Protocol::S3,
                 access_key: site.user.clone(),
                 secret_key: password,
-                region: site.s3_region(),
+                region,
                 timeout,
+                check: bucket,
             };
             let fs = vfs::s3::connect(params, prompter)?;
             let secret = fs.secret().map(str::to_string);
@@ -4563,6 +4574,7 @@ fn open_connection(
                 secret_key: password,
                 region: site.region.clone().filter(|r| !r.trim().is_empty()).unwrap_or_else(|| "auto".into()),
                 timeout,
+                check: first_folder(site.remote_dir.as_deref()),
             };
             let fs = vfs::s3::connect(params, prompter)?;
             let secret = fs.secret().map(str::to_string);
@@ -4606,6 +4618,11 @@ fn open_connection(
             Ok((fs, key))
         }
     }
+}
+
+/// The first folder of a remote path ("/bucket/folder" gives "bucket").
+fn first_folder(path: Option<&str>) -> Option<String> {
+    path?.trim_matches('/').split('/').next().filter(|b| !b.is_empty()).map(str::to_string)
 }
 
 fn show_site(site: &crate::sites::Site, fs: FsRef, pane_index: usize) {
@@ -4742,6 +4759,27 @@ fn open_target(target: &str) {
         Some((host, port)) if port.parse::<u16>().is_ok() => (host.to_string(), port.parse().unwrap_or(default_port)),
         _ => (host_port.to_string(), default_port),
     };
+    // "s3://bucket/folder": a bucket on AWS (its region is found when
+    // connecting), not a server.
+    let (host, path) = match s3_bucket_address(protocol, &host, path.clone()) {
+        Some((server, bucket_path)) => (server, Some(bucket_path)),
+        None => (host, path),
+    };
+    let user = if user.is_empty() && protocol == crate::sites::Protocol::S3 && host == "s3.amazonaws.com" {
+        let bucket = first_folder(path.as_deref()).unwrap_or_default();
+        match dialogs::prompt(
+            &format!("Access key ID for \u{201c}{bucket}\u{201d}"),
+            "The access key ID of your AWS keys (it starts with AKIA). The secret key is asked next.",
+            "Continue",
+            "",
+            None,
+        ) {
+            Some(id) => id.trim().to_string(),
+            None => return,
+        }
+    } else {
+        user
+    };
     let mut wanted = crate::sites::Site::new(&host, port, &user);
     wanted.protocol = protocol;
     // A saved site for the same account brings its login settings.
@@ -4764,6 +4802,27 @@ fn open_target(target: &str) {
         site.remote_dir = path;
     }
     connect_site(site, app.active.get(), None, false);
+}
+
+/// "s3://bucket/folder" names a bucket on AWS, not a server: a name with
+/// no dots (and not localhost or an address). Its server, and the path
+/// with the bucket first.
+fn s3_bucket_address(protocol: crate::sites::Protocol, host: &str, path: Option<String>) -> Option<(String, String)> {
+    let bucket = host.trim();
+    let looks_like_bucket = protocol == crate::sites::Protocol::S3
+        && !bucket.is_empty()
+        && !bucket.contains('.')
+        && bucket != "localhost"
+        && bucket.parse::<std::net::IpAddr>().is_err();
+    if !looks_like_bucket {
+        return None;
+    }
+    let rest = path.unwrap_or_default();
+    let rest = rest.trim_start_matches('/');
+    Some((
+        "s3.amazonaws.com".to_string(),
+        if rest.is_empty() { format!("/{bucket}") } else { format!("/{bucket}/{rest}") },
+    ))
 }
 
 /// Shows an archive's contents in a pane, like a folder (`select`: an item
@@ -5069,6 +5128,22 @@ mod tests {
             owner: None,
             group: None,
         }
+    }
+
+    #[test]
+    fn reads_bucket_addresses() {
+        use crate::sites::Protocol;
+        let bucket = |host: &str, path: Option<&str>| s3_bucket_address(Protocol::S3, host, path.map(str::to_string));
+        assert_eq!(bucket("mybucket", Some("/pendo/")), Some(("s3.amazonaws.com".into(), "/mybucket/pendo/".into())));
+        assert_eq!(bucket("mybucket", None), Some(("s3.amazonaws.com".into(), "/mybucket".into())));
+        // Servers stay servers.
+        assert_eq!(bucket("s3.eu-west-2.amazonaws.com", Some("/b")), None);
+        assert_eq!(bucket("localhost", None), None);
+        assert_eq!(bucket("127.0.0.1", None), None);
+        assert_eq!(s3_bucket_address(Protocol::Webdavs, "nas", None), None);
+        assert_eq!(first_folder(Some("/mybucket/pendo")), Some("mybucket".into()));
+        assert_eq!(first_folder(Some("/")), None);
+        assert_eq!(first_folder(None), None);
     }
 
     #[test]

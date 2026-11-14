@@ -270,10 +270,19 @@ impl AzureFs {
 
     /// One level of a container: blobs and "folders" (prefixes).
     fn blobs(&self, container: &str, prefix: &str, limit: Option<&str>) -> io::Result<Vec<Entry>> {
+        self.list_blobs(container, prefix, limit, false)
+    }
+
+    /// Blobs under a prefix: one level (with folders), or (`flat`) all of
+    /// them at any depth, folders' markers included.
+    fn list_blobs(&self, container: &str, prefix: &str, limit: Option<&str>, flat: bool) -> io::Result<Vec<Entry>> {
         let mut entries = Vec::new();
         let mut marker = String::new();
         loop {
-            let mut query = vec![("restype", "container"), ("comp", "list"), ("delimiter", "/"), ("prefix", prefix)];
+            let mut query = vec![("restype", "container"), ("comp", "list"), ("prefix", prefix)];
+            if !flat {
+                query.push(("delimiter", "/"));
+            }
             if !marker.is_empty() {
                 query.push(("marker", &marker));
             }
@@ -294,7 +303,14 @@ impl AzureFs {
             for blob in doc.descendants().filter(|n| n.has_tag_name("Blob")) {
                 let Some(name) = child(blob, "Name") else { continue };
                 // A folder's marker (an empty blob ending in "/").
-                if name == prefix || name.ends_with('/') {
+                if name == prefix {
+                    continue;
+                }
+                if name.ends_with('/') {
+                    if flat {
+                        let path = PathBuf::from(format!("/{container}/{}", name.trim_end_matches('/')));
+                        entries.push(entry(path, EntryKind::Folder, 0, None));
+                    }
                     continue;
                 }
                 let size = child(blob, "Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -428,6 +444,16 @@ impl Vfs for AzureFs {
 
     fn renames_folders(&self) -> bool {
         false
+    }
+
+    fn writes_whole(&self) -> bool {
+        true
+    }
+
+    fn list_tree(&self, folder: &Path) -> Option<io::Result<Vec<Entry>>> {
+        let (Some(container), blob) = split(folder) else { return None };
+        let prefix = if blob.is_empty() { String::new() } else { format!("{blob}/") };
+        Some(self.list_blobs(&container, &prefix, None, true))
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {

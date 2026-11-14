@@ -7,6 +7,21 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-14
+
+### Added
+
+- Hovering over a name in the list shows the full file or folder name, for names too long for the Name column.
+- `s3://bucket/folder` addresses (in Go to Folder and on the command line) open a bucket on AWS: forkz asks for the access key ID and secret key, and finds the bucket's region itself. With the server `s3.amazonaws.com` and no region set, a site finds its bucket's region the same way.
+
+- Folders copied to or from a server (or on a server) have their files copied four at a time, each with its own connection: many small files go several times faster. Files that fail are tried again one by one afterwards, the usual way (asking what to do, and resuming partial files).
+- Uploads to S3, Google Cloud Storage, Azure, and Box are written straight to their names (those services only show a file once it is complete), saving the copy and delete a rename takes there.
+
+### Fixed
+
+- Copies and moves of folders with many items on a server took very long to start ("Preparing...") and to run: forkz looked up every item again before counting and copying it. It now uses what folder listings already say, and on S3 and Azure counts a whole folder tree from a single listing (1,000 items a request). Thousands of items now start in seconds.
+- S3 keys limited to one bucket were not accepted ("The keys were not accepted"): forkz checked them by listing all buckets. It now checks them with the bucket being opened.
+
 ## [0.20.2] - 2026-11-13
 
 ### Added
@@ -421,7 +436,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.20.2...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/houseofmackee/forkz/compare/v0.20.2...v0.21.0
 [0.20.2]: https://github.com/houseofmackee/forkz/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/houseofmackee/forkz/compare/v0.20.0...v0.20.1
 [0.20.0]: https://github.com/houseofmackee/forkz/compare/v0.19.0...v0.20.0

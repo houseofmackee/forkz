@@ -134,6 +134,21 @@ pub trait Vfs: Send + Sync {
         None
     }
 
+    /// Everything below a folder at any depth, in one go (object storage
+    /// lists it all in a few requests, where folder by folder takes one or
+    /// more each). None where listing folder by folder is the way.
+    fn list_tree(&self, _folder: &Path) -> Option<io::Result<Vec<Entry>>> {
+        None
+    }
+
+    /// Whether a file written here only appears once complete (object
+    /// storage), so a copy can be written straight to its name instead of
+    /// a temporary one that is renamed after (a rename there is a copy and
+    /// a delete).
+    fn writes_whole(&self) -> bool {
+        false
+    }
+
     /// Whether `rename` moves folders. Object storage has no folders to
     /// rename (only names): a move there copies and deletes instead.
     fn renames_folders(&self) -> bool {

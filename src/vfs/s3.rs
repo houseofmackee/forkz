@@ -27,6 +27,9 @@ pub struct S3Params {
     pub secret_key: Option<String>,
     pub region: String,
     pub timeout: Duration,
+    /// The bucket to check the keys with (keys for one bucket may not list
+    /// all of them); None: the list of buckets.
+    pub check: Option<String>,
 }
 
 pub struct S3Fs {
@@ -110,7 +113,8 @@ pub fn connect(params: S3Params, prompter: &dyn Prompter) -> io::Result<Arc<S3Fs
     let mut fs = S3Fs { agent: http::agent(params.timeout), secret: params.secret_key.clone(), params };
     for attempt in 0..4 {
         if fs.secret.is_some() {
-            match fs.list(Path::new("/")) {
+            let check = fs.params.check.as_ref().map_or_else(|| PathBuf::from("/"), |b| PathBuf::from(format!("/{b}")));
+            match fs.list(&check) {
                 Ok(_) => return Ok(Arc::new(fs)),
                 Err(e) if e.kind() == io::ErrorKind::PermissionDenied && attempt < 3 => {}
                 Err(e) => return Err(e),
@@ -124,6 +128,17 @@ pub fn connect(params: S3Params, prompter: &dyn Prompter) -> io::Result<Arc<S3Fs
         }
     }
     Err(io::Error::new(io::ErrorKind::PermissionDenied, "The keys were not accepted."))
+}
+
+/// The region an AWS bucket is in: AWS tells anyone (no keys needed), in
+/// a header of any answer about the bucket.
+pub fn bucket_region(bucket: &str, timeout: Duration) -> Option<String> {
+    let agent = http::agent_without_redirects(timeout);
+    let url = format!("https://s3.amazonaws.com/{}", http::encode_value(bucket));
+    let response = agent.head(&url).call().ok()?;
+    let region = response.headers().get("x-amz-bucket-region")?.to_str().ok()?.trim().to_string();
+    // Letters, digits, and dashes ("eu-west-2"): it goes into a host name.
+    (!region.is_empty() && region.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).then_some(region)
 }
 
 /// A path in forkz as bucket and key ("/photos/2026/a.jpg" is bucket
@@ -245,10 +260,20 @@ impl S3Fs {
 
     /// One level of a bucket: objects and "folders" (common prefixes).
     fn objects(&self, bucket: &str, prefix: &str, limit: Option<&str>) -> io::Result<Vec<Entry>> {
+        self.list_objects(bucket, prefix, limit, false)
+    }
+
+    /// Objects under a prefix: one level (with folders), or (`flat`) all
+    /// of them at any depth, folders' markers included, in far fewer
+    /// requests.
+    fn list_objects(&self, bucket: &str, prefix: &str, limit: Option<&str>, flat: bool) -> io::Result<Vec<Entry>> {
         let mut entries = Vec::new();
         let mut token: Option<String> = None;
         loop {
-            let mut query: Vec<(&str, &str)> = vec![("list-type", "2"), ("delimiter", "/"), ("prefix", prefix)];
+            let mut query: Vec<(&str, &str)> = vec![("list-type", "2"), ("prefix", prefix)];
+            if !flat {
+                query.push(("delimiter", "/"));
+            }
             if let Some(token) = &token {
                 query.push(("continuation-token", token));
             }
@@ -269,7 +294,17 @@ impl S3Fs {
             for object in doc.descendants().filter(|n| n.has_tag_name("Contents")) {
                 let Some(key) = child_text(object, "Key") else { continue };
                 // The marker of the folder being listed.
-                if key == prefix || key.ends_with('/') {
+                if key == prefix {
+                    continue;
+                }
+                if key.ends_with('/') {
+                    // Deeper folders' markers count when listing it all.
+                    if flat {
+                        entries.push(folder_entry(
+                            PathBuf::from(format!("/{bucket}/{}", key.trim_end_matches('/'))),
+                            None,
+                        ));
+                    }
                     continue;
                 }
                 let size = child_text(object, "Size").and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -531,8 +566,18 @@ impl Vfs for S3Fs {
         Some(self.copy_object(from, to))
     }
 
+    fn list_tree(&self, folder: &Path) -> Option<io::Result<Vec<Entry>>> {
+        let (Some(bucket), key) = split(folder) else { return None };
+        let prefix = if key.is_empty() { String::new() } else { format!("{key}/") };
+        Some(self.list_objects(&bucket, &prefix, None, true))
+    }
+
     fn renames_folders(&self) -> bool {
         false
+    }
+
+    fn writes_whole(&self) -> bool {
+        true
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
@@ -658,6 +703,13 @@ impl Vfs for S3Fs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AWS tells a bucket's region (needs the network: run with --ignored).
+    #[test]
+    #[ignore = "needs the network"]
+    fn finds_a_buckets_region() {
+        assert_eq!(bucket_region("commoncrawl", Duration::from_secs(10)).as_deref(), Some("us-east-1"));
+    }
 
     #[test]
     fn copies_in_parts() {

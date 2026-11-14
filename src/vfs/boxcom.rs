@@ -1001,6 +1001,12 @@ impl Vfs for BoxFs {
         Some(self.copy_file(from, to))
     }
 
+    /// An upload shows once complete (over an existing file: its new
+    /// version).
+    fn writes_whole(&self) -> bool {
+        true
+    }
+
     fn deleted_items_go(&self) -> Option<&'static str> {
         Some("Box\u{2019}s trash")
     }

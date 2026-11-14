@@ -88,8 +88,12 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(status, body)
 
     def body(self):
-        length = int(self.headers.get("Content-Length") or 0)
-        return self.rfile.read(length) if length else b""
+        # Read once, before any answer (an answer that left a body unread
+        # would garble the next request on the same connection).
+        if not hasattr(self, "_body"):
+            length = int(self.headers.get("Content-Length") or 0)
+            self._body = self.rfile.read(length) if length else b""
+        return self._body
 
     def authorized(self, api):
         global api_requests
@@ -121,6 +125,9 @@ class Handler(BaseHTTPRequestHandler):
             self.route("DELETE")
 
     def route(self, method):
+        if hasattr(self, "_body"):
+            del self._body
+        self.body()
         url = urlparse(self.path)
         path, query = url.path, parse_qs(url.query)
         if path == "/oauth2/token" and method == "POST":

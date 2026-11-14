@@ -1078,6 +1078,7 @@ impl PaneController {
                 field.setStringValue(&ns(text));
                 field.setAlphaValue(1.0);
             }
+            cell.setToolTip(None);
             return Some(Retained::into_super(cell));
         }
         let entry = entry_at(&state, row)?;
@@ -1124,6 +1125,8 @@ impl PaneController {
             "group" => entry.group.clone().unwrap_or_default(),
             _ => kind_of(entry),
         };
+        // The full name on hover (for names too long for the column).
+        cell.setToolTip((column_id == "name").then(|| ns(&entry.name)).as_deref());
         if let Some(field) = text_field {
             field.setStringValue(&ns(&text));
             // Hidden items are dimmed, like in Finder.

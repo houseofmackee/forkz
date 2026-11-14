@@ -468,8 +468,9 @@ fn s3() {
         secret_key: Some("secret".into()),
         region: "us-east-1".into(),
         timeout: Duration::from_secs(10),
+        check: None,
     };
-    let s3fs = s3::connect(params, &answers()).unwrap();
+    let s3fs = s3::connect(params.clone(), &answers()).unwrap();
     let fs: FsRef = s3fs.clone();
     let bucket = Path::new("/forkz-test");
     fs.create_dir(bucket).unwrap();
@@ -504,6 +505,13 @@ fn s3() {
     drop(file);
     s3fs.copy_in_parts_of(&bucket.join("big.bin"), &other.join("big copy.bin"), 5 * 1024 * 1024).unwrap();
     assert_eq!(read_all(&fs, &other.join("big copy.bin")), big);
+
+    // Counting a tree uses one listing of all of it.
+    assert!(fs.list_tree(other).is_some());
+    assert_eq!(ops::measure(&fs, other), (6 + big.len() as u64, 4));
+    // Keys can be checked with a bucket rather than the list of buckets.
+    let checked = s3::connect(s3::S3Params { check: Some("forkz-other".into()), ..params }, &answers()).unwrap();
+    assert!(checked.list(other).is_ok());
 
     run(&Job::between(
         JobKind::Delete,
