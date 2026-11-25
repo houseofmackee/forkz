@@ -27,7 +27,7 @@ native-tls = "0.2"
 md-5 = "0.11"
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 percent-encoding = "2"
-notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+notify = { version = "9", default-features = false, features = ["macos_fsevent"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["objc2-uniform-type-identifiers"] }
 objc2-core-foundation = "0.3"
