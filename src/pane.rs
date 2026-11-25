@@ -70,6 +70,60 @@ fn plain_kind(entry: &Entry) -> String {
     }
 }
 
+/// Folders on the Mac are read in the background (the app turns this on:
+/// a slow or stalled drive must not freeze it). Off, they are read at
+/// once (as the tests expect).
+static LOCAL_IN_BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn read_local_folders_in_background() {
+    LOCAL_IN_BACKGROUND.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A folder on the Mac as read (off the main thread): where it turned out
+/// to be (an enclosing folder, if it is gone), what is in it, the space
+/// left on its volume, and its items' Finder tags.
+#[derive(Debug)]
+pub struct LocalListing {
+    pub location: PathBuf,
+    pub result: std::io::Result<Vec<Entry>>,
+    pub free_space: Option<u64>,
+    pub tags: std::collections::HashMap<PathBuf, Vec<fs::tags::Tag>>,
+}
+
+impl LocalListing {
+    /// Reads a folder on the Mac, with everything the pane shows of it
+    /// (all of which touches the disk).
+    pub fn read(mut location: PathBuf) -> LocalListing {
+        // Debug builds: FORKZ_TEST_SLOW_FOLDER=/path makes reading that
+        // folder take FORKZ_TEST_SLOW_SECONDS (5), as a stalled drive
+        // would (for testing).
+        #[cfg(debug_assertions)]
+        if std::env::var_os("FORKZ_TEST_SLOW_FOLDER").is_some_and(|slow| location == Path::new(&slow)) {
+            let seconds = std::env::var("FORKZ_TEST_SLOW_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+            std::thread::sleep(std::time::Duration::from_secs(seconds));
+        }
+        while !location.is_dir() {
+            match location.parent() {
+                Some(parent) => location = parent.to_path_buf(),
+                None => break,
+            }
+        }
+        let result = fs::list_dir(&location);
+        let tags = match &result {
+            Ok(entries) => entries
+                .iter()
+                .filter_map(|e| {
+                    let tags = fs::tags::read(&e.path);
+                    (!tags.is_empty()).then(|| (e.path.clone(), tags))
+                })
+                .collect(),
+            Err(_) => std::collections::HashMap::new(),
+        };
+        let free_space = fs::available_space(&location);
+        LocalListing { location, result, free_space, tags }
+    }
+}
+
 #[derive(Debug)]
 pub struct PaneState {
     fs: FsRef,
@@ -103,6 +157,12 @@ pub struct PaneState {
     filtered_out: usize,
     /// The list's rows: "..", group titles, and `visible` (grouped).
     rows: Vec<Row>,
+    /// Space left on the folder's volume, and its items' tags (read with
+    /// the listing, for folders on the Mac).
+    free_space: Option<u64>,
+    tags: std::collections::HashMap<PathBuf, Vec<fs::tags::Tag>>,
+    /// The tags above were read (else they are read when shown).
+    tags_read: bool,
 }
 
 impl PaneState {
@@ -128,6 +188,9 @@ impl PaneState {
             exclusions_version: 0,
             filtered_out: 0,
             rows: Vec::new(),
+            free_space: None,
+            tags: std::collections::HashMap::new(),
+            tags_read: false,
         };
         pane.load();
         pane
@@ -149,13 +212,63 @@ impl PaneState {
     /// caller lists it in the background and calls `set_listing`).
     pub fn load(&mut self) {
         self.generation += 1;
-        if self.fs.is_local() {
+        if self.fs.is_local() && !self.reads_local_in_background() {
             self.reload();
         } else {
             self.loading = true;
             self.cached = false;
             self.error = None;
         }
+    }
+
+    /// Whether this folder on the Mac is read in the background (not views
+    /// such as search results, which are in memory).
+    pub fn reads_local_in_background(&self) -> bool {
+        self.fs.is_local()
+            && self.fs.title_for(&self.location).is_none()
+            && LOCAL_IN_BACKGROUND.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A folder on the Mac read in the background; false if the pane has
+    /// moved on since.
+    pub fn set_local_listing(&mut self, generation: u64, listing: LocalListing) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        self.loading = false;
+        self.cached = false;
+        self.apply_local(listing);
+        true
+    }
+
+    fn apply_local(&mut self, listing: LocalListing) {
+        self.location = listing.location;
+        self.free_space = listing.free_space;
+        self.tags = listing.tags;
+        self.tags_read = true;
+        match listing.result {
+            Ok(entries) => {
+                self.all = entries;
+                self.apply_sizes_and_sort();
+                self.error = None;
+            }
+            Err(e) => {
+                self.all.clear();
+                self.error = Some(e.to_string());
+            }
+        }
+        self.filter();
+    }
+
+    /// Space left on the folder's volume, if read with the listing.
+    pub fn free_space(&self) -> Option<u64> {
+        self.free_space
+    }
+
+    /// An item's Finder tags, if read with the listing (None: not read,
+    /// so read them when needed).
+    pub fn tags_of(&self, path: &Path) -> Option<&[fs::tags::Tag]> {
+        self.tags_read.then(|| self.tags.get(path).map_or(&[][..], Vec::as_slice))
     }
 
     /// Shows a remote folder's last listing while the fresh one loads
@@ -234,24 +347,8 @@ impl PaneState {
             self.set_listing(generation, result);
             return;
         }
-        while !self.location.is_dir() {
-            match self.location.parent() {
-                Some(parent) => self.location = parent.to_path_buf(),
-                None => break,
-            }
-        }
-        match fs::list_dir(&self.location) {
-            Ok(entries) => {
-                self.all = entries;
-                self.apply_sizes_and_sort();
-                self.error = None;
-            }
-            Err(e) => {
-                self.all.clear();
-                self.error = Some(e.to_string());
-            }
-        }
-        self.filter();
+        let listing = LocalListing::read(self.location.clone());
+        self.apply_local(listing);
     }
 
     fn filter(&mut self) {

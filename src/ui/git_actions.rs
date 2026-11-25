@@ -25,7 +25,8 @@ pub fn repository_of(pane: &PaneController) -> Option<PathBuf> {
     if !pane.is_local() || pane.showing_results() {
         return None;
     }
-    git::repository_root(&pane.location())
+    // As found in the background (menus ask often; looking touches the disk).
+    pane.repository()
 }
 
 /// Whether a Git command can run in a pane now.

@@ -593,6 +593,8 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     ns_app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     file_viewer::install(&delegate);
     crate::fs::ops::set_trash_with_permission(trash_with_permission);
+    // A slow or stalled drive must not freeze the panes.
+    crate::pane::read_local_folders_in_background();
     // No macOS window tabs (forkz has tabs in each pane): this also
     // drops Show Tab Bar and Show All Tabs from the View menu.
     NSWindow::setAllowsAutomaticWindowTabbing(false, mtm);
@@ -885,6 +887,7 @@ fn main_menu(
     standard(&app_menu, "About forkz", sel!(orderFrontStandardAboutPanel:), "");
     separator(&app_menu);
     command(&app_menu, Command::Settings);
+    command(&app_menu, Command::InstallCommand);
     for (title, action) in [
         ("Check for Updates\u{2026}", sel!(checkForUpdates:)),
         ("Check for Updates Automatically", sel!(toggleAutomaticUpdates:)),
@@ -1526,6 +1529,7 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         }
         Command::Filter => pane.focus_filter(),
         Command::Settings => settings_window::show(),
+        Command::InstallCommand => install_command(),
         Command::NewTab => pane.new_tab(pane.fs(), pane.location()),
         Command::CloseTab => {
             // Command-W in another window (a viewer, Settings) closes that.
@@ -1721,6 +1725,11 @@ pub fn open_link(link: &str) {
     let settings = app.settings.borrow().clone();
     let result: Result<(), String> = match crate::links::parse(link) {
         Err(e) => Err(e),
+        // A server address (as the forkz command sends it): connected to.
+        Ok(Link::Open { path, .. }) if path.to_string_lossy().contains("://") => {
+            open_target(&path.to_string_lossy());
+            Ok(())
+        }
         Ok(Link::Open { path, pane, new_tab }) => {
             let index = pane_index(pane);
             let (folder, select) = if path.is_dir() {
@@ -3389,6 +3398,78 @@ pub fn choose_app() -> Option<PathBuf> {
     panel.URL().and_then(|u| util::url_path(&u))
 }
 
+/// forkz > Install Command Line Tool: a `forkz` command in /usr/local/bin
+/// (on every Mac's PATH), linking to this app, so `forkz .` in Terminal
+/// opens the current folder. Making it takes an administrator's password,
+/// which macOS asks for.
+fn install_command() {
+    let executable = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok());
+    let Some(executable) = executable.filter(|e| e.to_string_lossy().contains(".app/Contents/MacOS/")) else {
+        dialogs::show_info(
+            "Only the forkz app can install the command.".into(),
+            "This is a build run from source; its command is in the target folder.".into(),
+        );
+        return;
+    };
+    let link = Path::new("/usr/local/bin/forkz");
+    // Already there (Homebrew installs it too).
+    for existing in [link, Path::new("/opt/homebrew/bin/forkz")] {
+        if existing.canonicalize().is_ok_and(|target| target == executable) {
+            dialogs::show_info(
+                "The forkz command is already installed.".into(),
+                format!(
+                    "It is {}. In Terminal, \u{201c}forkz .\u{201d} opens the current folder, and \u{201c}forkz ~/Projects\u{201d} another one.",
+                    existing.display()
+                ),
+            );
+            return;
+        }
+    }
+    // Something else of that name: only replaced if asked (an older forkz,
+    // say, from another place).
+    if link.symlink_metadata().is_ok()
+        && !dialogs::confirm(
+            "Replace the existing forkz command?",
+            &format!("{} is there already, but does not open this app.", link.display()),
+            "Replace",
+            false,
+        )
+    {
+        return;
+    }
+    // As this user if the folder allows it, otherwise as an administrator.
+    let made = std::fs::create_dir_all("/usr/local/bin").is_ok()
+        && (link.symlink_metadata().is_err() || std::fs::remove_file(link).is_ok())
+        && std::os::unix::fs::symlink(&executable, link).is_ok();
+    if !made {
+        // The app's path as an argument: nothing in it is read as script.
+        let result = std::process::Command::new("/usr/bin/osascript")
+            .args([
+                "-e",
+                "on run argv",
+                "-e",
+                "do shell script \"mkdir -p /usr/local/bin && ln -sf \" & quoted form of (item 1 of argv) & \" /usr/local/bin/forkz\" with administrator privileges",
+                "-e",
+                "end run",
+            ])
+            .arg(&executable)
+            .output();
+        if let Ok(output) = &result
+            && String::from_utf8_lossy(&output.stderr).contains("(-128)")
+        {
+            return;
+        }
+    }
+    if link.canonicalize().is_ok_and(|target| target == executable) {
+        dialogs::show_info(
+            "The forkz command is installed.".into(),
+            "In Terminal, \u{201c}forkz .\u{201d} opens the current folder in forkz, and \u{201c}forkz ~/Projects\u{201d} or \u{201c}forkz sftp://host/path\u{201d} other places. To remove it, delete /usr/local/bin/forkz.".into(),
+        );
+    } else {
+        dialogs::show_error("The forkz command could not be installed.".into(), String::new());
+    }
+}
+
 /// Moves items to the Trash through Finder, which asks for an
 /// administrator's password when they need it (apps installed for all
 /// users, files in /Library) and which App Management does not restrict.
@@ -4217,6 +4298,12 @@ pub fn location_changed(index: usize) {
 }
 
 /// A background listing for a pane arrived.
+fn local_listing_arrived(index: usize, generation: u64, listing: crate::pane::LocalListing) {
+    if let Some(app) = app() {
+        app.panes[index].local_listing_arrived(generation, listing);
+    }
+}
+
 fn listing_arrived(index: usize, generation: u64, result: std::io::Result<Vec<crate::fs::Entry>>) {
     if let Some(app) = app() {
         app.panes[index].listing_arrived(generation, result);
@@ -4661,9 +4748,10 @@ fn git_status_arrived(
     index: usize,
     statuses: crate::fs::git::Statuses,
     branch: Option<(crate::fs::git::Branch, Vec<String>)>,
+    repository: Option<PathBuf>,
 ) {
     if let Some(pane) = app().and_then(|a| a.panes.get(index).cloned()) {
-        pane.git_arrived(statuses, branch);
+        pane.git_arrived(statuses, branch, repository);
     }
 }
 

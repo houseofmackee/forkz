@@ -94,6 +94,10 @@ pub fn parse(link: &str) -> Result<Link, String> {
 
 /// "~" and "~/..." are the home folder.
 fn expand(path: &str) -> PathBuf {
+    // A server address ("sftp://host/path") stays as it is.
+    if path.contains("://") {
+        return PathBuf::from(path);
+    }
     let home = || dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
     match path.strip_prefix('~') {
         Some("") => home(),
@@ -116,6 +120,11 @@ mod tests {
         assert_eq!(
             parse("forkz://open/?path=/tmp"),
             Ok(Link::Open { path: "/tmp".into(), pane: Pane::Active, new_tab: false })
+        );
+        // A server address (from the forkz command) stays whole.
+        assert_eq!(
+            parse("forkz://open?path=sftp%3A%2F%2Fme%40host%2Fvar%2Fwww"),
+            Ok(Link::Open { path: "sftp://me@host/var/www".into(), pane: Pane::Active, new_tab: false })
         );
         assert_eq!(
             parse("forkz://connect?site=Staging%20Server&path=/var/www"),

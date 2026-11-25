@@ -218,6 +218,10 @@ Sites using implicit FTPS (port 990) or protocols forkz does not have, and passw
 
 Sites forkz already has are left as they are. Transmit's exports are in a private format, so its servers cannot be imported.
 
+## From Terminal
+
+`forkz .` opens the current folder in forkz, and `forkz ~/Projects` or `forkz sftp://me@host/var/www` other places; a running forkz shows them in its window. Installed with Homebrew, the `forkz` command is there already; otherwise choose forkz > Install Command Line Tool (it asks for an administrator's password, and puts the command in /usr/local/bin). Without the command, `open -a forkz .` works too.
+
 ## Custom tools
 
 Settings > Tools holds your own commands, run by zsh in the pane's folder on the selection: from Commands > Tools, the toolbar (View > Customize Toolbar, with an SF Symbol as the icon), or the command palette. In a command, `{selection}` is the selected items (or the folder if none are selected), `{file}` the first one, `{names}` their names, `{folder}` the pane's folder, and `{other-folder}` and `{other-selection}` the other pane's; paths are quoted for the shell. The same are in the environment as `FORKZ_SELECTION` (one path a line), `FORKZ_FOLDER`, and `FORKZ_OTHER_FOLDER`. A tool can show what it printed when it is done; if it fails, forkz shows its error output. Stop in the activity area ends a tool that runs too long. A few examples come with forkz:

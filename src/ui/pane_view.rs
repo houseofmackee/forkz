@@ -310,6 +310,9 @@ pub struct PaneIvars {
     git: RefCell<crate::fs::git::Statuses>,
     git_running: Cell<bool>,
     git_again: Cell<bool>,
+    /// The repository the folder is in, as last found (in the background:
+    /// looking for it touches the disk).
+    repository: RefCell<Option<PathBuf>>,
     /// The repository's branch and its local branches, for the branch
     /// menu at the end of the status line.
     branch: RefCell<Option<(crate::fs::git::Branch, Vec<String>)>>,
@@ -1088,7 +1091,16 @@ impl PaneController {
                     let icon = icon_of(entry, state.is_local());
                     // Tag colors on the icon, like Finder's dots.
                     let colors: Vec<u8> = if state.is_local() {
-                        crate::fs::tags::read(&entry.path).iter().map(|t| t.color).filter(|c| *c > 0).collect()
+                        // Read with the listing (else now: search results).
+                        let read;
+                        let tags = match state.tags_of(&entry.path) {
+                            Some(tags) => tags,
+                            None => {
+                                read = crate::fs::tags::read(&entry.path);
+                                &read
+                            }
+                        };
+                        tags.iter().map(|t| t.color).filter(|c| *c > 0).collect()
                     } else {
                         Vec::new()
                     };
@@ -1105,7 +1117,10 @@ impl PaneController {
             "modified" => format_date(entry.modified),
             "permissions" => fs::format_permissions(entry),
             "owner" => entry.owner.clone().unwrap_or_default(),
-            "tags" if state.is_local() => super::util::tags_of(&entry.path).join(", "),
+            "tags" if state.is_local() => match state.tags_of(&entry.path) {
+                Some(tags) => tags.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", "),
+                None => super::util::tags_of(&entry.path).join(", "),
+            },
             "git" => {
                 let status = self.ivars().git.borrow().of(&entry.path, entry.is_folder_like());
                 if let Some(field) = &text_field {
@@ -1183,6 +1198,7 @@ impl PaneController {
             git_running: Cell::new(false),
             git_again: Cell::new(false),
             branch: RefCell::new(None),
+            repository: RefCell::new(None),
             branch_menu: OnceCell::new(),
         });
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -1626,13 +1642,17 @@ impl PaneController {
 
     /// Lists a remote folder in the background if the state is waiting for it.
     fn start_loading(&self) {
-        let (fs, location, generation) = {
+        let (fs, location, generation, local) = {
             let state = self.ivars().state.borrow();
             if !state.loading {
                 return;
             }
-            (state.fs().clone(), state.location().to_path_buf(), state.generation())
+            (state.fs().clone(), state.location().to_path_buf(), state.generation(), state.reads_local_in_background())
         };
+        if local {
+            self.load_local(location, generation);
+            return;
+        }
         // A server folder visited before shows at once (its last
         // listing) while the fresh one loads.
         if let Some(entries) = super::listing_cache::get(&fs, &location)
@@ -1646,6 +1666,56 @@ impl PaneController {
             let result = fs.list(&location);
             DispatchQueue::main().exec_async(move || super::listing_arrived(index, generation, result));
         });
+    }
+
+    /// Reads a folder on the Mac off the main thread (a slow or stalled
+    /// drive would freeze the app). A quick read, as nearly always, shows
+    /// at once; a slow one shows "Loading" until it is done.
+    fn load_local(&self, location: PathBuf, generation: u64) {
+        #[derive(Default)]
+        enum Hand {
+            #[default]
+            Waiting,
+            Ready(crate::pane::LocalListing),
+            /// The main thread stopped waiting: the result goes the slow way.
+            Gone,
+        }
+        let hand: std::sync::Arc<(std::sync::Mutex<Hand>, std::sync::Condvar)> = std::sync::Arc::default();
+        let index = self.index();
+        let theirs = hand.clone();
+        std::thread::spawn(move || {
+            let listing = crate::pane::LocalListing::read(location);
+            let (slot, ready) = &*theirs;
+            let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(*slot, Hand::Gone) {
+                DispatchQueue::main().exec_async(move || super::local_listing_arrived(index, generation, listing));
+            } else {
+                *slot = Hand::Ready(listing);
+                ready.notify_one();
+            }
+        });
+        let (slot, ready) = &*hand;
+        let slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut slot, _) = ready
+            .wait_timeout_while(slot, std::time::Duration::from_millis(80), |s| matches!(s, Hand::Waiting))
+            .unwrap_or_else(|e| e.into_inner());
+        match std::mem::replace(&mut *slot, Hand::Gone) {
+            Hand::Ready(listing) => {
+                drop(slot);
+                self.local_listing_arrived(generation, listing);
+            }
+            // Still reading: it arrives later (the pane shows "Loading").
+            _ => tracing::debug!("slow folder: {}", self.location().display()),
+        }
+    }
+
+    /// A folder on the Mac was read in the background.
+    pub fn local_listing_arrived(&self, generation: u64, listing: crate::pane::LocalListing) {
+        if !self.ivars().state.borrow_mut().set_local_listing(generation, listing) {
+            return;
+        }
+        let pending = self.ivars().pending_select.take();
+        self.refresh(pending.as_deref());
     }
 
     /// A background listing arrived.
@@ -2118,8 +2188,8 @@ impl PaneController {
     /// for the Git column (when it shows) and the branch in the status
     /// line. One at a time, again if asked meanwhile.
     fn update_git(&self) {
-        let in_repository = super::git_actions::repository_of(self).is_some();
-        if !in_repository {
+        if !self.is_local() || self.showing_results() {
+            self.ivars().repository.borrow_mut().take();
             if self.ivars().branch.borrow_mut().take().is_some() {
                 self.update_branch_menu();
             }
@@ -2135,11 +2205,11 @@ impl PaneController {
             let root = crate::fs::git::repository_root(&location);
             let statuses =
                 root.as_ref().filter(|_| column).and_then(|root| crate::fs::git::status(root).ok()).unwrap_or_default();
-            let branch = root.and_then(|root| {
-                let current = crate::fs::git::branch(&root).ok()?;
-                Some((current, crate::fs::git::branches(&root).unwrap_or_default()))
+            let branch = root.as_ref().and_then(|root| {
+                let current = crate::fs::git::branch(root).ok()?;
+                Some((current, crate::fs::git::branches(root).unwrap_or_default()))
             });
-            DispatchQueue::main().exec_async(move || super::git_status_arrived(index, statuses, branch));
+            DispatchQueue::main().exec_async(move || super::git_status_arrived(index, statuses, branch, root));
         });
     }
 
@@ -2197,6 +2267,11 @@ impl PaneController {
         }
     }
 
+    /// The repository the folder is in, as last found.
+    pub fn repository(&self) -> Option<PathBuf> {
+        self.ivars().repository.borrow().clone().filter(|root| self.location().starts_with(root))
+    }
+
     /// The repository changed (a Git action): the Git column and branch
     /// again.
     pub fn git_changed(&self) {
@@ -2208,7 +2283,9 @@ impl PaneController {
         &self,
         statuses: crate::fs::git::Statuses,
         branch: Option<(crate::fs::git::Branch, Vec<String>)>,
+        repository: Option<PathBuf>,
     ) {
+        *self.ivars().repository.borrow_mut() = repository;
         *self.ivars().git.borrow_mut() = statuses;
         self.ivars().git_running.set(false);
         if *self.ivars().branch.borrow() != branch {
@@ -2426,7 +2503,11 @@ impl PaneController {
                 }
                 if !state.is_local() {
                     text.push_str(&format!(", {}", state.fs().label()));
-                } else if let Some(free) = fs::available_space(state.location()) {
+                } else if let Some(free) = state.free_space().or_else(|| {
+                    // Read with the listing; views such as search results
+                    // (on this Mac's disk) read it now.
+                    (!state.reads_local_in_background()).then(|| fs::available_space(state.location())).flatten()
+                }) {
                     text.push_str(&format!(", {} available", fs::format_size(free)));
                 }
                 text

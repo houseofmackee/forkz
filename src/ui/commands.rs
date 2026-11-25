@@ -112,6 +112,7 @@ pub enum Command {
     GitPush,
     GitSwitchBranch,
     AppCleaner,
+    InstallCommand,
 }
 
 impl Command {
@@ -244,6 +245,7 @@ impl Command {
         Command::GitPush,
         Command::GitSwitchBranch,
         Command::AppCleaner,
+        Command::InstallCommand,
     ];
 
     pub fn tag(self) -> isize {
@@ -379,6 +381,7 @@ impl Command {
             Command::GitPush => "Push",
             Command::GitSwitchBranch => "Switch Branch\u{2026}",
             Command::AppCleaner => "App Cleaner\u{2026}",
+            Command::InstallCommand => "Install Command Line Tool\u{2026}",
         }
     }
 
@@ -495,7 +498,8 @@ impl Command {
             | Command::GitPull
             | Command::GitPush
             | Command::GitSwitchBranch
-            | Command::AppCleaner => ("", cmd),
+            | Command::AppCleaner
+            | Command::InstallCommand => ("", cmd),
             // F3, as in Total Commander (also handled in the lists).
             Command::ViewFile => ("\u{f706}", NSEventModifierFlags::empty()),
         }
@@ -513,6 +517,7 @@ impl Command {
             GitPush => "arrow.up.circle",
             GitSwitchBranch => "arrow.triangle.branch",
             AppCleaner => "trash.square",
+            InstallCommand => "terminal",
             OpenInNewTab | NewTab => "plus.rectangle.on.rectangle",
             QuickLook => "eye",
             ViewFile => "doc.text.magnifyingglass",

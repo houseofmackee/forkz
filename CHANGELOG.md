@@ -7,6 +7,17 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-11-25
+
+### Added
+
+- forkz > Install Command Line Tool: a `forkz` command in Terminal, so `forkz .` opens the current folder in forkz (Homebrew installs it already). The command now hands folders and addresses to the running forkz instead of starting a second copy ([#11](https://github.com/houseofmackee/forkz/issues/11)).
+
+### Fixed
+
+- A slow or unresponsive drive (an external disk on a slow connection, a stalled network share) froze forkz. Folders on the Mac are now read in the background: they show at once as before, and a slow one shows "Loading" while forkz stays usable. Tags and free space are read with the listing, folders on other volumes get their icons by type, and looking for a Git repository happens in the background too ([#9](https://github.com/houseofmackee/forkz/issues/9)).
+- The bundled zlib (used by SFTP) is updated for a heap buffer overflow (RUSTSEC-2026-0544), and ureq to 3.5.2.
+
 ## [0.21.0] - 2026-11-14
 
 ### Added
@@ -436,7 +447,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.21.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.21.1...HEAD
+[0.21.1]: https://github.com/houseofmackee/forkz/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/houseofmackee/forkz/compare/v0.20.2...v0.21.0
 [0.20.2]: https://github.com/houseofmackee/forkz/compare/v0.20.1...v0.20.2
 [0.20.1]: https://github.com/houseofmackee/forkz/compare/v0.20.0...v0.20.1

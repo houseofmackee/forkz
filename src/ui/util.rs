@@ -181,6 +181,12 @@ pub fn icon_of(entry: &Entry, local: bool) -> Retained<NSImage> {
         ICONS.with(|icons| icons.borrow_mut().insert(key, icon.clone()));
         return icon;
     }
+    // Folders on other volumes (external drives, shares): their type's
+    // icon. Asking each for its own would read the drive for every row,
+    // and a slow or stalled one would freeze the app.
+    if entry.path.starts_with("/Volumes/") && entry.is_folder_like() && !entry.package {
+        return icon_of(entry, false);
+    }
     let cacheable = entry.kind == EntryKind::File && !entry.package;
     let extension = entry.extension();
     if cacheable && let Some(icon) = ICONS.with(|icons| icons.borrow().get(&extension).cloned()) {
