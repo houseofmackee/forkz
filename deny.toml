@@ -17,6 +17,9 @@ allow = [
     "MPL-2.0",
     # Public domain dedication (notify, for folder watching).
     "CC0-1.0",
+    # Boost Software License (xxhash-rust, used by notify 9): permissive,
+    # OSI approved.
+    "BSL-1.0",
 ]
 confidence-threshold = 0.9
 # Allowed ahead of time; not every allowed license is in use yet.
@@ -29,12 +32,7 @@ allow-wildcard-paths = true
 
 [advisories]
 yanked = "deny"
-ignore = [
-    # chrono is no longer maintained, and has no safe upgrade. It comes in
-    # through suppaftp (FTP), which uses it for file dates (in listings
-    # and MDTM). Remove this once suppaftp moves to jiff or time.
-    { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained (no fix); suppaftp uses it for file dates" },
-]
+ignore = []
 
 [sources]
 unknown-registry = "deny"
