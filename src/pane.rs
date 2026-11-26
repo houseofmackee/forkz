@@ -284,6 +284,11 @@ impl PaneState {
             return false;
         }
         self.meta = meta;
+        // Sorted by it: in order now.
+        if self.sort.key.is_metadata() {
+            self.sort_all();
+            self.filter();
+        }
         true
     }
 
@@ -483,7 +488,15 @@ impl PaneState {
                 entry.size = *size;
             }
         }
-        fs::sort_entries(&mut self.all, self.sort);
+        self.sort_all();
+    }
+
+    /// Sorts the items (by their metadata for those columns).
+    fn sort_all(&mut self) {
+        let (meta, key) = (&self.meta, self.sort.key);
+        fs::sort_entries_by(&mut self.all, self.sort, |a, b| {
+            fs::metadata::compare(key, meta.get(&a.path), meta.get(&b.path))
+        });
     }
 
     pub fn filter_text(&self) -> &str {
@@ -535,7 +548,7 @@ impl PaneState {
 
     pub fn set_sort(&mut self, sort: Sort) {
         self.sort = sort;
-        fs::sort_entries(&mut self.all, sort);
+        self.sort_all();
         self.filter();
     }
 

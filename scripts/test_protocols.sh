@@ -88,6 +88,12 @@ PIDS="$PIDS $!"
 "$DIR/venv/bin/python" scripts/box_mock.py 9777 > "$DIR/box.log" 2>&1 &
 PIDS="$PIDS $!"
 
+# Stand-ins for Dropbox's and Google Drive's APIs.
+"$DIR/venv/bin/python" scripts/dropbox_mock.py 9778 > "$DIR/dropbox.log" 2>&1 &
+PIDS="$PIDS $!"
+"$DIR/venv/bin/python" scripts/gdrive_mock.py 9779 > "$DIR/gdrive.log" 2>&1 &
+PIDS="$PIDS $!"
+
 # A stand-in for AWS's sign-in services (SSO and STS).
 "$DIR/venv/bin/python" scripts/aws_mock.py 9888 > "$DIR/aws.log" 2>&1 &
 PIDS="$PIDS $!"
@@ -102,7 +108,7 @@ if command -v npx >/dev/null 2>&1; then
 fi
 
 # Wait for all of them to listen.
-for port in 2121 2122 2123 8080 9555 9777 9888 ${AZURE:+10000}; do
+for port in 2121 2122 2123 8080 9555 9777 9778 9779 9888 ${AZURE:+10000}; do
     for _ in $(seq 1 50); do
         nc -z 127.0.0.1 "$port" 2>/dev/null && break
         sleep 0.2
@@ -112,7 +118,7 @@ done
 status=0
 FORKZ_TEST_FTP=127.0.0.1:2121 FORKZ_TEST_FTP2=127.0.0.1:2122 FORKZ_TEST_FTP_NO_FXP=127.0.0.1:2123 \
 FORKZ_TEST_DAV=127.0.0.1:8080 FORKZ_TEST_S3=127.0.0.1:9555 FORKZ_TEST_AZURE="$AZURE" FORKZ_TEST_BOX=127.0.0.1:9777 \
-FORKZ_TEST_AWS=127.0.0.1:9888 \
+FORKZ_TEST_AWS=127.0.0.1:9888 FORKZ_TEST_DROPBOX=127.0.0.1:9778 FORKZ_TEST_GDRIVE=127.0.0.1:9779 \
     cargo test --test protocols_live -- --ignored --test-threads=1 "$@" || status=$?
 if [ "$status" -ne 0 ]; then
     for log in ftp ftp2 ftp3 dav s3 azure box; do

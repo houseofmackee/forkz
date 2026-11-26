@@ -286,6 +286,12 @@ define_class!(
     pub struct IconView;
 
     impl IconView {
+        /// A force click on an item: Quick Look, as in Finder.
+        #[unsafe(method(quickLookWithEvent:))]
+        fn quick_look_with_event(&self, event: &NSEvent) {
+            self.force_click(event);
+        }
+
         /// The list's keys: Space, Return, Tab, F-keys (arrows move).
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
@@ -669,6 +675,18 @@ impl IconView {
         if let Some(new) = index.and_then(item) {
             new.show_as_drop_target();
         }
+    }
+
+    /// Quick Look for the item under the pointer (selected first, unless
+    /// it is part of the selection).
+    fn force_click(&self, event: &NSEvent) {
+        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        let Some(entry) = self.indexPathForItemAtPoint(point).and_then(|p| self.entry_at(p.item())) else { return };
+        let Some(pane) = self.pane() else { return };
+        if !pane.selected_paths().contains(&entry.path) {
+            pane.select_paths(std::slice::from_ref(&entry.path));
+        }
+        super::pane_view::show_quick_look(&pane);
     }
 
     /// The folder icon under a drag, if any (with its index).

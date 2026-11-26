@@ -83,6 +83,8 @@ pub enum Command {
     GroupTag,
     UseAsDefaultView,
     ResetFolderView,
+    DisconnectAll,
+    RepeatLast,
     ViewAsList,
     ViewAsIcons,
     ViewAsColumns,
@@ -145,6 +147,54 @@ impl Command {
             Command::ViewAsGallery => Some(ViewMode::Gallery),
             _ => None,
         }
+    }
+
+    /// Whether Repeat Last Command can repeat it: commands that act on the
+    /// selected items (not going places, views, or windows).
+    pub fn repeatable(self) -> bool {
+        use Command::*;
+        matches!(
+            self,
+            Duplicate
+                | CopyToOther
+                | MoveToOther
+                | Trash
+                | NewFolder
+                | NewFile
+                | NewFolderWithSelection
+                | Compress
+                | CopyPath
+                | CopyShareLink
+                | CopyMd5
+                | CopySha1
+                | CopySha256
+                | CopySha384
+                | CopySha512
+                | CreateChecksumFile
+                | VerifyChecksums
+                | Permissions
+                | EditTags
+                | CalculateSizes
+                | OpenWithApp
+                | OpenInTerminal
+                | MultiRename
+                | CompareFiles
+                | GitStage
+                | GitUnstage
+                | MakeSymlink
+                | MakeAlias
+                | MakeHardLink
+                | SetDate
+                | FlattenFolder
+                | ConvertImages
+                | ResizeImages
+                | RotateLeft
+                | RotateRight
+                | MakePdf
+                | SplitFile
+                | JoinFiles
+                | CopyToSeveral
+        )
     }
 
     /// The grouping a Group By command picks.
@@ -236,6 +286,8 @@ impl Command {
         Command::GroupTag,
         Command::UseAsDefaultView,
         Command::ResetFolderView,
+        Command::DisconnectAll,
+        Command::RepeatLast,
         Command::ViewAsList,
         Command::ViewAsIcons,
         Command::ViewAsColumns,
@@ -391,6 +443,8 @@ impl Command {
             Command::GroupTag => "Group by Tags",
             Command::UseAsDefaultView => "Use as Default View",
             Command::ResetFolderView => "Reset to Default View",
+            Command::DisconnectAll => "Disconnect All",
+            Command::RepeatLast => "Repeat Last Command",
             Command::ViewAsList => "as List",
             Command::ViewAsIcons => "as Icons",
             Command::ViewAsColumns => "as Columns",
@@ -529,7 +583,9 @@ impl Command {
             | Command::GroupSize
             | Command::GroupTag
             | Command::UseAsDefaultView
-            | Command::ResetFolderView => ("", cmd),
+            | Command::ResetFolderView
+            | Command::DisconnectAll => ("", cmd),
+            Command::RepeatLast => ("r", shift_cmd | NSEventModifierFlags::Option),
             // As in Finder.
             Command::ViewAsList => ("1", cmd),
             Command::ViewAsIcons => ("2", cmd),

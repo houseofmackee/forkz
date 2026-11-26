@@ -106,6 +106,14 @@ define_class!(
             }
         }
 
+        /// A force click (or a three-finger tap) on an item: Quick Look,
+        /// as in Finder. macOS sends it when System Settings > Trackpad >
+        /// "Look up & data detectors" is set to Force Click.
+        #[unsafe(method(quickLookWithEvent:))]
+        fn quick_look_with_event(&self, event: &NSEvent) {
+            self.force_click(event);
+        }
+
         #[unsafe(method(becomeFirstResponder))]
         fn become_first_responder(&self) -> bool {
             match self.controller() {
@@ -223,6 +231,26 @@ thread_local! {
 }
 
 impl FileTable {
+    /// Quick Look for the item under the pointer (selected first, unless
+    /// it is part of the selection).
+    fn force_click(&self, event: &NSEvent) {
+        let Some(controller) = self.controller() else { return };
+        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        let row = self.rowAtPoint(point);
+        let path = {
+            let state = controller.ivars().state.borrow();
+            usize::try_from(row)
+                .ok()
+                .filter(|r| !is_parent_row(&state, *r))
+                .and_then(|r| entry_at(&state, r).map(|e| e.path.clone()))
+        };
+        let Some(path) = path else { return };
+        if !controller.selected_paths().contains(&path) {
+            controller.select_paths(std::slice::from_ref(&path));
+        }
+        show_quick_look(&controller);
+    }
+
     /// The item a click would rename in place: a single click on the name
     /// (not the icon) of the only item selected, in the focused list.
     fn rename_candidate(&self, event: &NSEvent) -> Option<PathBuf> {
@@ -1325,9 +1353,9 @@ impl PaneController {
             column.setResizingMask(NSTableColumnResizingOptions::UserResizingMask);
             column.headerCell().setAlignment(align);
             // Size and date sort largest/newest first on the first click.
-            let ascending = !matches!(id, "size" | "modified");
+            let ascending = !matches!(id, "size" | "modified" | "dimensions" | "duration" | "opened");
             let unsorted = ["permissions", "owner", "group", "tags", "folder", "git"];
-            if !unsorted.contains(&id) && !crate::fs::metadata::COLUMNS.contains(&id) {
+            if !unsorted.contains(&id) {
                 let prototype = NSSortDescriptor::sortDescriptorWithKey_ascending(Some(&ns(id)), ascending);
                 column.setSortDescriptorPrototype(Some(&prototype));
             }
@@ -3205,6 +3233,22 @@ fn refresh_quick_look(mtm: MainThreadMarker) {
         && panel.isVisible()
     {
         unsafe { panel.reloadData() };
+    }
+}
+
+/// Shows Quick Look for a pane's selection (a force click: it stays open
+/// if it is).
+pub fn show_quick_look(controller: &PaneController) {
+    let mtm = mtm();
+    if !controller.is_local() || controller.selected_paths().is_empty() {
+        return;
+    }
+    let Some(panel) = (unsafe { QLPreviewPanel::sharedPreviewPanel(mtm) }) else { return };
+    controller.focus();
+    if panel.isVisible() {
+        unsafe { panel.reloadData() };
+    } else {
+        panel.makeKeyAndOrderFront(None);
     }
 }
 

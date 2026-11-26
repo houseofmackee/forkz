@@ -109,9 +109,20 @@ jobs:
           # forkz's Box app, built into the binary (Box sign-in).
           FORKZ_BOX_CLIENT_ID: ${{ secrets.BOX_CLIENT_ID }}
           FORKZ_BOX_CLIENT_SECRET: ${{ secrets.BOX_CLIENT_SECRET }}
+          # forkz's Dropbox app (its app key; sign-in uses PKCE, no secret)
+          # and Google app (Google Drive sign-in).
+          FORKZ_DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          FORKZ_GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          FORKZ_GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         run: |
           if [ -z "$FORKZ_BOX_CLIENT_ID" ] || [ -z "$FORKZ_BOX_CLIENT_SECRET" ]; then
             echo "::warning::BOX_CLIENT_ID and BOX_CLIENT_SECRET are not set: this build cannot sign in to Box"
+          fi
+          if [ -z "$FORKZ_DROPBOX_APP_KEY" ]; then
+            echo "::warning::DROPBOX_APP_KEY is not set: this build cannot sign in to Dropbox"
+          fi
+          if [ -z "$FORKZ_GOOGLE_CLIENT_ID" ] || [ -z "$FORKZ_GOOGLE_CLIENT_SECRET" ]; then
+            echo "::warning::GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are not set: this build cannot sign in to Google Drive"
           fi
           if [ -z "$FORKZ_TEAM_ID" ] || [ -z "$FORKZ_NOTARY_KEY_ID" ] || [ -z "$FORKZ_NOTARY_ISSUER" ]; then
             echo "::error::the APPLE_TEAM_ID, NOTARY_KEY_ID and NOTARY_ISSUER_ID variables must be set"

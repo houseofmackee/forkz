@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::io::{self, Cursor, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -220,15 +220,6 @@ fn token_request(agent: &Agent, url: &str, client: &(String, String), grant: &[(
     })
 }
 
-fn random_hex(bytes: usize) -> String {
-    let mut buffer = vec![0u8; bytes];
-    if std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buffer)).is_err() {
-        let nanos = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        buffer = Sha1::digest(nanos.to_le_bytes()).to_vec();
-    }
-    buffer.iter().map(|b| format!("{b:02x}")).collect()
-}
-
 /// The authorization page to open in the browser.
 pub fn authorize_url(client_id: &str, state: &str) -> String {
     format!(
@@ -258,76 +249,12 @@ fn sign_in(agent: &Agent, token_url: &str, client: &(String, String)) -> io::Res
     )
 }
 
-/// The query of a request line ("GET /?code=x&state=y HTTP/1.1").
-pub fn callback_query(request_line: &str) -> HashMap<String, String> {
-    let target = request_line.split_whitespace().nth(1).unwrap_or("");
-    let query = target.split_once('?').map_or("", |(_, q)| q);
-    query
-        .split('&')
-        .filter_map(|pair| pair.split_once('='))
-        .map(|(k, v)| (http::decode(k), http::decode(&v.replace('+', " "))))
-        .collect()
-}
-
-fn reply_page(stream: &mut TcpStream, status: &str, text: &str) {
-    let body = format!(
-        "<!doctype html><meta charset=utf-8><title>forkz</title><body style=\"font: 16px -apple-system, sans-serif; text-align: center; margin-top: 20vh\"><h2>{text}</h2>"
-    );
-    let _ = write!(
-        stream,
-        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.flush();
-    let _ = stream.shutdown(std::net::Shutdown::Write);
-}
+pub use super::oauth::callback_query;
+use super::oauth::random_hex;
 
 /// Waits for the browser to come back with the authorization code.
 pub fn wait_for_code(listener: &TcpListener, state: &str, wait: Duration) -> io::Result<String> {
-    listener.set_nonblocking(true)?;
-    let deadline = Instant::now() + wait;
-    while Instant::now() < deadline {
-        let mut stream = match listener.accept() {
-            Ok((stream, _)) => stream,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        // All of the request is read (closing with some of it unread
-        // would reset the connection, and the browser would not show the
-        // page), but only its first line matters.
-        let mut head = Vec::new();
-        let mut byte = [0u8; 1];
-        while head.len() < 16_384 && !head.ends_with(b"\r\n\r\n") {
-            match stream.read(&mut byte) {
-                Ok(1) => head.push(byte[0]),
-                _ => break,
-            }
-        }
-        let text = String::from_utf8_lossy(&head);
-        let query = callback_query(text.lines().next().unwrap_or(""));
-        if query.get("state").map(String::as_str) != Some(state) {
-            // Something else (the browser asking for an icon).
-            reply_page(&mut stream, "404 Not Found", "Not found");
-            continue;
-        }
-        if let Some(code) = query.get("code") {
-            reply_page(&mut stream, "200 OK", "Signed in to Box. You can close this tab and go back to forkz.");
-            return Ok(code.clone());
-        }
-        let error = query.get("error").cloned().unwrap_or_default();
-        reply_page(&mut stream, "200 OK", "forkz was not allowed to use Box. You can close this tab.");
-        return Err(if error == "access_denied" {
-            io::Error::new(io::ErrorKind::Interrupted, "Cancelled")
-        } else {
-            io::Error::new(io::ErrorKind::PermissionDenied, format!("Box refused the sign-in ({error})."))
-        });
-    }
-    Err(io::Error::new(io::ErrorKind::TimedOut, "Signing in to Box took too long. Try connecting again."))
+    super::oauth::wait_for_code("Box", listener, state, wait)
 }
 
 /// An error from Box's JSON ({"code": .., "message": ..}).
@@ -1050,6 +977,8 @@ impl Vfs for BoxFs {
 
 #[cfg(test)]
 mod tests {
+    use std::net::TcpStream;
+
     use super::*;
 
     #[test]

@@ -40,6 +40,28 @@ impl Meta {
     }
 }
 
+/// Orders two items by a metadata sort key; items without it come first
+/// (last when sorting newest or largest first).
+pub fn compare(key: super::SortKey, a: Option<&Meta>, b: Option<&Meta>) -> std::cmp::Ordering {
+    use super::SortKey;
+    match key {
+        SortKey::Dimensions => {
+            let area = |m: Option<&Meta>| m.and_then(|m| m.pixels).map(|(w, h)| u64::from(w) * u64::from(h));
+            area(a).cmp(&area(b))
+        }
+        SortKey::Duration => {
+            let length = |m: Option<&Meta>| m.and_then(|m| m.duration).unwrap_or(-1.0);
+            length(a).total_cmp(&length(b))
+        }
+        SortKey::Opened => a.and_then(|m| m.last_opened).cmp(&b.and_then(|m| m.last_opened)),
+        SortKey::Comment => {
+            let text = |m: Option<&Meta>| m.and_then(|m| m.comment.as_ref()).map(|c| c.to_lowercase());
+            text(a).cmp(&text(b))
+        }
+        _ => std::cmp::Ordering::Equal,
+    }
+}
+
 /// "0:07", "3:45", "1:02:03".
 pub fn format_duration(seconds: f64) -> String {
     let total = seconds.round().max(0.0) as u64;
@@ -136,5 +158,17 @@ mod tests {
         std::fs::write(&png, data).unwrap();
         assert_eq!(read(&png).pixels, Some((3, 2)));
         assert!(read(&dir.path().join("missing.txt")).is_empty());
+
+        // Sorting: by area, length, date, and comment; nothing first.
+        use crate::fs::SortKey;
+        use std::cmp::Ordering;
+        let big = Meta { pixels: Some((100, 100)), duration: Some(5.0), ..Meta::default() };
+        let small =
+            Meta { pixels: Some((300, 20)), duration: Some(60.0), comment: Some("b".into()), ..Meta::default() };
+        assert_eq!(compare(SortKey::Dimensions, Some(&small), Some(&big)), Ordering::Less);
+        assert_eq!(compare(SortKey::Duration, Some(&small), Some(&big)), Ordering::Greater);
+        assert_eq!(compare(SortKey::Dimensions, None, Some(&small)), Ordering::Less);
+        assert_eq!(compare(SortKey::Comment, Some(&big), Some(&small)), Ordering::Less);
+        assert_eq!(compare(SortKey::Name, Some(&big), Some(&small)), Ordering::Equal);
     }
 }

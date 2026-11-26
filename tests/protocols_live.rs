@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use forkz::fs::ops::{self, Answer, CancelToken, Conflict, ErrorAnswer, Job, JobKind, Observer, Progress, Resolution};
 use forkz::vfs::known_hosts::Status;
 use forkz::vfs::sftp::Prompter;
-use forkz::vfs::{self, FsRef, Vfs, aws, azure, boxcom, ftp, s3, webdav};
+use forkz::vfs::{self, FsRef, Vfs, aws, azure, boxcom, dropbox, ftp, gdrive, s3, webdav};
 
 /// Trusts certificates and gives the password when asked.
 struct Answers {
@@ -130,10 +130,13 @@ fn exercise(remote: FsRef, base: &Path, folders_rename: bool) {
     std::fs::write(&resume_src, &resume_data).unwrap();
     let old = SystemTime::now() - Duration::from_secs(600);
     std::fs::File::options().write(true).open(&resume_src).unwrap().set_modified(old).unwrap();
-    let mut partial = remote.open_write_sized(&base.join(".resume.bin.forkz-partial"), Some(500_000)).unwrap();
-    partial.write_all(&resume_data[..500_000]).unwrap();
-    partial.flush().unwrap();
-    drop(partial);
+    // (Cloud storage is written straight to the name: no partial file.)
+    if !remote.writes_whole() {
+        let mut partial = remote.open_write_sized(&base.join(".resume.bin.forkz-partial"), Some(500_000)).unwrap();
+        partial.write_all(&resume_data[..500_000]).unwrap();
+        partial.flush().unwrap();
+        drop(partial);
+    }
     run(&Job::between(JobKind::Copy, vfs::local(), vec![resume_src.clone()], remote.clone(), base.to_path_buf()));
     assert_eq!(read_all(&remote, &base.join("resume.bin")), resume_data);
     assert!(!names(&remote, base).iter().any(|(n, _)| n.contains("forkz-partial")));
@@ -662,4 +665,105 @@ fn aws_profiles() {
     assert_eq!(*renewals.lock().unwrap(), 1, "renewed keys last");
     fs.remove_file(Path::new("/forkz-profile/a.txt")).unwrap();
     fs.remove_dir(Path::new("/forkz-profile")).unwrap();
+}
+
+#[test]
+#[ignore = "needs the Dropbox stand-in (scripts/test_protocols.sh)"]
+fn dropbox_api() {
+    let Some((host, port)) = address("FORKZ_TEST_DROPBOX") else { return };
+    let base = format!("http://{host}:{port}");
+    let saved: std::sync::Arc<Mutex<Vec<String>>> = Default::default();
+    let keep = saved.clone();
+    let params = dropbox::DropboxParams {
+        refresh_token: Some("refresh-dbx".into()),
+        save_token: Some(std::sync::Arc::new(move |token: &str| keep.lock().unwrap().push(token.to_string()))),
+        timeout: Duration::from_secs(10),
+        service: dropbox::Service {
+            api: format!("{base}/2"),
+            content: format!("{base}/2"),
+            token: format!("{base}/oauth2/token"),
+            authorize: format!("{base}/authorize"),
+            // Files over 1 MB go in parts.
+            simple_upload: 1_000_000,
+            app_key: Some("forkz-test".into()),
+        },
+        browser: false,
+    };
+    let fs: FsRef = dropbox::connect(params.clone()).unwrap();
+    assert_eq!(fs.label(), "Dropbox: tester@example.com");
+    assert_eq!(*saved.lock().unwrap(), ["refresh-dbx"]);
+    exercise(fs.clone(), Path::new("/dropbox-run"), true);
+    // Copies on Dropbox's servers, also over an existing file.
+    fs.create_dir(Path::new("/dbx-copy")).unwrap();
+    for (name, text) in [("a.txt", b"one"), ("b.txt", b"two")] {
+        let mut file = fs.open_write_sized(&Path::new("/dbx-copy").join(name), Some(3)).unwrap();
+        file.write_all(text).unwrap();
+        file.flush().unwrap();
+    }
+    fs.copy_on_server(Path::new("/dbx-copy/a.txt"), Path::new("/dbx-copy/b.txt")).unwrap().unwrap();
+    assert_eq!(read_all(&fs, Path::new("/dbx-copy/b.txt")), b"one");
+    // A link that cannot expire on this (basic) account.
+    let (link, expires) = fs.share_link(Path::new("/dbx-copy/a.txt"), Duration::from_secs(3600)).unwrap();
+    assert!(link.starts_with("https://www.dropbox.com/s/") && !expires, "{link}");
+    // Paging: more than one page of items.
+    for n in 0..5 {
+        fs.create_dir(&Path::new("/dbx-copy").join(format!("f{n}"))).unwrap();
+    }
+    assert_eq!(names(&fs, Path::new("/dbx-copy")).len(), 7);
+    fs.remove_dir(Path::new("/dbx-copy")).unwrap();
+    assert_eq!(fs.stat(Path::new("/dbx-copy")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    // A refused sign-in says so (and asks to sign in again in the app).
+    let stale = dropbox::DropboxParams { refresh_token: Some("revoked".into()), ..params };
+    assert_eq!(dropbox::connect(stale).err().map(|e| e.kind()), Some(io::ErrorKind::PermissionDenied));
+}
+
+#[test]
+#[ignore = "needs the Google Drive stand-in (scripts/test_protocols.sh)"]
+fn google_drive() {
+    let Some((host, port)) = address("FORKZ_TEST_GDRIVE") else { return };
+    let base = format!("http://{host}:{port}");
+    let params = gdrive::DriveParams {
+        refresh_token: Some("refresh-gd".into()),
+        save_token: None,
+        timeout: Duration::from_secs(10),
+        service: gdrive::Service {
+            api: format!("{base}/drive/v3"),
+            upload: format!("{base}/upload/drive/v3"),
+            token: format!("{base}/token"),
+            authorize: format!("{base}/auth"),
+            client: Some(("forkz-test".into(), "test-secret".into())),
+            // Pieces of 256 KB, so uploads take several.
+            chunk: 256 * 1024,
+        },
+        browser: false,
+    };
+    let fs: FsRef = gdrive::connect(params.clone()).unwrap();
+    assert_eq!(fs.label(), "Google Drive: tester@example.com");
+    // Two items of one name show apart; a Google spreadsheet shows as an
+    // Excel file and is exported when read.
+    let top = names(&fs, Path::new("/"));
+    for expected in ["dup.txt", "dup (2).txt", "Budget.xlsx"] {
+        assert!(top.contains(&(expected.to_string(), false)), "{top:?}");
+    }
+    assert_eq!(read_all(&fs, Path::new("/dup.txt")), b"first");
+    assert_eq!(read_all(&fs, Path::new("/dup (2).txt")), b"second");
+    assert!(String::from_utf8(read_all(&fs, Path::new("/Budget.xlsx"))).unwrap().contains("spreadsheetml"));
+    exercise(fs.clone(), Path::new("/drive-run"), true);
+    // Copies on Google's servers; dates; links.
+    fs.create_dir(Path::new("/gd-copy")).unwrap();
+    let mut file = fs.open_write_sized(Path::new("/gd-copy/a.txt"), Some(3)).unwrap();
+    file.write_all(b"one").unwrap();
+    file.flush().unwrap();
+    drop(file);
+    fs.copy_on_server(Path::new("/gd-copy/a.txt"), Path::new("/gd-copy/c.txt")).unwrap().unwrap();
+    assert_eq!(read_all(&fs, Path::new("/gd-copy/c.txt")), b"one");
+    let date = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    fs.set_attributes(Path::new("/gd-copy/c.txt"), Some(date), None).unwrap();
+    assert_eq!(fs.stat(Path::new("/gd-copy/c.txt")).unwrap().modified, Some(date));
+    let (link, expires) = fs.share_link(Path::new("/gd-copy/c.txt"), Duration::from_secs(3600)).unwrap();
+    assert!(link.starts_with("https://drive.google.com/file/d/") && !expires, "{link}");
+    fs.remove_dir(Path::new("/gd-copy")).unwrap();
+    assert_eq!(fs.stat(Path::new("/gd-copy")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    let stale = gdrive::DriveParams { refresh_token: Some("revoked".into()), ..params };
+    assert_eq!(gdrive::connect(stale).err().map(|e| e.kind()), Some(io::ErrorKind::PermissionDenied));
 }

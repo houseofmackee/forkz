@@ -2,8 +2,13 @@
 //! its own, on the Mac, on servers, and in archives. Up to 64 MB is read
 //! (in the background); text is decoded as UTF-8, UTF-16, or Latin-1, and
 //! files that look binary open in hex. Command-F searches the text.
+//!
+//! Code and settings files are highlighted. Edit makes the text editable
+//! (files read whole, not in archives): Command-S saves it, in the
+//! encoding it had, on the Mac or the server; closing asks about unsaved
+//! changes.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -15,7 +20,8 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{
     NSBackingStoreType, NSButton, NSControlStateValueOn, NSControlTextEditingDelegate, NSFont, NSScrollView,
     NSSegmentedControl, NSStackView, NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
-    NSTextField, NSTextView, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask,
+    NSTextDelegate, NSTextField, NSTextView, NSTextViewDelegate, NSUserInterfaceLayoutOrientation, NSView, NSWindow,
+    NSWindowDelegate, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSArray, NSEdgeInsets, NSInteger, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize,
@@ -39,6 +45,8 @@ struct Parts {
     window: Retained<NSWindow>,
     mode: Retained<NSSegmentedControl>,
     wrap: Retained<NSButton>,
+    edit: Retained<NSButton>,
+    save: Retained<NSButton>,
     status: Retained<NSTextField>,
     text_scroll: Retained<NSScrollView>,
     text: Retained<NSTextView>,
@@ -52,6 +60,15 @@ pub struct ViewerIvars {
     /// "12 KB", and "the first 64 MB of 2.1 GB" when cut off.
     size_note: RefCell<String>,
     encoding: RefCell<&'static str>,
+    fs: FsRef,
+    path: PathBuf,
+    /// The whole file was read (it can be edited).
+    complete: Cell<bool>,
+    /// Changed since opened or saved.
+    edited: Cell<bool>,
+    language: Cell<Option<crate::fs::highlight::Language>>,
+    /// Counts edits, so highlighting waits for a pause in typing.
+    edits: Cell<u64>,
 }
 
 define_class!(
@@ -71,13 +88,38 @@ define_class!(
         fn wrap_changed(&self, _sender: Option<&AnyObject>) {
             self.apply_wrap();
         }
+
+        #[unsafe(method(editChanged:))]
+        fn edit_changed(&self, _sender: Option<&AnyObject>) {
+            self.apply_editing();
+        }
+
+        #[unsafe(method(saveFile:))]
+        fn save_file(&self, _sender: Option<&AnyObject>) {
+            self.save(false);
+        }
     }
+
+    unsafe impl NSTextDelegate for Viewer {
+        #[unsafe(method(textDidChange:))]
+        fn text_did_change(&self, _notification: &NSNotification) {
+            self.changed();
+        }
+    }
+
+    unsafe impl NSTextViewDelegate for Viewer {}
 
     unsafe impl NSObjectProtocol for Viewer {}
 
     unsafe impl NSControlTextEditingDelegate for Viewer {}
 
     unsafe impl NSWindowDelegate for Viewer {
+        /// Unsaved changes: save them, drop them, or stay.
+        #[unsafe(method(windowShouldClose:))]
+        fn window_should_close(&self, _sender: &NSWindow) -> bool {
+            self.may_close()
+        }
+
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _notification: &NSNotification) {
             let me = self as *const Viewer as usize;
@@ -118,6 +160,12 @@ pub fn open(fs: FsRef, path: PathBuf, size: u64) {
         bytes: RefCell::new(Rc::new(Vec::new())),
         size_note: RefCell::new(String::new()),
         encoding: RefCell::new(""),
+        fs: fs.clone(),
+        path: path.clone(),
+        complete: Cell::new(false),
+        edited: Cell::new(false),
+        language: Cell::new(crate::fs::highlight::language_for(&crate::pane::title_of(&path))),
+        edits: Cell::new(0),
     });
     let viewer: Retained<Viewer> = unsafe { msg_send![super(viewer), init] };
     viewer.build(&path, mtm);
@@ -179,11 +227,27 @@ impl Viewer {
             NSButton::checkboxWithTitle_target_action(&ns("Wrap Lines"), Some(self), Some(sel!(wrapChanged:)), mtm)
         };
         wrap.setState(NSControlStateValueOn);
+        let edit = unsafe {
+            NSButton::checkboxWithTitle_target_action(&ns("Edit"), Some(self), Some(sel!(editChanged:)), mtm)
+        };
+        edit.setEnabled(false);
+        let save =
+            unsafe { NSButton::buttonWithTitle_target_action(&ns("Save"), Some(self), Some(sel!(saveFile:)), mtm) };
+        save.setKeyEquivalent(&ns("s"));
+        save.setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags::Command);
+        save.setEnabled(false);
+        save.setHidden(true);
         let status = small_label("Loading\u{2026}", mtm);
         status.setTextColor(Some(&objc2_app_kit::NSColor::secondaryLabelColor()));
         status.setContentHuggingPriority_forOrientation(1.0, objc2_app_kit::NSLayoutConstraintOrientation::Horizontal);
         let bar = NSStackView::stackViewWithViews(
-            &NSArray::from_slice(&[&*mode as &NSView, &*wrap as &NSView, &*status as &NSView]),
+            &NSArray::from_slice(&[
+                &*mode as &NSView,
+                &*wrap as &NSView,
+                &*edit as &NSView,
+                &*save as &NSView,
+                &*status as &NSView,
+            ]),
             mtm,
         );
         bar.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
@@ -200,6 +264,14 @@ impl Viewer {
         text.setUsesFindBar(true);
         text.setIncrementalSearchingEnabled(true);
         text.setTextContainerInset(NSSize::new(6.0, 6.0));
+        text.setAllowsUndo(true);
+        // Code is typed as it is: no smart quotes, dashes, or corrections.
+        text.setAutomaticQuoteSubstitutionEnabled(false);
+        text.setAutomaticDashSubstitutionEnabled(false);
+        text.setAutomaticTextReplacementEnabled(false);
+        text.setAutomaticSpellingCorrectionEnabled(false);
+        text.setContinuousSpellCheckingEnabled(false);
+        text.setDelegate(Some(ProtocolObject::from_ref(self)));
 
         let hex = NSTableView::new(mtm);
         for (id, title, width) in [("offset", "Offset", 86.0), ("hex", "Hex", 400.0), ("ascii", "Characters", 150.0)] {
@@ -239,6 +311,8 @@ impl Viewer {
             window: window.clone(),
             mode,
             wrap,
+            edit,
+            save,
             status,
             text_scroll,
             text,
@@ -266,13 +340,172 @@ impl Viewer {
             shown
         };
         let binary = view::looks_binary(&bytes);
-        let (text, encoding) = view::decode(&bytes);
+        let complete = (bytes.len() as u64) >= size;
+        let (text, encoding) = view::decode_with(&bytes, !complete);
+        // Editable when read whole and not in an archive.
+        self.ivars().complete.set(complete);
+        parts.edit.setEnabled(complete && !self.ivars().fs.read_only());
         *self.ivars().encoding.borrow_mut() = encoding;
         *self.ivars().bytes.borrow_mut() = Rc::new(bytes);
         parts.text.setString(&ns(&text));
         parts.hex.reloadData();
         parts.mode.setSelectedSegment(isize::from(binary));
         self.show_mode();
+        self.highlight();
+    }
+
+    /// Colors code (whole files up to 2 MB).
+    fn highlight(&self) {
+        let Some(language) = self.ivars().language.get() else { return };
+        let text = &self.parts().text;
+        let Some(storage) = (unsafe { text.textStorage() }) else { return };
+        let string = storage.string().to_string();
+        if string.len() > 2_000_000 {
+            return;
+        }
+        let spans = crate::fs::highlight::highlight(&string, &language);
+        let key = unsafe { objc2_app_kit::NSForegroundColorAttributeName };
+        storage.beginEditing();
+        let all = objc2_foundation::NSRange::new(0, storage.length());
+        unsafe { storage.addAttribute_value_range(key, &objc2_app_kit::NSColor::textColor(), all) };
+        for (start, length, kind) in spans {
+            let color = color_of(kind);
+            unsafe { storage.addAttribute_value_range(key, &color, objc2_foundation::NSRange::new(start, length)) };
+        }
+        storage.endEditing();
+    }
+
+    /// Edit turned on or off.
+    fn apply_editing(&self) {
+        let parts = self.parts();
+        let on = parts.edit.state() == NSControlStateValueOn;
+        if !on && self.ivars().edited.get() && !self.may_close() {
+            parts.edit.setState(NSControlStateValueOn);
+            return;
+        }
+        parts.text.setEditable(on);
+        parts.save.setHidden(!on);
+        parts.mode.setEnabled(!on);
+        if on {
+            parts.mode.setSelectedSegment(0);
+            self.show_mode();
+        }
+    }
+
+    /// The text was typed in.
+    fn changed(&self) {
+        let ivars = self.ivars();
+        ivars.edited.set(true);
+        let parts = self.parts();
+        parts.window.setDocumentEdited(true);
+        parts.save.setEnabled(true);
+        // Highlight again after a pause in typing.
+        let serial = ivars.edits.get() + 1;
+        ivars.edits.set(serial);
+        let me = self as *const Viewer as usize;
+        let when = dispatch2::DispatchTime::try_from(std::time::Duration::from_millis(300))
+            .unwrap_or(dispatch2::DispatchTime::NOW);
+        let _ = DispatchQueue::main().after(when, move || {
+            let viewer = VIEWERS.with(|v| v.borrow().iter().find(|x| Retained::as_ptr(x) as usize == me).cloned());
+            if let Some(viewer) = viewer
+                && viewer.ivars().edits.get() == serial
+            {
+                viewer.highlight();
+            }
+        });
+    }
+
+    /// Saves the text (in the background), in the file's encoding; then
+    /// closes the window if `then_close`.
+    fn save(&self, then_close: bool) {
+        let ivars = self.ivars();
+        if !ivars.edited.get() || !ivars.complete.get() {
+            return;
+        }
+        let parts = self.parts();
+        let text = parts.text.string().to_string();
+        let original = ivars.bytes.borrow().clone();
+        let bytes = match view::encode(&text, &original) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                super::dialogs::show_error("The file could not be saved.".into(), e);
+                return;
+            }
+        };
+        parts.save.setEnabled(false);
+        parts.status.setStringValue(&ns("Saving\u{2026}"));
+        let (fs, path) = (ivars.fs.clone(), ivars.path.clone());
+        let me = self as *const Viewer as usize;
+        std::thread::spawn(move || {
+            let result = fs.open_write_sized(&path, Some(bytes.len() as u64)).and_then(|mut writer| {
+                std::io::Write::write_all(&mut writer, &bytes)?;
+                std::io::Write::flush(&mut writer)
+            });
+            DispatchQueue::main().exec_async(move || {
+                let viewer = VIEWERS.with(|v| v.borrow().iter().find(|x| Retained::as_ptr(x) as usize == me).cloned());
+                let Some(viewer) = viewer else { return };
+                viewer.saved(result, bytes, then_close);
+            });
+        });
+    }
+
+    fn saved(&self, result: std::io::Result<()>, bytes: Vec<u8>, then_close: bool) {
+        let parts = self.parts();
+        let ivars = self.ivars();
+        match result {
+            Ok(()) => {
+                let size = crate::fs::format_size(bytes.len() as u64);
+                *ivars.size_note.borrow_mut() = size;
+                *ivars.bytes.borrow_mut() = Rc::new(bytes);
+                parts.hex.reloadData();
+                ivars.edited.set(false);
+                parts.window.setDocumentEdited(false);
+                let name = crate::pane::title_of(&ivars.path);
+                super::oplog::record(super::oplog::Kind::Change, format!("Saved \u{201c}{name}\u{201d}"), "");
+                self.show_mode();
+                super::server_folder_changed(&ivars.fs, ivars.path.parent().unwrap_or(Path::new("/")));
+                if then_close {
+                    parts.window.close();
+                }
+            }
+            Err(e) => {
+                parts.save.setEnabled(true);
+                self.show_mode();
+                let name = crate::pane::title_of(&ivars.path);
+                super::dialogs::show_error(format!("\u{201c}{name}\u{201d} could not be saved."), e.to_string());
+            }
+        }
+    }
+
+    /// Whether the window may close (or Edit be turned off): asks about
+    /// unsaved changes.
+    fn may_close(&self) -> bool {
+        if !self.ivars().edited.get() {
+            return true;
+        }
+        let name = crate::pane::title_of(&self.ivars().path);
+        let alert = objc2_app_kit::NSAlert::new(self.mtm());
+        alert.setMessageText(&ns(&format!("Save the changes to \u{201c}{name}\u{201d}?")));
+        alert.setInformativeText(&ns("Your changes are lost if you don\u{2019}t save them."));
+        alert.addButtonWithTitle(&ns("Save"));
+        alert.addButtonWithTitle(&ns("Cancel"));
+        let dont = alert.addButtonWithTitle(&ns("Don\u{2019}t Save"));
+        dont.setKeyEquivalent(&ns("d"));
+        dont.setKeyEquivalentModifierMask(objc2_app_kit::NSEventModifierFlags::Command);
+        let answer = alert.runModal();
+        match answer {
+            _ if answer == objc2_app_kit::NSAlertFirstButtonReturn => {
+                // Closes once saved.
+                self.save(true);
+                false
+            }
+            _ if answer == objc2_app_kit::NSAlertThirdButtonReturn => {
+                self.ivars().edited.set(false);
+                self.parts().window.setDocumentEdited(false);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn show_mode(&self) {
@@ -282,10 +515,11 @@ impl Viewer {
         parts.hex_scroll.setHidden(!hex);
         parts.wrap.setHidden(hex);
         let note = self.ivars().size_note.borrow().clone();
+        let language = self.ivars().language.get().map(|l| format!(", {}", l.name)).unwrap_or_default();
         let status = if hex {
             format!("{note}, {} bytes a row", ROW)
         } else {
-            format!("{note}, {}", self.ivars().encoding.borrow())
+            format!("{note}, {}{language}", self.ivars().encoding.borrow())
         };
         parts.status.setStringValue(&ns(&status));
         let focus: &NSView = if hex { &parts.hex } else { &parts.text };
@@ -338,5 +572,19 @@ impl Viewer {
         };
         field.setStringValue(&ns(&text));
         Some(Retained::into_super(Retained::into_super(field)))
+    }
+}
+
+/// The color of a highlighted kind (macOS's colors, for light and dark).
+fn color_of(kind: crate::fs::highlight::Kind) -> Retained<objc2_app_kit::NSColor> {
+    use crate::fs::highlight::Kind;
+    use objc2_app_kit::NSColor;
+    match kind {
+        Kind::Comment => NSColor::systemGrayColor(),
+        Kind::String => NSColor::systemRedColor(),
+        Kind::Number => NSColor::systemPurpleColor(),
+        Kind::Keyword => NSColor::systemPinkColor(),
+        Kind::Key => NSColor::systemTealColor(),
+        Kind::Heading => NSColor::systemBlueColor(),
     }
 }

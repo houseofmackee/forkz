@@ -2,7 +2,15 @@
 
 /// Text from bytes: UTF-16 with a byte order mark, UTF-8, or Latin-1 (every
 /// byte a character) for the rest. Returns the text and the encoding's name.
+/// Bytes that may be cut off (at the viewer's size limit) may end in the
+/// middle of a UTF-8 character.
 pub fn decode(bytes: &[u8]) -> (String, &'static str) {
+    decode_with(bytes, true)
+}
+
+/// Like `decode`, for a whole file (`cut_off` false: an incomplete UTF-8
+/// character at the end means it is Latin-1).
+pub fn decode_with(bytes: &[u8], cut_off: bool) -> (String, &'static str) {
     let utf16 = |rest: &[u8], le: bool| -> String {
         let units: Vec<u16> = rest
             .as_chunks::<2>()
@@ -19,11 +27,34 @@ pub fn decode(bytes: &[u8]) -> (String, &'static str) {
         _ => match std::str::from_utf8(bytes) {
             Ok(text) => (text.to_string(), "UTF-8"),
             // A file cut off at the size limit may end mid-character.
-            Err(e) if e.valid_up_to() + 4 > bytes.len() && e.error_len().is_none() => {
+            Err(e) if cut_off && e.valid_up_to() + 4 > bytes.len() && e.error_len().is_none() => {
                 (String::from_utf8_lossy(bytes).into_owned(), "UTF-8")
             }
             Err(_) => (bytes.iter().map(|b| char::from(*b)).collect(), "Latin-1"),
         },
+    }
+}
+
+/// Text as bytes again, the way the file had it (`original`): UTF-16 in
+/// its byte order and UTF-8 with or without a byte order mark, or Latin-1.
+/// An error says which character Latin-1 cannot hold.
+pub fn encode(text: &str, original: &[u8]) -> Result<Vec<u8>, String> {
+    let utf16 = |le: bool| -> Vec<u8> {
+        let mut out = if le { vec![0xFF, 0xFE] } else { vec![0xFE, 0xFF] };
+        for unit in text.encode_utf16() {
+            out.extend(if le { unit.to_le_bytes() } else { unit.to_be_bytes() });
+        }
+        out
+    };
+    match (original, decode_with(original, false).1) {
+        ([0xFF, 0xFE, ..], _) => Ok(utf16(true)),
+        ([0xFE, 0xFF, ..], _) => Ok(utf16(false)),
+        ([0xEF, 0xBB, 0xBF, ..], _) => Ok([&[0xEF, 0xBB, 0xBF][..], text.as_bytes()].concat()),
+        (_, "Latin-1") => text
+            .chars()
+            .map(|c| u8::try_from(u32::from(c)).map_err(|_| format!("\u{201c}{c}\u{201d} cannot be saved in Latin-1.")))
+            .collect(),
+        _ => Ok(text.as_bytes().to_vec()),
     }
 }
 
@@ -63,6 +94,22 @@ pub fn hex_rows(len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encodes_as_the_file_was() {
+        for original in [
+            "plain \u{e9}".as_bytes().to_vec(),
+            [&[0xEF, 0xBB, 0xBF][..], "bom \u{e9}".as_bytes()].concat(),
+            vec![0xFF, 0xFE, b'h', 0, b'i', 0],
+            vec![0xFE, 0xFF, 0, b'h', 0, b'i'],
+            vec![b'c', b'a', b'f', 0xE9],
+        ] {
+            let (text, _) = decode_with(&original, false);
+            assert_eq!(encode(&text, &original).unwrap(), original);
+        }
+        let latin = [b'a', 0xE9];
+        assert!(encode("a \u{1f600}", &latin).is_err());
+    }
 
     #[test]
     fn decodes_common_encodings() {

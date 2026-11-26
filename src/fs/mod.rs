@@ -8,6 +8,7 @@ pub mod duplicates;
 pub mod filters;
 pub mod git;
 pub mod glob;
+pub mod highlight;
 pub mod icloud;
 pub mod metadata;
 pub mod ops;
@@ -194,20 +195,46 @@ pub enum SortKey {
     Size,
     Modified,
     Kind,
+    /// What Spotlight knows (folders on the Mac): sorted by the pane,
+    /// which has it.
+    Dimensions,
+    Duration,
+    Opened,
+    Comment,
 }
 
 impl SortKey {
+    pub const ALL: [SortKey; 8] = [
+        SortKey::Name,
+        SortKey::Size,
+        SortKey::Modified,
+        SortKey::Kind,
+        SortKey::Dimensions,
+        SortKey::Duration,
+        SortKey::Opened,
+        SortKey::Comment,
+    ];
+
     pub fn id(self) -> &'static str {
         match self {
             SortKey::Name => "name",
             SortKey::Size => "size",
             SortKey::Modified => "modified",
             SortKey::Kind => "kind",
+            SortKey::Dimensions => "dimensions",
+            SortKey::Duration => "duration",
+            SortKey::Opened => "opened",
+            SortKey::Comment => "comment",
         }
     }
 
     pub fn from_id(id: &str) -> Option<SortKey> {
-        [SortKey::Name, SortKey::Size, SortKey::Modified, SortKey::Kind].into_iter().find(|k| k.id() == id)
+        SortKey::ALL.into_iter().find(|k| k.id() == id)
+    }
+
+    /// Sorted by metadata the entries do not carry.
+    pub fn is_metadata(self) -> bool {
+        matches!(self, SortKey::Dimensions | SortKey::Duration | SortKey::Opened | SortKey::Comment)
     }
 }
 
@@ -226,6 +253,12 @@ impl Default for Sort {
 /// Sorts like Finder: folders first, then by the key; ties by name.
 /// Descending order reverses the key, but folders stay first.
 pub fn sort_entries(entries: &mut [Entry], sort: Sort) {
+    sort_entries_by(entries, sort, |_, _| Ordering::Equal);
+}
+
+/// Sorts entries; `metadata` compares two by a metadata key (the others
+/// are compared here).
+pub fn sort_entries_by(entries: &mut [Entry], sort: Sort, metadata: impl Fn(&Entry, &Entry) -> Ordering) {
     entries.sort_by(|a, b| {
         let folders = b.is_folder_like().cmp(&a.is_folder_like());
         if folders != Ordering::Equal {
@@ -236,6 +269,7 @@ pub fn sort_entries(entries: &mut [Entry], sort: Sort) {
             SortKey::Size => a.size.cmp(&b.size),
             SortKey::Modified => a.modified.cmp(&b.modified),
             SortKey::Kind => a.extension().cmp(&b.extension()),
+            _ => metadata(a, b),
         };
         let ordering = by_key.then_with(|| natural_cmp(&a.name, &b.name));
         if sort.ascending { ordering } else { ordering.reverse() }

@@ -15,7 +15,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - Two panes side by side, or stacked one above the other (View > Stack Panes), each with tabs, and a sidebar with favorites, smart folders, iCloud Drive, volumes, Network (the file servers on your network), saved sites, synclets, and Finder tags. Drag items in the sidebar to put them in the order you like, within each section. The sidebar, either pane, and the preview pane can each be hidden.
 - A line in your accent color along the top of the active pane shows where commands, new connections, and Go to Folder will open. Tabs show a close button when the pointer is over them.
 - A sortable list (name, date modified, size, kind, Git status, and more; on the Mac also image and video dimensions, duration, Date Last Opened, and Finder comments) with ".." on top to go up, groups by kind, date, size, or tag, a clickable path bar, a filter field, and a status line with the selection size and free space; or icons, or columns, as in Finder
-- A viewer for text and hex (F3), and filename filters that hide items in the lists and leave them out of copies
+- A viewer for text and hex (F3) that highlights code and settings files and can edit them (on the Mac and on servers), and filename filters that hide items in the lists and leave them out of copies
 - Copy, move, duplicate, trash, rename, new file, and new folder (right-click Copy To and Move To send items to the other pane, another open tab, or a folder you choose), with progress, Stop, Pause, and a conflict dialog (Replace, Replace if Older, Keep Both, Skip, Merge, and "Apply to all")
 - Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files. Pasting an image (a screenshot, or an image copied in a browser) saves it as a PNG file in the pane's folder
 - Undo and Redo (Command-Z and Shift-Command-Z) for renames, moves, Move to Trash (items are put back), new files and folders, and copies on the Mac, as in Finder; the Edit menu names what Undo will do
@@ -24,7 +24,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - File > Images: convert images to JPEG, PNG, HEIC, TIFF, GIF, or BMP, make smaller copies (at most 640 to 3840 pixels), rotate them, or make one PDF of them, a page each
 - File > Split File and Join Files: a large file in parts of any size ("movie.mkv.001", ".002", and so on, as 7-Zip and `split` make them), and back
 - Commands > Copy to Several Folders: one copy of the selection to each folder checked (the other pane's, favorites, recent folders, or others you pick)
-- Quick Look, a hidden files toggle, and live updates when folders change
+- Quick Look (Space, Command-Y, or a force click on the trackpad, as in Finder), a hidden files toggle, and live updates when folders change
 - Flat View (Option-Command-F): every file in a folder and the folders in it, in one list
 - Reopen Closed Tab (Shift-Command-T), Move Tab to Other Pane, Select Same Type, and the mouse's Back and Forward buttons
 - Go > Recent Folders: the folders you were in lately, on the Mac and on servers
@@ -44,7 +44,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 
 ![Column view in the top pane, and below it a list grouped by kind with a Git column showing modified and untracked items](docs/images/columns.png)
 
-Each pane shows a list (Command-1), icons (Command-2), columns (Command-3), or a gallery (Command-4), as in Finder. The gallery shows a large preview of the selected item (Quick Look, or its icon for items on servers and in archives), its name and details, and a strip of the folder's items below; the arrow keys move along the strip. Typing a name selects the item in every view. Icons and the gallery's strip show thumbnails of the files' contents, and icons grow with the text size (zoom); in column view, choosing a folder opens its contents in the next column, and the arrow keys browse. In every view, commands, Quick Look, the preview pane, and drag and drop work as in the list: drag items out to another pane or to Finder, or drop them on a folder (or a column or the view itself) to copy or move them there. As in Finder, dragging moves items on the same disk and copies them to another (Option copies, Command moves); Settings > General > Dragging can make drags between panes always move, on this Mac or within one server. View > Group By groups the list by kind, date modified (Today, Yesterday, Previous 7 Days, and so on), or size, keeping the sort within each group. View > Stack Panes puts the panes one above the other.
+Each pane shows a list (Command-1), icons (Command-2), columns (Command-3), or a gallery (Command-4), as in Finder. The gallery shows a large preview of the selected item (Quick Look, or its icon for items on servers and in archives), its name and details, and a strip of the folder's items below; the arrow keys move along the strip. Typing a name selects the item in every view. Icons and the gallery's strip show thumbnails of the files' contents, and icons grow with the text size (zoom); in column view, choosing a folder opens its contents in the next column, and the arrow keys browse. In every view, commands, Quick Look, the preview pane, and drag and drop work as in the list: drag items out to another pane or to Finder, or drop them on a folder (or a column or the view itself) to copy or move them there. As in Finder, dragging moves items on the same disk and copies them to another (Option copies, Command moves); Settings > General > Dragging can make drags between panes always move, on this Mac or within one server. View > Group By groups the list by kind, date modified (Today, Yesterday, Previous 7 Days, and so on), size, or tag, keeping the sort within each group. View > Stack Panes puts the panes one above the other.
 
 In a Git repository, the Git column (View > Columns) shows whether each item is modified, added, untracked, renamed, ignored, or in conflict; a folder shows the most important change inside it. It uses Homebrew's git, or Apple's when the command line tools are installed. The Git menu (and the context menu's Git submenu) stages and unstages the selected items, commits with a message (optionally staging everything first), pulls, pushes (the first push of a branch sets its upstream), and switches branches or makes a new one; the end of the status line shows the branch and how far it is ahead of or behind its upstream ("main ↑2"), as a menu of the local branches to switch to. git never stops to ask for a password or open an editor: it uses your keychain and SSH agent, and if anything else is needed, its message says so.
 
@@ -133,6 +133,8 @@ sidebar = "#eee8d5"
 
 View (F3) opens a file in a window of its own, on the Mac, on a server, or in an archive: as text (UTF-8, UTF-16, or Latin-1, with Command-F to search and optional line wrapping) or as hex, with offsets and characters. Files that look binary open in hex. Up to 64 MB of a file is read.
 
+Code and settings files are highlighted: comments, strings, numbers, keywords, and keys, for Rust, Python, JavaScript and TypeScript, Swift, C and Objective-C, Go, Java and Kotlin, Ruby, PHP, shell scripts, SQL, CSS, Lua, JSON, YAML, TOML and INI, HTML and XML, and Markdown. Check Edit to change the text (with Undo); Command-S saves it, in the encoding the file had, on the Mac or the server. Closing with unsaved changes asks whether to save them.
+
 ### Filename filters
 
 ![Settings > Filters with filters for build output, macOS metadata, logs, and version control folders](docs/images/filters.png)
@@ -203,11 +205,13 @@ Choose the protocol in Connect to Server; sites keep it.
 - **AWS profiles:** instead of keys, choose an AWS profile (from `~/.aws/config` and `~/.aws/credentials`, as the AWS CLI uses them) in AWS profile, or open `s3://profile@bucket/folder`; `s3://bucket` offers your profiles first. Profiles with IAM Identity Center (SSO) use the sign-in the AWS CLI made (`aws sso login`) and renew it, or forkz signs in in the browser itself (and keeps the sign-in where the CLI does). Roles assumed from another profile (asking for an MFA code if the profile has `mfa_serial`), `credential_process`, and keys with session tokens work too; keys that expire are renewed while connected.
 - **Google Cloud Storage** through its S3-compatible XML API: create an HMAC key (Cloud Storage > Settings > Interoperability) and put the access key in User and the secret in Password. Server defaults to `storage.googleapis.com`.
 - **Azure Blob Storage:** the storage account name goes in User and an access key in Password. Server defaults to `ACCOUNT.blob.core.windows.net`; the top level lists the account's containers, and Remote folder can start in one (`/container/folder`). Files up to 5000 MiB; folders work as in the Azure portal. For the Azurite emulator, set Server to `127.0.0.1` and Port to `10000`.
+- **Dropbox:** choose Dropbox in Connect to Server, and sign in in the browser when forkz opens it; forkz keeps the sign-in in your login Keychain. Files of any size (large ones are uploaded in parts); copies within Dropbox happen on its servers; deleted items can be restored in Dropbox.
+- **Google Drive:** choose Google Drive in Connect to Server, and sign in in the browser. My Drive shows as folders; Google Docs, Sheets, and Slides show as Word, Excel, and PowerPoint files (drawings as PDF) and are exported when copied or opened. Drive allows several items of one name in a folder: the second shows as "name (2)". Copies within Drive happen on Google's servers, and deleted items go to Drive's trash.
 - **Box:** choose Box in Connect to Server (no server, user, or password), and sign in in the browser when forkz opens it. forkz keeps the sign-in in your login Keychain, so later connections go straight in (Box asks again after 60 days without connecting). Remote folder can start in a folder (`/Projects`). Files of any size the account allows (large ones are uploaded in parts); deleted items go to Box's trash.
 - **SMB, AFP, and NFS** shares are mounted by macOS, as in Finder (its sign-in and share-picker dialogs included), and browsed like folders on the Mac. Put the share in Remote folder (for example `Public` or `Public/Photos`), or leave it empty to choose. A share that is already mounted is used as it is. Disconnect (Command-E) unmounts the share.
 - `s3://bucket/folder` opens a bucket on AWS (forkz asks for the keys and finds the region).
 - **Share links** (Edit > Copy Share Link): a link anyone can open to download a file, for 1 hour to 7 days: a presigned URL on S3 and Google Cloud Storage, a shared access signature on Azure, and a shared link on Box (also for folders; Box lets only paid accounts set when a link stops working, so on others it stays until removed in Box).
-- Addresses work in Go to Folder and on the command line: `sftp://`, `ftp://`, `ftps://`, `dav://`, `davs://`, `s3://`, `gs://`, `azure://`, `box://`, `smb://`, `afp://`, and `nfs://`.
+- Addresses work in Go to Folder and on the command line: `sftp://`, `ftp://`, `ftps://`, `dav://`, `davs://`, `s3://`, `gs://`, `azure://`, `box://`, `dropbox://`, `gdrive://`, `smb://`, `afp://`, and `nfs://`.
 
 ### Importing from FileZilla
 
@@ -252,7 +256,7 @@ Settings > Tools holds your own commands, run by zsh in the pane's folder on the
 | Command-Up, or open ".." | Enclosing folder |
 | Command-[ and Command-] | Back and forward |
 | Command-R, Control-Command-R | Refresh the pane, refresh both panes |
-| Space or Command-Y | Quick Look |
+| Space or Command-Y | Quick Look (also a force click on the trackpad) |
 | F3 | View (text or hex) |
 | F5 or Shift-Command-C | Copy to the other pane |
 | F6 or Shift-Command-M | Move to the other pane |
@@ -270,6 +274,7 @@ Settings > Tools holds your own commands, run by zsh in the pane's folder on the
 | Command-F | Filter the list |
 | Shift-Command-F | Search |
 | Option-Command-P | Command palette |
+| Shift-Option-Command-R | Repeat Last Command (the last command run on items, such as Compress or Rotate Right) |
 | Shift-Command-S, Shift-Command-B | Sync folders, sync browsing |
 | Shift-Command-G | Go to folder |
 | Shift-Command-H, Shift-Command-D, Shift-Command-O, Option-Command-L, Shift-Command-A | Home, Desktop, Documents, Downloads, Applications |

@@ -7,6 +7,22 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-26
+
+### Added
+
+- Dropbox and Google Drive: choose them in Connect to Server and sign in in the browser (forkz keeps the sign-in in the Keychain). Google Docs, Sheets, and Slides show as Word, Excel, and PowerPoint files and are exported when copied or opened; copies within each service happen on its servers; share links work on both.
+- The viewer (F3) highlights code and settings files (Rust, Python, JavaScript, Swift, C, Go, Java, Ruby, PHP, shell, SQL, CSS, JSON, YAML, TOML, HTML, XML, Markdown, and more), and can edit them: check Edit, and Command-S saves, in the file's encoding, on the Mac or the server. Closing with unsaved changes asks first.
+- Commands > Repeat Last Command (Shift-Option-Command-R) runs the last command on items again, such as Compress, Rotate Right, or a custom tool, on what is selected now.
+- File > Disconnect All closes every server connection and mounted share.
+- The Dock icon's menu lists recent folders and favorites, to open in forkz.
+- The Dimensions, Duration, Date Last Opened, and Comments columns can be sorted by.
+- A force click on a file (on a trackpad) shows it in Quick Look, as in Finder ([#17](https://github.com/houseofmackee/forkz/issues/17)).
+
+### Fixed
+
+- Files uploaded one by one to Google Drive lost their modification date. Files copied to cloud storage (Google Drive, Dropbox, Box, S3, and Azure) are now written straight to their names, which also saves a request per file.
+
 ## [0.23.1] - 2026-11-26
 
 ### Added
@@ -489,7 +505,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.23.1...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/houseofmackee/forkz/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/houseofmackee/forkz/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/houseofmackee/forkz/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/houseofmackee/forkz/compare/v0.21.1...v0.22.0

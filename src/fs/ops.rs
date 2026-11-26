@@ -866,8 +866,11 @@ impl Runner<'_> {
         let start = self.progress.done_bytes;
         let size = entry.size;
         // Into a temporary name, then renamed: an existing file is only
-        // replaced once the copy is complete.
-        let temporary = temporary_name(target);
+        // replaced once the copy is complete. Cloud storage only shows a
+        // file once it is complete: written straight to its name there
+        // (a rename would be a copy, and would lose the date on Drive).
+        let direct = !self.both_local && self.dst.writes_whole();
+        let temporary = if direct { target.to_path_buf() } else { temporary_name(target) };
         let source = entry.path.clone();
         let done = self.attempt(&source, |runner| {
             runner.progress.done_bytes = start;
@@ -918,7 +921,9 @@ impl Runner<'_> {
     /// Streams a file between file systems (upload, download, or server to
     /// server), keeping its modification date.
     fn copy_stream(&mut self, entry: &Entry, temporary: &Path, target: &Path, start: u64, size: u64) -> io::Result<()> {
-        let (mut reader, mut writer, mut copied) = match self.resumable(entry, temporary) {
+        // Written straight to its name (cloud storage): nothing to resume.
+        let resume = if temporary == target { None } else { self.resumable(entry, temporary) };
+        let (mut reader, mut writer, mut copied) = match resume {
             Some(offset) => {
                 match (self.src.open_read_from(&entry.path, offset), self.dst.open_write_from(temporary, offset)) {
                     (Ok(reader), Ok(writer)) => {
@@ -1021,6 +1026,10 @@ impl Runner<'_> {
     fn finish_transfer(&mut self, entry: &Entry, temporary: &Path, target: &Path) -> io::Result<()> {
         if self.keep_dates {
             let _ = self.dst.set_attributes(temporary, entry.modified, None);
+        }
+        // Written straight to its name.
+        if temporary == target {
+            return Ok(());
         }
         // SFTP servers may refuse to rename over an existing file.
         if self.dst.stat(target).is_ok() {

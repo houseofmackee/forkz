@@ -168,6 +168,22 @@ define_class!(
         }
 
         /// Commands > Tools.
+        /// The Dock menu: forkz comes to the front with the folder.
+        #[unsafe(method(openDockRecent:))]
+        fn open_dock_recent(&self, sender: &NSMenuItem) {
+            NSApplication::sharedApplication(self.mtm()).activate();
+            open_recent((sender.tag() - RECENT_TAG) as usize);
+        }
+
+        #[unsafe(method(openDockFavorite:))]
+        fn open_dock_favorite(&self, sender: &NSMenuItem) {
+            NSApplication::sharedApplication(self.mtm()).activate();
+            let index = (sender.tag() - DOCK_FAVORITE_TAG) as usize;
+            if let Some(path) = current_settings().and_then(|s| s.favorites.get(index).cloned()) {
+                open_in_active_pane(path);
+            }
+        }
+
         #[unsafe(method(runTool:))]
         fn run_tool_menu(&self, sender: &NSMenuItem) {
             run_tool((sender.tag() - TOOL_TAG) as usize);
@@ -219,6 +235,11 @@ define_class!(
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window_closed(&self, _app: &NSApplication) -> bool {
             true
+        }
+
+        #[unsafe(method_id(applicationDockMenu:))]
+        fn application_dock_menu(&self, _app: &NSApplication) -> Option<Retained<NSMenu>> {
+            Some(dock_menu(self))
         }
 
         /// Folders opened with forkz (it can be the default folder app),
@@ -474,6 +495,18 @@ pub fn command_title(command: Command, pane: usize) -> String {
         Command::PasteFiles if !here => "Upload Copied Items",
         Command::OpenInTerminal if !here => "Open SSH Session in Terminal",
         Command::CopyPath if !here => "Copy Server Link",
+        Command::RepeatLast => {
+            return match LAST_COMMAND.with(Cell::get) {
+                Some(Repeat::Command(last)) => {
+                    format!("Repeat \u{201c}{}\u{201d}", command_title(last, pane).trim_end_matches('\u{2026}'))
+                }
+                Some(Repeat::Tool(tool)) => {
+                    let name = app.settings.borrow().tools.get(tool).map(|t| t.name.clone()).unwrap_or_default();
+                    format!("Repeat \u{201c}{name}\u{201d}")
+                }
+                None => command.title().into(),
+            };
+        }
         Command::CloseTab if app.panes[pane].tab_count() <= 1 => "Close Window",
         Command::TogglePreview if !app.preview.view().isHidden() => "Hide Preview Pane",
         Command::ShowDropStack if drop_stack::is_shown() => "Hide Drop Stack",
@@ -921,6 +954,7 @@ fn main_menu(
     separator(&file);
     command(&file, Command::Connect);
     command(&file, Command::Disconnect);
+    command(&file, Command::DisconnectAll);
     let import = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Import Sites"));
     for c in [Command::ImportFileZilla, Command::ImportCyberduck, Command::ImportWinScp, Command::ImportSitesFile] {
         command(&import, c);
@@ -1105,6 +1139,7 @@ fn main_menu(
 
     let commands = submenu("Commands");
     command(&commands, Command::CommandPalette);
+    command(&commands, Command::RepeatLast);
     separator(&commands);
     command(&commands, Command::AppCleaner);
     separator(&commands);
@@ -1322,6 +1357,12 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         }
         // Servers, and mounted shares (which count as local).
         Command::Disconnect => !local || pane.fs().key().starts_with("mount:"),
+        Command::DisconnectAll => !connected_keys().is_empty(),
+        Command::RepeatLast => match LAST_COMMAND.with(Cell::get) {
+            Some(Repeat::Command(last)) => is_enabled_in(last, index, has_selection),
+            Some(Repeat::Tool(_)) => true,
+            None => false,
+        },
         Command::OpenWithApp => has_selection,
         Command::CopyShareLink => has_selection && shares_links(&pane.fs()),
         Command::UseAsDefaultView | Command::ResetFolderView => {
@@ -1384,6 +1425,9 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
 /// Runs a command on a pane (the active one if None).
 pub fn run_command(command: Command, pane: Option<usize>) {
     let Some(app) = app() else { return };
+    if command.repeatable() {
+        LAST_COMMAND.with(|l| l.set(Some(Repeat::Command(command))));
+    }
     let index = pane.unwrap_or(app.active.get());
     let pane = app.panes[index].clone();
     let other = app.panes[1 - index].clone();
@@ -1590,6 +1634,16 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         }
         Command::Disconnect if pane.fs().outside().is_some() => close_archive(&pane),
         Command::Disconnect => disconnect(&pane.fs().key()),
+        Command::DisconnectAll => {
+            for key in connected_keys() {
+                disconnect(&key);
+            }
+        }
+        Command::RepeatLast => match LAST_COMMAND.with(Cell::get) {
+            Some(Repeat::Command(last)) => run_command(last, Some(index)),
+            Some(Repeat::Tool(tool)) => run_tool(tool),
+            None => {}
+        },
         Command::ImportFileZilla => import_filezilla(),
         Command::Permissions => change_permissions(&pane),
         Command::CompareFiles => compare_files(&pane, &other),
@@ -1975,6 +2029,7 @@ fn fill_tools_menu(menu: &NSMenu, delegate: &AppDelegate) {
 /// Runs a tool on the active pane's selection (on this Mac).
 fn run_tool(index: usize) {
     let Some(app) = app() else { return };
+    LAST_COMMAND.with(|l| l.set(Some(Repeat::Tool(index))));
     let Some(tool) = app.settings.borrow().tools.get(index).cloned() else { return };
     let active = app.active.get();
     let (pane, other) = (&app.panes[active], &app.panes[1 - active]);
@@ -2059,6 +2114,77 @@ fn fill_recent_menu(menu: &NSMenu, delegate: &AppDelegate) {
     unsafe { clear.setTarget(Some(delegate)) };
     menu.addItem(&clear);
 }
+
+/// What Repeat Last Command runs again.
+#[derive(Clone, Copy)]
+enum Repeat {
+    Command(Command),
+    /// A custom tool, by its index.
+    Tool(usize),
+}
+
+thread_local! {
+    static LAST_COMMAND: Cell<Option<Repeat>> = const { Cell::new(None) };
+}
+
+/// The servers and shares forkz is connected to (by their keys): saved
+/// sites' connections, and what the panes show.
+fn connected_keys() -> Vec<String> {
+    let Some(app) = app() else { return Vec::new() };
+    let mut keys: Vec<String> = app.connections.borrow().iter().map(|(_, fs)| fs.key()).collect();
+    for pane in &app.panes {
+        for (fs, _) in pane.tab_locations() {
+            let key = fs.key();
+            let server = !fs.is_local() || key.starts_with("mount:");
+            if server && fs.outside().is_none() && !keys.contains(&key) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
+/// The Dock icon's menu: recent folders and favorites, to open in the
+/// active pane.
+fn dock_menu(delegate: &AppDelegate) -> Retained<NSMenu> {
+    let mtm = mtm();
+    let menu = NSMenu::new(mtm);
+    let settings = current_settings().unwrap_or_default();
+    let add = |title: &str, tag: isize, action: objc2::runtime::Sel, path: &Path, server: bool| {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &ns(title), Some(action), &ns(""))
+        };
+        item.setTag(tag);
+        let icon = if server {
+            util::symbol("server.rack", "Server").unwrap_or_else(util::folder_icon)
+        } else {
+            util::icon_for_path(path)
+        };
+        icon.setSize(NSSize::new(16.0, 16.0));
+        item.setImage(Some(&icon));
+        unsafe { item.setTarget(Some(delegate)) };
+        menu.addItem(&item);
+    };
+    for (index, folder) in settings.recent_folders.iter().take(8).enumerate() {
+        add(
+            &recent_title(folder),
+            RECENT_TAG + index as isize,
+            sel!(openDockRecent:),
+            &folder.path,
+            folder.site.is_some(),
+        );
+    }
+    if !settings.recent_folders.is_empty() && !settings.favorites.is_empty() {
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+    }
+    for (index, path) in settings.favorites.iter().enumerate() {
+        add(&title_of(path), DOCK_FAVORITE_TAG + index as isize, sel!(openDockFavorite:), path, false);
+    }
+    menu
+}
+
+/// Tags of the Dock menu's favorites: this plus the favorite's index.
+const DOCK_FAVORITE_TAG: isize = 7000;
 
 /// Opens a recent folder in the active pane (connecting to its site).
 fn open_recent(index: usize) {
@@ -2671,6 +2797,7 @@ fn copy_share_link(pane: &PaneController) {
     };
     let (period, seconds) = TIMES[choice];
     let Some(app) = app() else { return };
+    let service = fs.label().split(':').next().unwrap_or("The service").to_string();
     let note = app.activity.begin_note("Making share links\u{2026}");
     std::thread::spawn(move || {
         let valid_for = std::time::Duration::from_secs(seconds);
@@ -2701,7 +2828,11 @@ fn copy_share_link(pane: &PaneController) {
                 if lasting > 0 {
                     dialogs::show_info(
                         "The link was copied, but it does not expire.".into(),
-                        "This Box account cannot set when links stop working. Remove the link in Box when it is no longer needed.".into(),
+                        if service == "Google Drive" {
+                            "Google Drive\u{2019}s links do not expire. Stop sharing the item in Google Drive when the link is no longer needed.".to_string()
+                        } else {
+                            format!("This {service} account cannot set when links stop working (paid accounts can). Remove the link in {service} when it is no longer needed.")
+                        },
                     );
                 }
             }
@@ -5303,6 +5434,38 @@ fn open_connection(
             let secret = fs.secret().map(str::to_string);
             Ok((fs, secret))
         }
+        Protocol::Dropbox => {
+            let saved = crate::sites::SiteStore::load().get(&site.id).is_some();
+            let id = site.id.clone();
+            let save_token: Option<vfs::dropbox::SaveToken> = saved.then(|| {
+                std::sync::Arc::new(move |token: &str| crate::sites::keychain::save_password(&id, token)) as _
+            });
+            let params = vfs::dropbox::DropboxParams {
+                refresh_token: password,
+                save_token,
+                timeout,
+                service: Default::default(),
+                browser: true,
+            };
+            let fs = vfs::dropbox::connect(params)?;
+            Ok((fs, None))
+        }
+        Protocol::GoogleDrive => {
+            let saved = crate::sites::SiteStore::load().get(&site.id).is_some();
+            let id = site.id.clone();
+            let save_token: Option<vfs::gdrive::SaveToken> = saved.then(|| {
+                std::sync::Arc::new(move |token: &str| crate::sites::keychain::save_password(&id, token)) as _
+            });
+            let params = vfs::gdrive::DriveParams {
+                refresh_token: password,
+                save_token,
+                timeout,
+                service: Default::default(),
+                browser: true,
+            };
+            let fs = vfs::gdrive::connect(params)?;
+            Ok((fs, None))
+        }
         Protocol::Box => {
             // Box replaces the sign-in each time it is renewed: a saved
             // site keeps the latest one in the Keychain.
@@ -5833,6 +5996,20 @@ fn watch_locations(app: &App) {
         }
     }
     *watched = wanted;
+}
+
+/// A folder on a server changed (folders on the Mac are watched): the
+/// panes showing it list it again.
+pub fn server_folder_changed(fs: &FsRef, folder: &Path) {
+    let Some(app) = app() else { return };
+    if fs.is_local() {
+        return;
+    }
+    for pane in &app.panes {
+        if vfs::same(&pane.fs(), fs) && pane.location() == folder {
+            pane.reload();
+        }
+    }
 }
 
 fn folder_changed(paths: &[PathBuf]) {
