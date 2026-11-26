@@ -116,6 +116,8 @@ pub enum DateSource {
     Created,
     /// Today (when renaming).
     Now,
+    /// When a photo or video was taken (else when the item was made).
+    Taken,
 }
 
 fn one() -> i64 {
@@ -149,6 +151,8 @@ pub struct Item {
     pub modified: Option<SystemTime>,
     /// When it was made (on the Mac); the modification date if unknown.
     pub created: Option<SystemTime>,
+    /// When a photo or video was taken (on the Mac), if known.
+    pub taken: Option<SystemTime>,
     pub folder: bool,
 }
 
@@ -367,6 +371,7 @@ fn apply_one(ready: &Ready, text: &str, index: usize, item: &Item, literal: bool
                 let when = match source {
                     DateSource::Modified => item.modified,
                     DateSource::Created => item.created.or(item.modified),
+                    DateSource::Taken => item.taken.or(item.created).or(item.modified),
                     DateSource::Now => None,
                 };
                 let date = format_date(format, when.unwrap_or_else(SystemTime::now));
@@ -487,7 +492,7 @@ mod tests {
     fn items(names: &[&str]) -> Vec<Item> {
         names
             .iter()
-            .map(|n| Item { name: n.to_string(), modified: None, created: None, folder: !n.contains('.') })
+            .map(|n| Item { name: n.to_string(), modified: None, created: None, taken: None, folder: !n.contains('.') })
             .collect()
     }
 
@@ -567,7 +572,8 @@ mod tests {
         assert!(formatted.starts_with("2026-11-0"), "{formatted}");
         assert!(formatted.ends_with("(26)"), "{formatted}");
         let created = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_420_113_600); // 2015
-        let item = Item { name: "scan.pdf".into(), modified: Some(time), created: Some(created), folder: false };
+        let item =
+            Item { name: "scan.pdf".into(), modified: Some(time), created: Some(created), taken: None, folder: false };
         let date = |source| step(Rule::Date { format: "YYYY".into(), source, separator: "_".into(), at: Place::Start });
         assert_eq!(
             plan(std::slice::from_ref(&item), &[date(DateSource::Modified)], &[]).unwrap()[0].new,

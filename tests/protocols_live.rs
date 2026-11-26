@@ -400,6 +400,14 @@ fn azure_blob() {
     run(&Job::between(JobKind::Move, fs.clone(), vec![folder.clone()], fs.clone(), other.to_path_buf()));
     assert_eq!(read_all(&fs, &other.join("moving/inside.txt")), b"inside");
     assert_eq!(fs.stat(&folder.join("inside.txt")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    // A share link (a shared access signature) downloads without the key;
+    // Azurite checks the signature, so a changed link is refused.
+    assert!(fs.shares_links());
+    let (link, expires) = fs.share_link(&other.join("moving/inside.txt"), Duration::from_secs(3600)).unwrap();
+    assert!(expires);
+    assert_eq!(download(&link).unwrap(), b"inside");
+    assert!(download(&link.replace("sp=r", "sp=rw")).is_err(), "a changed link is refused");
+    assert!(fs.share_link(&other.join("moving"), Duration::from_secs(3600)).is_err(), "not a folder");
     run(&Job::between(JobKind::Delete, fs.clone(), vec![other.join("moving")], fs.clone(), other.to_path_buf()));
     fs.remove_dir(other).unwrap();
     fs.remove_dir(container).unwrap();
@@ -444,6 +452,16 @@ fn box_api() {
     assert_eq!(read_all(&fs, Path::new("/box-copy/c.txt")), b"one");
     assert_eq!(read_all(&fs, Path::new("/box-copy/b.txt")), b"one");
     assert_eq!(names(&fs, Path::new("/box-copy")).len(), 3, "no temporary copy left");
+    // Shared links: set to expire, or (where the account cannot) lasting.
+    let (link, expires) = fs.share_link(Path::new("/box-copy/c.txt"), Duration::from_secs(3600)).unwrap();
+    assert!(link.starts_with("https://app.box.com/s/") && expires, "{link}");
+    let mut free = fs.open_write_sized(Path::new("/box-copy/free.txt"), Some(1)).unwrap();
+    free.write_all(b"f").unwrap();
+    free.flush().unwrap();
+    drop(free);
+    let (_, expires) = fs.share_link(Path::new("/box-copy/free.txt"), Duration::from_secs(3600)).unwrap();
+    assert!(!expires, "a free account's link does not expire");
+    fs.remove_file(Path::new("/box-copy/free.txt")).unwrap();
     fs.remove_dir(Path::new("/box-copy")).unwrap();
     // Box revoked access tokens along the way; each renewal was kept, and
     // only the last one still works.
@@ -495,6 +513,11 @@ fn s3() {
     run(&Job::between(JobKind::Move, fs.clone(), vec![folder.clone()], fs.clone(), other.to_path_buf()));
     assert_eq!(read_all(&fs, &other.join("moving/inside.txt")), b"inside");
     assert_eq!(fs.stat(&folder.join("inside.txt")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    // A share link (a presigned URL) downloads without the keys.
+    let (link, _) = fs.share_link(&other.join("moving/inside.txt"), Duration::from_secs(3600)).unwrap();
+    assert!(link.contains("X-Amz-Signature="), "{link}");
+    assert_eq!(download(&link).unwrap(), b"inside");
+    assert!(fs.share_link(&other.join("moving"), Duration::from_secs(3600)).is_err(), "not a folder");
 
     // A copy in parts on the server (as for files over 5 GB), here in 5 MB
     // parts (S3's smallest).
@@ -523,4 +546,10 @@ fn s3() {
     fs.remove_file(&bucket.join("big.bin")).unwrap();
     fs.remove_dir(other).unwrap();
     fs.remove_dir(bucket).unwrap();
+}
+
+/// A plain download, with no keys (as whoever gets a share link would).
+fn download(link: &str) -> Result<Vec<u8>, String> {
+    let response = ureq::get(link).call().map_err(|e| e.to_string())?;
+    response.into_body().read_to_vec().map_err(|e| e.to_string())
 }

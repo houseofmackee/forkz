@@ -17,14 +17,20 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - A sortable list (name, date modified, size, kind, Git status, and more) with ".." on top to go up, groups by kind, date, or size, a clickable path bar, a filter field, and a status line with the selection size and free space; or icons, or columns, as in Finder
 - A viewer for text and hex (F3), and filename filters that hide items in the lists and leave them out of copies
 - Copy, move, duplicate, trash, rename, new file, and new folder (right-click Copy To and Move To send items to the other pane, another open tab, or a folder you choose), with progress, Stop, Pause, and a conflict dialog (Replace, Replace if Older, Keep Both, Skip, Merge, and "Apply to all")
-- Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files
+- Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files. Pasting an image (a screenshot, or an image copied in a browser) saves it as a PNG file in the pane's folder
+- Undo and Redo (Command-Z and Shift-Command-Z) for renames, moves, Move to Trash (items are put back), new files and folders, and copies on the Mac, as in Finder; the Edit menu names what Undo will do
+- New File starts empty or from a template: files you put in the templates folder (New File > Open Templates Folder) are offered there
+- File > Make Link: symbolic links, Finder aliases, and hard links (into the other pane's folder when it shows another folder on the Mac, else beside the items); File > Set Date (as `touch` does, for files and folders); File > Flatten Folder (everything in a folder's subfolders moves up into it, and the emptied subfolders go)
+- File > Images: convert images to JPEG, PNG, HEIC, TIFF, GIF, or BMP, make smaller copies (at most 640 to 3840 pixels), rotate them, or make one PDF of them, a page each
+- File > Split File and Join Files: a large file in parts of any size ("movie.mkv.001", ".002", and so on, as 7-Zip and `split` make them), and back
+- Commands > Copy to Several Folders: one copy of the selection to each folder checked (the other pane's, favorites, recent folders, or others you pick)
 - Quick Look, a hidden files toggle, and live updates when folders change
 - Flat View (Option-Command-F): every file in a folder and the folders in it, in one list
 - Reopen Closed Tab (Shift-Command-T), Move Tab to Other Pane, Select Same Type, and the mouse's Back and Forward buttons
 - Go > Recent Folders: the folders you were in lately, on the Mac and on servers
 - App Cleaner (Commands > App Cleaner, as the AppCleaner app does): the apps selected (or chosen) and everything they left, in your Library (settings, caches, support files, containers, crash reports) and for all users in /Library (support files, background services, helper tools), to move to the Trash in one go. Moving an app to the Trash offers the same for what it left. Files for all users start unchecked and need an administrator's password, which Finder asks for once
 - Sounds as in Finder for moving items to the Trash and deleting them, and a chime when a long transfer finishes (or a different sound if something failed); they follow macOS's "Play user interface sound effects" setting and can be turned off in Settings > General
-- Folder sizes, checksums (MD5, SHA-1, SHA-256, SHA-384, and SHA-512), Export Folder Tree (a text listing of a folder and everything in it), a built-in compare for files and folders (or your own diff tool), Compare Panes, and Open in Terminal with your terminal app
+- Folder sizes, checksums (MD5, SHA-1, SHA-256, SHA-384, and SHA-512; File > Checksums also writes a checksum file for files and folders, as `shasum` does, and verifies one, or a file against a checksum you copied), Export Folder Tree (a text listing of a folder and everything in it), a built-in compare for files and folders (or your own diff tool), Compare Panes, and Open in Terminal with your terminal app
 - A terminal pane below the panes (View > Show Terminal, Control-`) that follows the active pane's folder
 - Workspaces: saved sets of tabs for both panes, including server folders
 - A transfer queue: speed limits, Pause and Resume, Pause All and Stop All, and waiting transfers that can be started now or moved up and down (right-click a transfer), plus rules for errors
@@ -53,7 +59,7 @@ Archives (zip, tar, 7z, rar, iso, and more) open like folders: copy items out to
 
 ![Rename Multiple Items replacing a prefix and lowercasing extensions, with a live preview](docs/images/rename.png)
 
-Select several items and press Return (or Option-Command-R). Rules (replace, regular expressions, insert, remove, case, numbers, and dates) stack, the preview shows every new name and any problems before anything changes, and presets keep rule sets for next time. Saved presets also appear in the sidebar: drop files on one, or click it, to rename the selection with it.
+Select several items and press Return (or Option-Command-R). Rules (replace, regular expressions, insert, remove, case, numbers, and dates, including when a photo or video was taken) stack, the preview shows every new name and any problems before anything changes, and presets keep rule sets for next time. Saved presets also appear in the sidebar: drop files on one, or click it, to rename the selection with it.
 
 ### Search
 
@@ -198,6 +204,7 @@ Choose the protocol in Connect to Server; sites keep it.
 - **Box:** choose Box in Connect to Server (no server, user, or password), and sign in in the browser when forkz opens it. forkz keeps the sign-in in your login Keychain, so later connections go straight in (Box asks again after 60 days without connecting). Remote folder can start in a folder (`/Projects`). Files of any size the account allows (large ones are uploaded in parts); deleted items go to Box's trash.
 - **SMB, AFP, and NFS** shares are mounted by macOS, as in Finder (its sign-in and share-picker dialogs included), and browsed like folders on the Mac. Put the share in Remote folder (for example `Public` or `Public/Photos`), or leave it empty to choose. A share that is already mounted is used as it is. Disconnect (Command-E) unmounts the share.
 - `s3://bucket/folder` opens a bucket on AWS (forkz asks for the keys and finds the region).
+- **Share links** (Edit > Copy Share Link): a link anyone can open to download a file, for 1 hour to 7 days: a presigned URL on S3 and Google Cloud Storage, a shared access signature on Azure, and a shared link on Box (also for folders; Box lets only paid accounts set when a link stops working, so on others it stays until removed in Box).
 - Addresses work in Go to Folder and on the command line: `sftp://`, `ftp://`, `ftps://`, `dav://`, `davs://`, `s3://`, `gs://`, `azure://`, `box://`, `smb://`, `afp://`, and `nfs://`.
 
 ### Importing from FileZilla

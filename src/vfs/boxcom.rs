@@ -1003,6 +1003,33 @@ impl Vfs for BoxFs {
 
     /// An upload shows once complete (over an existing file: its new
     /// version).
+    fn shares_links(&self) -> bool {
+        true
+    }
+
+    /// A shared link anyone with it can open (files and folders). Box
+    /// lets only paid accounts set when it stops working; on others the
+    /// link stays until it is removed in Box.
+    fn share_link(&self, path: &Path, valid_for: Duration) -> io::Result<(String, bool)> {
+        let (id, folder) = self.id_of(path)?;
+        let url = format!("{}?fields=shared_link", self.item_url(&id, folder));
+        let until = http::iso_utc(SystemTime::now() + valid_for);
+        let with_expiry = json!({ "shared_link": { "access": "open", "unshared_at": until } });
+        let (answer, expires) = match self.json("PUT", &url, Some(&with_expiry)) {
+            Ok(answer) => (answer, true),
+            // Not allowed for this account (Box answers 400 or 403): a link
+            // that stays. If that fails too, its error says why.
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                (self.json("PUT", &url, Some(&json!({ "shared_link": { "access": "open" } })))?, false)
+            }
+            Err(e) => return Err(e),
+        };
+        answer["shared_link"]["url"]
+            .as_str()
+            .map(|link| (link.to_string(), expires))
+            .ok_or_else(|| io::Error::other("Box did not answer with a link."))
+    }
+
     fn writes_whole(&self) -> bool {
         true
     }

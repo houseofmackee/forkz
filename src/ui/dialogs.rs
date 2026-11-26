@@ -178,6 +178,29 @@ pub fn prompt_with_choice(
     if text.trim().is_empty() { None } else { Some((text, popup.indexOfSelectedItem().max(0) as usize)) }
 }
 
+/// A choice from a popup; the index chosen (None if cancelled).
+pub fn choose(message: &str, informative: &str, ok: &str, choices: &[&str], selected: usize) -> Option<usize> {
+    let mtm = mtm();
+    let alert = alert(mtm, message, informative);
+    alert.addButtonWithTitle(&ns(ok));
+    alert.addButtonWithTitle(&ns("Cancel"));
+    let popup = objc2_app_kit::NSPopUpButton::initWithFrame_pullsDown(
+        objc2_app_kit::NSPopUpButton::alloc(mtm),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(240.0, 26.0)),
+        false,
+    );
+    for choice in choices {
+        popup.addItemWithTitle(&ns(choice));
+    }
+    popup.selectItemAtIndex(selected as isize);
+    alert.setAccessoryView(Some(&popup));
+    alert.layout();
+    if run(&alert) != 0 {
+        return None;
+    }
+    usize::try_from(popup.indexOfSelectedItem()).ok()
+}
+
 /// Like `prompt`, but an empty answer is an answer (None only if cancelled).
 pub fn prompt_allow_empty(message: &str, informative: &str, ok: &str, initial: &str) -> Option<String> {
     prompt_text(message, informative, ok, initial, None)

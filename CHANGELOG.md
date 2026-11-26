@@ -7,6 +7,27 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-11-26
+
+### Added
+
+- Undo and Redo (Command-Z and Shift-Command-Z) of file changes, as in Finder: renames (also Rename Multiple Items), moves (also between the Mac and servers), Move to Trash (the items are put back), and new files, new folders, and copies on the Mac (they go to the Trash). The Edit menu names what Undo and Redo will do.
+- Rename Multiple Items can use the date a photo or video was taken (from the photo's EXIF data, or what Spotlight knows of a video).
+- File > Checksums > Create Checksum File writes a checksum file (MD5, SHA-1, SHA-256, SHA-384, or SHA-512, as `shasum` writes them) for the selected files and everything in selected folders. Verify Checksums checks the files a checksum file lists (also BSD-style ones and SHA256SUMS), or a selected file against a checksum on the clipboard, and says which differ or are missing. Both work on servers too.
+- Edit > Copy Share Link puts a link on the clipboard that anyone can open to download a file, for 1 hour to 7 days: a presigned URL on S3 and Google Cloud Storage, a shared access signature on Azure, and a shared link on Box (files and folders).
+- Pasting an image (a screenshot, or an image copied in a browser or an editor) into a pane saves it as a PNG file there.
+- New File can start from a template: files in the templates folder (New File > Open Templates Folder) are offered.
+- File > Make Link makes symbolic links, Finder aliases, and hard links: in the other pane's folder when it shows another folder on the Mac, else beside the items.
+- File > Set Date sets the modification date of files and folders (to now, or a date you type), as `touch` does.
+- File > Flatten Folder moves everything in a folder's subfolders up into it and removes the emptied subfolders (Undo puts it all back).
+- File > Images converts images to JPEG, PNG, HEIC, TIFF, GIF, or BMP, makes smaller copies, rotates them (in place, as in Finder), or makes one PDF of them.
+- File > Split File splits a large file into parts of any size ("movie.mkv.001", ".002", and so on, as 7-Zip and `split` name them), and Join Files puts them back together.
+- Commands > Copy to Several Folders copies the selection to each folder checked: the other pane's, favorites, recent folders, or others you pick.
+
+### Fixed
+
+- Folders copied or downloaded to the Mac did not keep their dates (with Keep modification dates on): macOS refused the way forkz set them.
+
 ## [0.21.1] - 2026-11-25
 
 ### Added
@@ -447,7 +468,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.21.1...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.22.0...HEAD
+[0.22.0]: https://github.com/houseofmackee/forkz/compare/v0.21.1...v0.22.0
 [0.21.1]: https://github.com/houseofmackee/forkz/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/houseofmackee/forkz/compare/v0.20.2...v0.21.0
 [0.20.2]: https://github.com/houseofmackee/forkz/compare/v0.20.1...v0.20.2

@@ -53,8 +53,12 @@ fn fields(kind: usize, option: usize) -> (Option<&'static str>, Option<&'static 
 
 const PLACES_SHORT: [Place; 3] = [Place::Start, Place::End, Place::Replace];
 
-const DATE_SOURCES: [(&str, DateSource); 3] =
-    [("Modified", DateSource::Modified), ("Created", DateSource::Created), ("Today", DateSource::Now)];
+const DATE_SOURCES: [(&str, DateSource); 4] = [
+    ("Modified", DateSource::Modified),
+    ("Created", DateSource::Created),
+    ("Taken (photos, videos)", DateSource::Taken),
+    ("Today", DateSource::Now),
+];
 
 struct Row {
     view: Retained<NSStackView>,

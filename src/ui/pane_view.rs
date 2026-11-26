@@ -227,7 +227,12 @@ impl FileTable {
         if action == Some(sel!(copy:)) {
             controller.is_local() && !controller.selected_paths().is_empty()
         } else if action == Some(sel!(paste:)) {
-            !paths_on_pasteboard(&objc2_app_kit::NSPasteboard::generalPasteboard()).is_empty()
+            // An image (and no files) is pasted as a new file.
+            if super::image_on_clipboard() {
+                !controller.fs().read_only() && !controller.showing_results()
+            } else {
+                !paths_on_pasteboard(&objc2_app_kit::NSPasteboard::generalPasteboard()).is_empty()
+            }
         } else {
             true
         }
@@ -957,6 +962,7 @@ impl PaneController {
                 Some(CopySha256),
                 None,
                 Some(CopyPath),
+                Some(CopyShareLink),
                 Some(AddToSidebar),
             ],
             (false, false) => &[

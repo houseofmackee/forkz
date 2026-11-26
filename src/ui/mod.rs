@@ -10,6 +10,7 @@ mod dialogs;
 mod diff_window;
 mod drop_stack;
 mod duplicates_window;
+mod file_tools;
 mod file_viewer;
 mod filters_editor;
 mod gallery_view;
@@ -38,6 +39,7 @@ mod themed;
 mod thumbnails;
 mod tools;
 mod tools_editor;
+mod undo;
 mod usage_window;
 mod util;
 mod viewer;
@@ -465,6 +467,7 @@ pub fn command_title(command: Command, pane: usize) -> String {
         Command::CopyToOther if app.panes[pane].fs().read_only() => "Extract to Other Pane",
         Command::CopyToOther if here && !there => "Upload to Other Pane",
         Command::CopyToOther if !here && there => "Download to Other Pane",
+        Command::PasteFiles if image_on_clipboard() => "Paste Image as File",
         Command::PasteFiles if !here => "Upload Copied Items",
         Command::OpenInTerminal if !here => "Open SSH Session in Terminal",
         Command::CopyPath if !here => "Copy Server Link",
@@ -944,16 +947,43 @@ fn main_menu(
     command(&file, Command::DeleteImmediately);
     command(&file, Command::Permissions);
     command(&file, Command::EditTags);
+    command(&file, Command::SetDate);
+    separator(&file);
+    let links = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Make Link"));
+    for c in [Command::MakeSymlink, Command::MakeAlias, Command::MakeHardLink] {
+        command(&links, c);
+    }
+    let links_item = NSMenuItem::new(mtm);
+    links_item.setTitle(&ns("Make Link"));
+    links_item.setSubmenu(Some(&links));
+    file.addItem(&links_item);
+    let images = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Images"));
+    for c in
+        [Command::ConvertImages, Command::ResizeImages, Command::RotateLeft, Command::RotateRight, Command::MakePdf]
+    {
+        command(&images, c);
+    }
+    let images_item = NSMenuItem::new(mtm);
+    images_item.setTitle(&ns("Images"));
+    images_item.setSubmenu(Some(&images));
+    file.addItem(&images_item);
+    for c in [Command::FlattenFolder, Command::SplitFile, Command::JoinFiles] {
+        command(&file, c);
+    }
     separator(&file);
     for c in [Command::CompareFiles, Command::CalculateSizes, Command::ExportTree] {
         command(&file, c);
     }
-    let checksums = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Copy Checksum"));
+    let checksums = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Checksums"));
     for c in [Command::CopyMd5, Command::CopySha1, Command::CopySha256, Command::CopySha384, Command::CopySha512] {
         command(&checksums, c);
     }
+    separator(&checksums);
+    for c in [Command::CreateChecksumFile, Command::VerifyChecksums] {
+        command(&checksums, c);
+    }
     let checksums_item = NSMenuItem::new(mtm);
-    checksums_item.setTitle(&ns("Copy Checksum"));
+    checksums_item.setTitle(&ns("Checksums"));
     checksums_item.setSubmenu(Some(&checksums));
     file.addItem(&checksums_item);
     separator(&file);
@@ -965,11 +995,18 @@ fn main_menu(
     command(&file, Command::ReopenClosedTab);
 
     let edit = submenu("Edit");
+    // File changes (the window's undo manager) and, in text fields, typing.
+    standard(&edit, "Undo", sel!(undo:), "z");
+    standard(&edit, "Redo", sel!(redo:), "z").setKeyEquivalentModifierMask(
+        objc2_app_kit::NSEventModifierFlags::Command | objc2_app_kit::NSEventModifierFlags::Shift,
+    );
+    separator(&edit);
     standard(&edit, "Cut", sel!(cut:), "x");
     standard(&edit, "Copy", sel!(copy:), "c");
     standard(&edit, "Paste", sel!(paste:), "v");
     command(&edit, Command::MoveFilesHere);
     command(&edit, Command::CopyPath);
+    command(&edit, Command::CopyShareLink);
     standard(&edit, "Select All", sel!(selectAll:), "a");
     command(&edit, Command::SelectMatching);
     command(&edit, Command::SelectSameType);
@@ -1060,7 +1097,7 @@ fn main_menu(
     separator(&commands);
     command(&commands, Command::AppCleaner);
     separator(&commands);
-    for c in [Command::CopyToOther, Command::MoveToOther] {
+    for c in [Command::CopyToOther, Command::MoveToOther, Command::CopyToSeveral] {
         command(&commands, c);
     }
     separator(&commands);
@@ -1275,6 +1312,20 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         // Servers, and mounted shares (which count as local).
         Command::Disconnect => !local || pane.fs().key().starts_with("mount:"),
         Command::OpenWithApp => has_selection,
+        Command::CopyShareLink => has_selection && shares_links(&pane.fs()),
+        Command::MakeSymlink
+        | Command::MakeAlias
+        | Command::MakeHardLink
+        | Command::SetDate
+        | Command::FlattenFolder
+        | Command::ConvertImages
+        | Command::ResizeImages
+        | Command::RotateLeft
+        | Command::RotateRight
+        | Command::MakePdf
+        | Command::SplitFile
+        | Command::JoinFiles
+        | Command::CopyToSeveral => file_tools::is_enabled(command, pane, has_selection),
         Command::GitStage
         | Command::GitUnstage
         | Command::GitCommit
@@ -1308,6 +1359,7 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         // A shell needs SSH; FTP, WebDAV, and S3 have no permissions.
         Command::OpenInTerminal => local || pane.fs().key().starts_with("sftp://"),
         Command::Permissions => pane.fs().supports_permissions() && !pane.fs().read_only(),
+        Command::PasteFiles if image_on_clipboard() => !pane.showing_results(),
         Command::PasteFiles | Command::MoveFilesHere => {
             !pane_view::paths_on_pasteboard(&NSPasteboard::generalPasteboard()).is_empty()
         }
@@ -1402,11 +1454,26 @@ pub fn run_command(command: Command, pane: Option<usize>) {
                 pasteboard.writeObjects(&NSArray::from_retained_slice(&urls));
             }
         }
+        Command::PasteFiles if image_on_clipboard() => paste_image(&pane),
         Command::PasteFiles | Command::MoveFilesHere => {
             let sources = pane_view::paths_on_pasteboard(&NSPasteboard::generalPasteboard());
             let kind = if command == Command::PasteFiles { JobKind::Copy } else { JobKind::Move };
             start_job(transfer_job(kind, vfs::local(), sources, pane.fs(), pane.location()));
         }
+        Command::CopyShareLink => copy_share_link(&pane),
+        Command::MakeSymlink
+        | Command::MakeAlias
+        | Command::MakeHardLink
+        | Command::SetDate
+        | Command::FlattenFolder
+        | Command::ConvertImages
+        | Command::ResizeImages
+        | Command::RotateLeft
+        | Command::RotateRight
+        | Command::MakePdf
+        | Command::SplitFile
+        | Command::JoinFiles
+        | Command::CopyToSeveral => file_tools::run(command, &pane),
         Command::CopyPath => {
             let fs = pane.fs();
             // Nothing selected: the folder itself.
@@ -1530,6 +1597,8 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::Filter => pane.focus_filter(),
         Command::Settings => settings_window::show(),
         Command::InstallCommand => install_command(),
+        Command::CreateChecksumFile => create_checksum_file(&pane),
+        Command::VerifyChecksums => verify_checksums(&pane),
         Command::NewTab => pane.new_tab(pane.fs(), pane.location()),
         Command::CloseTab => {
             // Command-W in another window (a viewer, Settings) closes that.
@@ -2380,6 +2449,246 @@ fn calculate_sizes(pane: &PaneController) {
 }
 
 /// Copy SHA-256 or MD5 Checksum: of the selected files, to the clipboard.
+/// File > Checksums > Create Checksum File: a "hash  path" file (as
+/// shasum writes) for the selection, folders with all they hold, beside
+/// it. Paths are relative to it, so it still works when moved along.
+fn create_checksum_file(pane: &PaneController) {
+    use crate::fs::checksum::{self, Algorithm};
+    let items = pane.target_paths();
+    if items.is_empty() {
+        return;
+    }
+    let base = pane.location();
+    let stem = match items.as_slice() {
+        [one] => title_of(one),
+        _ => "checksums".to_string(),
+    };
+    let names: Vec<&str> = Algorithm::ALL.iter().map(|a| a.name()).collect();
+    let Some((name, choice)) = dialogs::prompt_with_choice(
+        "Create Checksum File",
+        "Lists a checksum of each file (in folders too), to check them later with Verify Checksums or shasum -c.",
+        "Create",
+        &format!("{stem}.sha256"),
+        &names,
+        0,
+    ) else {
+        return;
+    };
+    let algorithm = Algorithm::ALL[choice];
+    // The extension follows the algorithm chosen.
+    let mut name = name.trim().to_string();
+    if let Some(other) = Algorithm::ALL.iter().find(|a| name.to_lowercase().ends_with(&format!(".{}", a.extension()))) {
+        name.truncate(name.len() - other.extension().len() - 1);
+    }
+    let name = format!("{name}.{}", algorithm.extension());
+    let target = base.join(&name);
+    let fs = pane.fs();
+    let fs = fs.browse_fs().unwrap_or(fs);
+    if fs.stat(&target).is_ok()
+        && !dialogs::confirm(
+            &format!("Replace \u{201c}{name}\u{201d}?"),
+            "A file with that name is already there.",
+            "Replace",
+            true,
+        )
+    {
+        return;
+    }
+    let Some(app) = app() else { return };
+    let note = app.activity.begin_note(&format!("Calculating {}\u{2026}", algorithm.name()));
+    let index = pane.index();
+    std::thread::spawn(move || {
+        let reader = if fs.is_local() { fs.clone() } else { fs.connect_another().unwrap_or_else(|_| fs.clone()) };
+        let mut lines = Vec::new();
+        let mut failed = Vec::new();
+        for (path, relative) in checksum::files_below(&reader, &base, &items) {
+            match checksum::checksum(&reader, &path, algorithm) {
+                Ok(hash) => lines.push((hash, relative)),
+                Err(e) => failed.push(format!("{relative}: {e}")),
+            }
+        }
+        let text = checksum::checksum_file_text(&lines);
+        let written = reader.open_write_sized(&target, Some(text.len() as u64)).and_then(|mut w| {
+            std::io::Write::write_all(&mut w, text.as_bytes())?;
+            std::io::Write::flush(&mut w)
+        });
+        DispatchQueue::main().exec_async(move || {
+            let Some(app) = self::app() else { return };
+            app.activity.remove(note);
+            match written {
+                Ok(()) => {
+                    if fs.is_local() {
+                        undo::record("Create Checksum File", undo::Action::Trash { paths: vec![target.clone()] });
+                    }
+                    oplog::record(
+                        oplog::Kind::Change,
+                        format!("Created {name} ({} files)", lines.len()),
+                        failed.join("\n"),
+                    );
+                    if let Some(pane) = app.panes.get(index) {
+                        pane.reload_selecting(std::slice::from_ref(&target));
+                    }
+                    if !failed.is_empty() {
+                        dialogs::show_error(format!("{} files could not be read.", failed.len()), failed.join("\n"));
+                    }
+                }
+                Err(e) => dialogs::show_error(format!("\u{201c}{name}\u{201d} could not be written."), e.to_string()),
+            }
+        });
+    });
+}
+
+/// File > Checksums > Verify Checksums: the files a selected checksum file
+/// lists, against their hashes; or a selected file against a hash on the
+/// clipboard.
+fn verify_checksums(pane: &PaneController) {
+    use crate::fs::checksum::{self, Algorithm};
+    let entries: Vec<crate::fs::Entry> =
+        pane.entries_for(&pane.target_paths()).into_iter().filter(|e| !e.is_folder_like()).collect();
+    let fs = pane.fs();
+    let fs = fs.browse_fs().unwrap_or(fs);
+    let clipboard = objc2_app_kit::NSPasteboard::generalPasteboard()
+        .stringForType(unsafe { objc2_app_kit::NSPasteboardTypeString })
+        .map(|s| s.to_string().trim().to_lowercase())
+        .filter(|s| Algorithm::for_hash(s).is_some());
+    let (base, lines, title) = match (entries.as_slice(), clipboard) {
+        ([one], _) if checksum::is_checksum_file(&one.name) => {
+            let mut text = String::new();
+            if let Err(e) = fs.open_read(&one.path).and_then(|mut r| std::io::Read::read_to_string(&mut r, &mut text)) {
+                dialogs::show_error(format!("\u{201c}{}\u{201d} could not be read.", one.name), e.to_string());
+                return;
+            }
+            let lines = checksum::parse_checksum_file(&text);
+            if lines.is_empty() {
+                dialogs::show_error(format!("\u{201c}{}\u{201d} lists no checksums.", one.name), String::new());
+                return;
+            }
+            let base = one.path.parent().map(Path::to_path_buf).unwrap_or_default();
+            (base, lines, one.name.clone())
+        }
+        (selected, Some(hash)) if !selected.is_empty() => {
+            let base = pane.location();
+            let lines = selected
+                .iter()
+                .map(|e| (hash.clone(), e.path.strip_prefix(&base).unwrap_or(&e.path).to_string_lossy().into_owned()))
+                .collect();
+            (base, lines, "the copied checksum".to_string())
+        }
+        _ => {
+            dialogs::show_info(
+                "Select a checksum file to verify.".into(),
+                "A .sha256, .md5, .sha1, .sha384, .sha512, or SUMS file: its files are checked. Or select a file and copy its expected checksum first.".into(),
+            );
+            return;
+        }
+    };
+    let Some(app) = app() else { return };
+    let note = app.activity.begin_note("Verifying checksums\u{2026}");
+    std::thread::spawn(move || {
+        let reader = if fs.is_local() { fs.clone() } else { fs.connect_another().unwrap_or_else(|_| fs.clone()) };
+        let result = checksum::verify(&reader, &base, &lines);
+        DispatchQueue::main().exec_async(move || {
+            let Some(app) = self::app() else { return };
+            app.activity.remove(note);
+            let total = lines.len();
+            let mut detail = Vec::new();
+            if !result.different.is_empty() {
+                detail.push(format!("Different:\n{}", result.different.join("\n")));
+            }
+            if !result.missing.is_empty() {
+                let missing: Vec<String> = result.missing.iter().map(|(p, e)| format!("{p} ({e})")).collect();
+                detail.push(format!("Missing or unreadable:\n{}", missing.join("\n")));
+            }
+            if detail.is_empty() {
+                let message =
+                    if total == 1 { "The file matches.".to_string() } else { format!("All {total} files match.") };
+                oplog::record(oplog::Kind::Change, format!("Verified {title}: all match"), "");
+                dialogs::show_info(message, format!("Checked against {title}."));
+            } else {
+                let bad = result.different.len() + result.missing.len();
+                let message = format!("{bad} of {total} files do not match {title}.");
+                oplog::record(oplog::Kind::Problem, message.clone(), detail.join("\n\n"));
+                dialogs::show_error(message, detail.join("\n\n"));
+            }
+        });
+    });
+}
+
+/// Whether items here can get share links (cloud storage; in search
+/// results, where they were found).
+fn shares_links(fs: &FsRef) -> bool {
+    fs.browse_fs().unwrap_or_else(|| fs.clone()).shares_links()
+}
+
+/// Edit > Copy Share Link: links anyone can open to download the selected
+/// items (presigned URLs on S3 and Google Cloud Storage, shared access
+/// signatures on Azure, shared links on Box), on the clipboard.
+fn copy_share_link(pane: &PaneController) {
+    const TIMES: [(&str, u64); 4] =
+        [("1 hour", 3600), ("1 day", 86_400), ("3 days", 3 * 86_400), ("7 days", 7 * 86_400)];
+    let paths = pane.target_paths();
+    let fs = pane.fs();
+    let fs = fs.browse_fs().unwrap_or(fs);
+    if paths.is_empty() || !fs.shares_links() {
+        return;
+    }
+    let what = match paths.as_slice() {
+        [one] => format!("\u{201c}{}\u{201d}", title_of(one)),
+        many => format!("{} items", many.len()),
+    };
+    let names: Vec<&str> = TIMES.iter().map(|(name, _)| *name).collect();
+    let Some(choice) = dialogs::choose(
+        &format!("Copy a Share Link to {what}"),
+        "Anyone with the link can download it, without signing in, until it expires.",
+        "Copy Link",
+        &names,
+        1,
+    ) else {
+        return;
+    };
+    let (period, seconds) = TIMES[choice];
+    let Some(app) = app() else { return };
+    let note = app.activity.begin_note("Making share links\u{2026}");
+    std::thread::spawn(move || {
+        let valid_for = std::time::Duration::from_secs(seconds);
+        let results: Vec<(PathBuf, std::io::Result<(String, bool)>)> =
+            paths.into_iter().map(|path| (path.clone(), fs.share_link(&path, valid_for))).collect();
+        DispatchQueue::main().exec_async(move || {
+            if let Some(app) = self::app() {
+                app.activity.remove(note);
+            }
+            let mut links = Vec::new();
+            let mut lasting = 0;
+            let mut failed = Vec::new();
+            for (path, result) in results {
+                match result {
+                    Ok((link, expires)) => {
+                        links.push(link);
+                        lasting += usize::from(!expires);
+                    }
+                    Err(e) => failed.push(format!("{}: {e}", title_of(&path))),
+                }
+            }
+            if !links.is_empty() {
+                let pasteboard = NSPasteboard::generalPasteboard();
+                pasteboard.clearContents();
+                pasteboard.setString_forType(&ns(&links.join("\n")), unsafe { NSPasteboardTypeString });
+                let copied = if links.len() == 1 { "a share link".to_string() } else { format!("{} share links", links.len()) };
+                oplog::record(oplog::Kind::Change, format!("Copied {copied} to {what} (for {period})"), "");
+                if lasting > 0 {
+                    dialogs::show_info(
+                        "The link was copied, but it does not expire.".into(),
+                        "This Box account cannot set when links stop working. Remove the link in Box when it is no longer needed.".into(),
+                    );
+                }
+            }
+            if !failed.is_empty() {
+                dialogs::show_error("Some links could not be made.".into(), failed.join("\n"));
+            }
+        });
+    });
+}
+
 fn copy_checksums(pane: &PaneController, algorithm: crate::fs::checksum::Algorithm) {
     let Some(app) = app() else { return };
     let files: Vec<PathBuf> =
@@ -2633,6 +2942,9 @@ fn new_folder(pane: &PaneController) {
         Ok(path) => {
             let place = if pane.is_local() { path.display().to_string() } else { pane.fs().display_path(&path) };
             oplog::record(oplog::Kind::Change, "Created a folder", place);
+            if pane.is_local() {
+                undo::record("New Folder", undo::Action::Trash { paths: vec![path.clone()] });
+            }
             pane.reload_selecting(std::slice::from_ref(&path));
             // Name it right away, like Finder.
             rename_path(pane, &path);
@@ -2718,6 +3030,7 @@ fn rename_entries(
         .map(|e| crate::rename::Item {
             folder: e.kind == crate::fs::EntryKind::Folder && !e.package,
             created: if local { std::fs::metadata(&e.path).and_then(|m| m.created()).ok() } else { None },
+            taken: if local && !e.is_folder_like() { crate::fs::taken::date_taken(&e.path) } else { None },
             name: e.name,
             modified: e.modified,
         })
@@ -2728,6 +3041,13 @@ fn rename_entries(
         let (done, failed) = crate::rename::apply(&fs, &dir, &planned);
         DispatchQueue::main().exec_async(move || {
             let Some(app) = app() else { return };
+            // Undo: each renamed item back to its old name.
+            let pairs = planned
+                .iter()
+                .filter(|p| done.contains(&dir.join(&p.new)))
+                .map(|p| (dir.join(&p.new), dir.join(&p.old)))
+                .collect();
+            undo::record("Rename", undo::Action::Rename { fs: fs.clone(), pairs });
             for pane in &app.panes {
                 if vfs::same(&pane.fs(), &fs) && pane.location() == dir {
                     pane.reload_selecting(&done);
@@ -2774,6 +3094,10 @@ fn rename_path(pane: &PaneController, path: &Path) {
                 oplog::Kind::Change,
                 format!("Renamed \u{201c}{name}\u{201d} to \u{201c}{}\u{201d}", title_of(&renamed)),
                 folder.unwrap_or_default(),
+            );
+            undo::record(
+                "Rename",
+                undo::Action::Rename { fs: fs.clone(), pairs: vec![(renamed.clone(), path.to_path_buf())] },
             );
             pane.reload_selecting(&[renamed]);
             other_pane_reload(pane.index());
@@ -2874,10 +3198,52 @@ fn log_job(job: &Job, outcome: &Outcome) {
     }
 }
 
+/// How a finished job is undone (Edit > Undo).
+fn record_undo(job: &Job, outcome: &Outcome) {
+    // Moves made by undo or redo register what comes next themselves.
+    if outcome.placed.is_empty() || job.from_undo {
+        return;
+    }
+    let what = match outcome.placed.as_slice() {
+        [(source, _)] => format!("\u{201c}{}\u{201d}", title_of(source)),
+        many => format!("{} Items", many.len()),
+    };
+    match job.kind {
+        // Copies on the Mac go to the Trash (copies onto a server would be
+        // deleted for good: not undone).
+        JobKind::Copy if job.dest_fs.is_local() => {
+            let paths = outcome.placed.iter().map(|(_, copy)| copy.clone()).collect();
+            let same =
+                vfs::same(&job.source_fs, &job.dest_fs) && outcome.placed.iter().all(|(s, c)| s.parent() == c.parent());
+            let name = if same { format!("Duplicate of {what}") } else { format!("Copy of {what}") };
+            undo::record(&name, undo::Action::Trash { paths });
+        }
+        JobKind::Move => {
+            let pairs: Vec<(PathBuf, PathBuf)> =
+                outcome.placed.iter().map(|(from, to)| (to.clone(), from.clone())).collect();
+            let name = format!("Move of {what}");
+            if vfs::same(&job.source_fs, &job.dest_fs) {
+                undo::record(&name, undo::Action::Move { fs: job.dest_fs.clone(), pairs });
+            } else {
+                undo::record(
+                    &name,
+                    undo::Action::MoveBetween { from: job.dest_fs.clone(), to: job.source_fs.clone(), pairs },
+                );
+            }
+        }
+        JobKind::Trash => {
+            let pairs = outcome.placed.iter().map(|(from, location)| (location.clone(), from.clone())).collect();
+            undo::record(&format!("Move to Trash of {what}"), undo::Action::PutBack { pairs });
+        }
+        _ => {}
+    }
+}
+
 fn job_finished(id: isize, job: Job, outcome: Outcome, took: std::time::Duration) {
     let Some(app) = app() else { return };
     app.activity.remove(id);
     app.activity.job_done(id);
+    record_undo(&job, &outcome);
     // The folders it changed, shown or not: their last listings are out of
     // date (where items went, and where they came from).
     listing_cache::forget(&job.dest_fs, &job.destination);
@@ -3183,13 +3549,116 @@ pub fn delete_synclet(index: usize) {
 }
 
 /// Makes an empty file (named first) in the pane's folder.
+/// Whether the clipboard holds an image and no files (cheap: menus ask
+/// often).
+fn image_on_clipboard() -> bool {
+    use objc2_app_kit::{NSPasteboardTypePNG, NSPasteboardTypeTIFF};
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let types = unsafe { NSArray::from_slice(&[NSPasteboardTypePNG, NSPasteboardTypeTIFF]) };
+    pasteboard.availableTypeFromArray(&types).is_some() && pane_view::paths_on_pasteboard(&pasteboard).is_empty()
+}
+
+/// An image on the clipboard (and no files), as PNG data: a screenshot,
+/// or an image copied in a browser or an image editor.
+fn pasted_image() -> Option<Vec<u8>> {
+    use objc2_app_kit::{NSBitmapImageFileType, NSBitmapImageRep, NSPasteboardTypePNG, NSPasteboardTypeTIFF};
+    let pasteboard = NSPasteboard::generalPasteboard();
+    if !pane_view::paths_on_pasteboard(&pasteboard).is_empty() {
+        return None;
+    }
+    if let Some(png) = pasteboard.dataForType(unsafe { NSPasteboardTypePNG }) {
+        return Some(png.to_vec());
+    }
+    let tiff = pasteboard.dataForType(unsafe { NSPasteboardTypeTIFF })?;
+    let image = NSBitmapImageRep::imageRepWithData(&tiff)?;
+    let png = unsafe {
+        image.representationUsingType_properties(NSBitmapImageFileType::PNG, &objc2_foundation::NSDictionary::new())
+    }?;
+    Some(png.to_vec())
+}
+
+/// Edit > Paste Image as File: the clipboard's image as a PNG file in the
+/// pane's folder, named like a screenshot ("Pasted Image 2026-11-25 at
+/// 10.15.30.png"), selected.
+fn paste_image(pane: &PaneController) {
+    let Some(png) = pasted_image() else { return };
+    let fs = pane.fs();
+    let now = std::time::SystemTime::now();
+    let name = format!(
+        "Pasted Image {} at {}.png",
+        crate::rename::format_date("YYYY-MM-DD", now),
+        crate::rename::format_date("hh.mm.ss", now)
+    );
+    let path = crate::fs::ops::free_name(&fs, &pane.location().join(&name));
+    let result = fs.open_write_sized(&path, Some(png.len() as u64)).and_then(|mut w| {
+        std::io::Write::write_all(&mut w, &png)?;
+        std::io::Write::flush(&mut w)
+    });
+    let name = title_of(&path);
+    match result {
+        Ok(()) => {
+            oplog::record(oplog::Kind::Change, format!("Pasted an image as \u{201c}{name}\u{201d}"), "");
+            if fs.is_local() {
+                undo::record("Paste Image", undo::Action::Trash { paths: vec![path.clone()] });
+            }
+            pane.reload_selecting(&[path]);
+        }
+        Err(e) => dialogs::show_error(format!("\u{201c}{name}\u{201d} could not be written."), e.to_string()),
+    }
+}
+
+/// Where New File's templates are (files put there are offered).
+fn templates_folder() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("forkz").join("Templates"))
+}
+
+/// The templates (files in the templates folder), by name.
+fn templates() -> Vec<PathBuf> {
+    let Some(folder) = templates_folder() else { return Vec::new() };
+    let mut found: Vec<PathBuf> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && !title_of(p).starts_with('.'))
+        .collect();
+    found.sort_by_key(|p| title_of(p).to_lowercase());
+    found
+}
+
 fn new_file(pane: &PaneController) {
     let initial = "untitled.txt";
-    let Some(name) = dialogs::prompt("New File", "Name of the new file:", "Create", initial, Some("untitled".len()))
-    else {
+    let templates = templates();
+    let mut choices: Vec<String> = vec!["Empty File".into()];
+    choices.extend(templates.iter().map(|t| format!("Template: {}", title_of(t))));
+    choices.push("Open Templates Folder\u{2026}".into());
+    let choice_names: Vec<&str> = choices.iter().map(String::as_str).collect();
+    let Some((name, choice)) = dialogs::prompt_with_choice(
+        "New File",
+        "Name of the new file, and what it starts with (files in the templates folder are offered as templates):",
+        "Create",
+        initial,
+        &choice_names,
+        0,
+    ) else {
         return;
     };
-    let name = name.trim().to_string();
+    if choice == choices.len() - 1 {
+        if let Some(folder) = templates_folder() {
+            if let Err(e) = std::fs::create_dir_all(&folder) {
+                dialogs::show_error("The templates folder could not be made.".into(), e.to_string());
+                return;
+            }
+            pane.navigate_to(vfs::local(), folder);
+        }
+        return;
+    }
+    let template = choice.checked_sub(1).and_then(|i| templates.get(i)).cloned();
+    let mut name = name.trim().to_string();
+    // Left as it was: the template's own name.
+    if let Some(template) = template.as_ref().filter(|_| name == initial) {
+        name = title_of(template);
+    }
     if name.contains('/') {
         dialogs::show_error("Names cannot contain \u{201c}/\u{201d}.".into(), String::new());
         return;
@@ -3200,11 +3669,25 @@ fn new_file(pane: &PaneController) {
         dialogs::show_error(format!("\u{201c}{name}\u{201d} already exists."), "Choose another name.".into());
         return;
     }
-    let result = fs.open_write_sized(&path, Some(0)).and_then(|mut w| std::io::Write::flush(&mut w));
+    let contents = match template.as_ref().map(std::fs::read) {
+        Some(Ok(bytes)) => bytes,
+        Some(Err(e)) => {
+            dialogs::show_error("The template could not be read.".into(), e.to_string());
+            return;
+        }
+        None => Vec::new(),
+    };
+    let result = fs.open_write_sized(&path, Some(contents.len() as u64)).and_then(|mut w| {
+        std::io::Write::write_all(&mut w, &contents)?;
+        std::io::Write::flush(&mut w)
+    });
     match result {
         Ok(()) => {
             let place = if fs.is_local() { path.display().to_string() } else { fs.display_path(&path) };
             oplog::record(oplog::Kind::Change, format!("Created \u{201c}{name}\u{201d}"), place);
+            if fs.is_local() {
+                undo::record("New File", undo::Action::Trash { paths: vec![path.clone()] });
+            }
             pane.reload_selecting(&[path]);
         }
         Err(e) => dialogs::show_error(format!("\u{201c}{name}\u{201d} could not be created."), e.to_string()),

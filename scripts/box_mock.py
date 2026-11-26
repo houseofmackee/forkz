@@ -213,6 +213,16 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(201, public(item))
 
     def update(self, item, body):
+        if "shared_link" in body:
+            link = body["shared_link"]
+            # As on a free account: links cannot be set to expire.
+            if "unshared_at" in link and item["name"].startswith("free"):
+                return self.error(403, "access_denied_insufficient_permissions", "Access denied")
+            item["shared_link"] = {"url": f"https://app.box.com/s/{item['id']}", "access": link.get("access"),
+                                   "unshared_at": link.get("unshared_at")}
+            out = public(item)
+            out["shared_link"] = item["shared_link"]
+            return self.reply(200, out)
         name = body.get("name", item["name"])
         parent = body.get("parent", {}).get("id", item["parent"])
         if conflict(parent, name, skip=item["id"]):

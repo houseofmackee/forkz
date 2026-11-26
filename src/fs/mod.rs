@@ -11,8 +11,10 @@ pub mod glob;
 pub mod icloud;
 pub mod ops;
 pub mod search;
+pub mod split;
 pub mod sync;
 pub mod tags;
+pub mod taken;
 pub mod tree;
 pub mod usage;
 

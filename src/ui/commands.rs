@@ -113,6 +113,22 @@ pub enum Command {
     GitSwitchBranch,
     AppCleaner,
     InstallCommand,
+    CreateChecksumFile,
+    VerifyChecksums,
+    CopyShareLink,
+    MakeSymlink,
+    MakeAlias,
+    MakeHardLink,
+    SetDate,
+    FlattenFolder,
+    ConvertImages,
+    ResizeImages,
+    RotateLeft,
+    RotateRight,
+    MakePdf,
+    SplitFile,
+    JoinFiles,
+    CopyToSeveral,
 }
 
 impl Command {
@@ -246,6 +262,22 @@ impl Command {
         Command::GitSwitchBranch,
         Command::AppCleaner,
         Command::InstallCommand,
+        Command::CreateChecksumFile,
+        Command::VerifyChecksums,
+        Command::CopyShareLink,
+        Command::MakeSymlink,
+        Command::MakeAlias,
+        Command::MakeHardLink,
+        Command::SetDate,
+        Command::FlattenFolder,
+        Command::ConvertImages,
+        Command::ResizeImages,
+        Command::RotateLeft,
+        Command::RotateRight,
+        Command::MakePdf,
+        Command::SplitFile,
+        Command::JoinFiles,
+        Command::CopyToSeveral,
     ];
 
     pub fn tag(self) -> isize {
@@ -382,6 +414,22 @@ impl Command {
             Command::GitSwitchBranch => "Switch Branch\u{2026}",
             Command::AppCleaner => "App Cleaner\u{2026}",
             Command::InstallCommand => "Install Command Line Tool\u{2026}",
+            Command::CreateChecksumFile => "Create Checksum File\u{2026}",
+            Command::VerifyChecksums => "Verify Checksums\u{2026}",
+            Command::CopyShareLink => "Copy Share Link\u{2026}",
+            Command::MakeSymlink => "Make Symbolic Link",
+            Command::MakeAlias => "Make Alias",
+            Command::MakeHardLink => "Make Hard Link",
+            Command::SetDate => "Set Date\u{2026}",
+            Command::FlattenFolder => "Flatten Folder\u{2026}",
+            Command::ConvertImages => "Convert Images\u{2026}",
+            Command::ResizeImages => "Resize Images\u{2026}",
+            Command::RotateLeft => "Rotate Left",
+            Command::RotateRight => "Rotate Right",
+            Command::MakePdf => "Make PDF from Images\u{2026}",
+            Command::SplitFile => "Split File\u{2026}",
+            Command::JoinFiles => "Join Files",
+            Command::CopyToSeveral => "Copy to Several Folders\u{2026}",
         }
     }
 
@@ -499,7 +547,23 @@ impl Command {
             | Command::GitPush
             | Command::GitSwitchBranch
             | Command::AppCleaner
-            | Command::InstallCommand => ("", cmd),
+            | Command::InstallCommand
+            | Command::CreateChecksumFile
+            | Command::VerifyChecksums
+            | Command::CopyShareLink
+            | Command::MakeSymlink
+            | Command::MakeAlias
+            | Command::MakeHardLink
+            | Command::SetDate
+            | Command::FlattenFolder
+            | Command::ConvertImages
+            | Command::ResizeImages
+            | Command::RotateLeft
+            | Command::RotateRight
+            | Command::MakePdf
+            | Command::SplitFile
+            | Command::JoinFiles
+            | Command::CopyToSeveral => ("", cmd),
             // F3, as in Total Commander (also handled in the lists).
             Command::ViewFile => ("\u{f706}", NSEventModifierFlags::empty()),
         }
@@ -518,6 +582,22 @@ impl Command {
             GitSwitchBranch => "arrow.triangle.branch",
             AppCleaner => "trash.square",
             InstallCommand => "terminal",
+            CreateChecksumFile => "number.square",
+            VerifyChecksums => "checkmark.seal",
+            CopyShareLink => "link.badge.plus",
+            MakeSymlink => "arrowshape.turn.up.right",
+            MakeAlias => "arrow.turn.up.right",
+            MakeHardLink => "link",
+            SetDate => "calendar.badge.clock",
+            FlattenFolder => "square.stack.3d.down.right",
+            ConvertImages => "photo.on.rectangle",
+            ResizeImages => "arrow.down.right.and.arrow.up.left",
+            RotateLeft => "rotate.left",
+            RotateRight => "rotate.right",
+            MakePdf => "doc.richtext",
+            SplitFile => "scissors",
+            JoinFiles => "rectangle.compress.vertical",
+            CopyToSeveral => "doc.on.doc",
             OpenInNewTab | NewTab => "plus.rectangle.on.rectangle",
             QuickLook => "eye",
             ViewFile => "doc.text.magnifyingglass",

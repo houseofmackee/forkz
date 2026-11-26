@@ -105,6 +105,36 @@ pub fn signature(account: &str, key_base64: &str, to_sign: &str) -> io::Result<S
     Ok(format!("SharedKey {account}:{}", STANDARD.encode(mac.finalize().into_bytes())))
 }
 
+/// The query of a service SAS that lets anyone read one blob until
+/// `expiry` ("2026-11-25T10:00:00Z"). `secure`: HTTPS only.
+pub fn blob_sas(
+    account: &str,
+    key_base64: &str,
+    container: &str,
+    blob: &str,
+    expiry: &str,
+    secure: bool,
+) -> io::Result<String> {
+    let protocol = if secure { "https" } else { "" };
+    let resource = format!("/blob/{account}/{container}/{blob}");
+    // Permissions, start, expiry, resource, identifier, IP, protocol,
+    // version, resource type, snapshot time, encryption scope, and five
+    // response headers (version 2020-12-06 and later).
+    let to_sign = format!("r\n\n{expiry}\n{resource}\n\n\n{protocol}\n{VERSION}\nb\n\n\n\n\n\n\n");
+    let key = STANDARD
+        .decode(key_base64.trim())
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "The account key is not valid (it is base64)."))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("any key length");
+    mac.update(to_sign.as_bytes());
+    let signature = STANDARD.encode(mac.finalize().into_bytes());
+    let mut query = vec![("sv", VERSION.to_string())];
+    if secure {
+        query.push(("spr", protocol.to_string()));
+    }
+    query.extend([("se", expiry.to_string()), ("sr", "b".into()), ("sp", "r".into()), ("sig", signature)]);
+    Ok(query.iter().map(|(k, v)| format!("{k}={}", http::encode_value(v))).collect::<Vec<_>>().join("&"))
+}
+
 /// Connects: lists the containers (which checks the key), asking for the
 /// key if it is missing or refused.
 pub fn connect(params: AzureParams, prompter: &dyn Prompter) -> io::Result<Arc<AzureFs>> {
@@ -440,6 +470,33 @@ impl Vfs for AzureFs {
             return Some(Err(io::Error::other("Not a file.")));
         }
         Some(self.copy_blob(&format!("/{from_container}/{from_blob}"), &format!("/{to_container}/{to_blob}")))
+    }
+
+    fn shares_links(&self) -> bool {
+        true
+    }
+
+    fn share_link(&self, path: &Path, valid_for: Duration) -> io::Result<(String, bool)> {
+        let (Some(container), blob) = split(path) else {
+            return Err(io::Error::new(io::ErrorKind::IsADirectory, "Only files can be shared with a link."));
+        };
+        if blob.is_empty() || self.stat(path)?.is_folder_like() {
+            return Err(io::Error::new(io::ErrorKind::IsADirectory, "Only files can be shared with a link."));
+        }
+        let expiry = http::iso_utc(SystemTime::now() + valid_for);
+        let query = blob_sas(
+            &self.params.account,
+            self.key.as_deref().unwrap_or(""),
+            &container,
+            &blob,
+            &expiry,
+            self.params.secure,
+        )?;
+        let encoded = http::encode_path(&path.to_string_lossy());
+        let url_path =
+            if path_style(&self.params.host) { format!("/{}{encoded}", self.params.account) } else { encoded };
+        let scheme = if self.params.secure { "https" } else { "http" };
+        Ok((format!("{scheme}://{}{url_path}?{query}", self.host_header()), true))
     }
 
     fn renames_folders(&self) -> bool {

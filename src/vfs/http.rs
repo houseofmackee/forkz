@@ -75,6 +75,20 @@ pub fn utc_stamp(time: SystemTime) -> (String, String) {
     (date, time)
 }
 
+/// "2026-11-25T10:20:30Z": a moment in UTC, as Azure and Box read it.
+pub fn iso_utc(time: SystemTime) -> String {
+    let (_, stamp) = utc_stamp(time);
+    format!(
+        "{}-{}-{}T{}:{}:{}Z",
+        &stamp[0..4],
+        &stamp[4..6],
+        &stamp[6..8],
+        &stamp[9..11],
+        &stamp[11..13],
+        &stamp[13..15]
+    )
+}
+
 /// "2026-11-04T10:20:30.000Z" or "2012-12-12T10:53:43-08:00" (ISO 8601
 /// as S3 and Box write it).
 pub fn parse_iso(text: &str) -> Option<SystemTime> {
@@ -216,6 +230,8 @@ mod tests {
         assert_eq!(decode("/my%20folder/%C3%A4%2Bb.txt"), "/my folder/ä+b.txt");
         let time = SystemTime::UNIX_EPOCH + Duration::from_secs(1_440_938_160);
         assert_eq!(utc_stamp(time), ("20150830".into(), "20150830T123600Z".into()));
+        assert_eq!(iso_utc(time), "2015-08-30T12:36:00Z");
+        assert_eq!(parse_iso(&iso_utc(time)), Some(time));
         let utc = parse_iso("2026-11-04T10:20:30.000Z").unwrap();
         assert_eq!(parse_iso("2026-11-04T02:20:30-08:00"), Some(utc));
         assert_eq!(parse_iso("2026-11-04T11:50:30+01:30"), Some(utc));

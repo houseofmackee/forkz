@@ -20,7 +20,7 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::fs::Entry;
 
@@ -139,6 +139,19 @@ pub trait Vfs: Send + Sync {
     /// more each). None where listing folder by folder is the way.
     fn list_tree(&self, _folder: &Path) -> Option<io::Result<Vec<Entry>>> {
         None
+    }
+
+    /// Whether `share_link` makes links here (cloud storage).
+    fn shares_links(&self) -> bool {
+        false
+    }
+
+    /// A link anyone can open to download an item, working for
+    /// `valid_for` (a presigned URL, a shared access signature, or a
+    /// shared link), and whether it does stop working then (Box's free
+    /// accounts make links that do not). Only where `shares_links`.
+    fn share_link(&self, _path: &Path, _valid_for: Duration) -> io::Result<(String, bool)> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "Links cannot be shared from here."))
     }
 
     /// Whether a file written here only appears once complete (object
@@ -275,8 +288,9 @@ impl Vfs for LocalFs {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o7777))?;
         }
         if let Some(modified) = modified {
-            let file = std::fs::File::options().write(true).open(path)?;
-            file.set_modified(modified)?;
+            // Opened to read: the owner may set dates so (of folders and
+            // read-only files too).
+            std::fs::File::open(path)?.set_modified(modified)?;
         }
         Ok(())
     }

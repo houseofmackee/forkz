@@ -107,6 +107,39 @@ pub fn authorization(
     )
 }
 
+/// A presigned URL: a GET of `path` ("/bucket/key", encoded) that works
+/// without keys until `expires` seconds after `now` (at most 7 days).
+#[allow(clippy::too_many_arguments)]
+pub fn presigned_url(
+    access_key: &str,
+    secret_key: &str,
+    region: &str,
+    scheme: &str,
+    host: &str,
+    path: &str,
+    expires: u64,
+    now: SystemTime,
+) -> String {
+    let (date, stamp) = http::utc_stamp(now);
+    let scope = format!("{date}/{region}/s3/aws4_request");
+    let mut query: Vec<(String, String)> = vec![
+        ("X-Amz-Algorithm".into(), "AWS4-HMAC-SHA256".into()),
+        ("X-Amz-Credential".into(), format!("{access_key}/{scope}")),
+        ("X-Amz-Date".into(), stamp.clone()),
+        ("X-Amz-Expires".into(), expires.min(604_800).to_string()),
+        ("X-Amz-SignedHeaders".into(), "host".into()),
+    ];
+    query = query.into_iter().map(|(k, v)| (http::encode_value(&k), http::encode_value(&v))).collect();
+    query.sort();
+    let canonical_query = query.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
+    let canonical_request = format!("GET\n{path}\n{canonical_query}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD");
+    let string_to_sign =
+        format!("AWS4-HMAC-SHA256\n{stamp}\n{scope}\n{}", hex(&Sha256::digest(canonical_request.as_bytes())));
+    let key = hmac(&hmac(&hmac(&hmac(format!("AWS4{secret_key}").as_bytes(), &date), region), "s3"), "aws4_request");
+    let signature = hex(&hmac(&key, &string_to_sign));
+    format!("{scheme}://{host}{path}?{canonical_query}&X-Amz-Signature={signature}")
+}
+
 /// Connects: lists the buckets (which checks the keys), asking for the
 /// secret key if it is missing or refused.
 pub fn connect(params: S3Params, prompter: &dyn Prompter) -> io::Result<Arc<S3Fs>> {
@@ -572,6 +605,29 @@ impl Vfs for S3Fs {
         Some(self.list_objects(&bucket, &prefix, None, true))
     }
 
+    fn shares_links(&self) -> bool {
+        true
+    }
+
+    fn share_link(&self, path: &Path, valid_for: Duration) -> io::Result<(String, bool)> {
+        let (_, key) = split(path);
+        if key.is_empty() || self.stat(path)?.is_folder_like() {
+            return Err(io::Error::new(io::ErrorKind::IsADirectory, "Only files can be shared with a link."));
+        }
+        let scheme = if self.params.secure { "https" } else { "http" };
+        let url = presigned_url(
+            &self.params.access_key,
+            self.secret.as_deref().unwrap_or(""),
+            &self.params.region,
+            scheme,
+            &self.host_header(),
+            &http::encode_path(&path.to_string_lossy()),
+            valid_for.as_secs(),
+            SystemTime::now(),
+        );
+        Ok((url, true))
+    }
+
     fn renames_folders(&self) -> bool {
         false
     }
@@ -742,6 +798,28 @@ mod tests {
 
     /// AWS's own example (S3 docs, "Signature Calculations for the
     /// Authorization Header": GET Object with a range).
+    /// AWS's example of a presigned URL ("Authenticating Requests: Using
+    /// Query Parameters"), virtual-hosted style.
+    #[test]
+    fn presigns_like_aws() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_369_353_600); // 2013-05-24
+        let url = presigned_url(
+            "AKIAIOSFODNN7EXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            "us-east-1",
+            "https",
+            "examplebucket.s3.amazonaws.com",
+            "/test.txt",
+            86_400,
+            now,
+        );
+        assert!(url.starts_with("https://examplebucket.s3.amazonaws.com/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&"), "{url}");
+        assert!(
+            url.ends_with("X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"),
+            "{url}"
+        );
+    }
+
     #[test]
     fn signature_matches_aws_example() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_369_353_600); // 2013-05-24T00:00:00Z

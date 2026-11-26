@@ -39,6 +39,8 @@ pub struct Job {
     pub open_when_done: bool,
     /// The app to open it with (None: its default app).
     pub open_with: Option<PathBuf>,
+    /// Started by Undo or Redo (which registers what comes next itself).
+    pub from_undo: bool,
     /// Keep modification dates on streamed copies (uploads, downloads).
     pub keep_dates: bool,
     /// Items inside the folders copied that the filename filters leave out
@@ -68,6 +70,7 @@ impl Job {
             on_conflict: None,
             open_when_done: false,
             open_with: None,
+            from_undo: false,
             exclude: None,
             keep_dates: true,
         }
@@ -182,6 +185,9 @@ pub trait Observer {
 pub struct Outcome {
     /// What was made at the top level of the destination (to select it).
     pub created: Vec<PathBuf>,
+    /// Where each top-level item went: (source, where it is now). For the
+    /// Trash, where in the Trash (items Finder moved are not listed).
+    pub placed: Vec<(PathBuf, PathBuf)>,
     pub skipped: usize,
     pub failed: Vec<(PathBuf, String)>,
     pub cancelled: bool,
@@ -402,14 +408,23 @@ impl Runner<'_> {
             self.progress.current = file_name(source);
             self.report();
             match trash_plainly(source) {
-                Ok(()) => self.outcome.created.push(source.clone()),
+                Ok(location) => {
+                    self.outcome.created.push(source.clone());
+                    if let Some(location) = location {
+                        self.outcome.placed.push((source.clone(), location));
+                    }
+                }
                 Err(e) if e.kind() == io::ErrorKind::PermissionDenied && TRASH_WITH_PERMISSION.get().is_some() => {
                     need_permission.push(source.clone());
                     continue;
                 }
                 Err(_) => {
-                    if self.attempt(source, |_| trash_plainly(source))? {
+                    let mut location = None;
+                    if self.attempt(source, |_| trash_plainly(source).map(|l| location = l))? {
                         self.outcome.created.push(source.clone());
+                        if let Some(location) = location {
+                            self.outcome.placed.push((source.clone(), location));
+                        }
                     }
                 }
             }
@@ -534,11 +549,13 @@ impl Runner<'_> {
                 // Copying into its own folder: a duplicate next to it.
                 let target = unique_name(&self.dst, &target);
                 if self.copy_item(source, &target)? {
+                    self.outcome.placed.push((source.clone(), target.clone()));
                     self.outcome.created.push(target);
                 }
                 continue;
             }
             if let Some(target) = self.place(source, &target, moving)? {
+                self.outcome.placed.push((source.clone(), target.clone()));
                 self.outcome.created.push(target);
             }
         }
@@ -1127,6 +1144,11 @@ pub fn unique_name(fs: &FsRef, path: &Path) -> PathBuf {
     }
 }
 
+/// The path itself if nothing has that name, else `unique_name`'s.
+pub fn free_name(fs: &FsRef, path: &Path) -> PathBuf {
+    if fs.stat(path).is_err() { path.to_path_buf() } else { unique_name(fs, path) }
+}
+
 fn temporary_name(target: &Path) -> PathBuf {
     let parent = target.parent().unwrap_or(Path::new("/"));
     parent.join(format!(".{}.forkz-partial", file_name(target)))
@@ -1242,7 +1264,7 @@ fn transfer_one(
 /// Moves an item to the Trash (so it can be put back from Finder),
 /// asking for permission if it needs it.
 pub fn trash(path: &Path) -> io::Result<()> {
-    match trash_plainly(path) {
+    match trash_plainly(path).map(|_| ()) {
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => match TRASH_WITH_PERMISSION.get() {
             Some(trash) => trash(&[path.to_path_buf()]),
             None => Err(e),
@@ -1252,12 +1274,13 @@ pub fn trash(path: &Path) -> io::Result<()> {
 }
 
 /// Moves an item to the Trash as the user (PermissionDenied if that is not
-/// allowed).
-fn trash_plainly(path: &Path) -> io::Result<()> {
+/// allowed): where in the Trash it went.
+pub fn trash_plainly(path: &Path) -> io::Result<Option<PathBuf>> {
     use objc2_foundation::{NSFileManager, NSString, NSURL};
     let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
-    match NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, None) {
-        Ok(()) => Ok(()),
+    let mut resulting = None;
+    match NSFileManager::defaultManager().trashItemAtURL_resultingItemURL_error(&url, Some(&mut resulting)) {
+        Ok(()) => Ok(resulting.and_then(|u| u.path()).map(|p| PathBuf::from(p.to_string()))),
         // NSFileWriteNoPermissionError, NSFileReadNoPermissionError.
         Err(e) if matches!(e.code(), 513 | 257) => {
             Err(io::Error::new(io::ErrorKind::PermissionDenied, e.localizedDescription().to_string()))
