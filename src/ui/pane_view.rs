@@ -89,11 +89,20 @@ define_class!(
         }
 
         /// A double-click on ".." goes up. (The table does not send its
-        /// double action for that row, as it cannot be dragged.)
+        /// double action for that row, as it cannot be dragged.) A click
+        /// on the name of the item already selected renames it in place,
+        /// if no second click follows (as in Finder).
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            if !self.double_clicked_parent(event) {
-                unsafe { msg_send![super(self), mouseDown: event] }
+            if self.double_clicked_parent(event) {
+                return;
+            }
+            let candidate = self.rename_candidate(event);
+            let serial = CLICKS.with(|c| c.get() + 1);
+            CLICKS.with(|c| c.set(serial));
+            unsafe { msg_send![super(self), mouseDown: event] }
+            if let Some(path) = candidate {
+                self.rename_after_pause(event, serial, path);
             }
         }
 
@@ -207,7 +216,73 @@ define_class!(
     unsafe impl NSWindowDelegate for FileTable {}
 );
 
+thread_local! {
+    /// Counts clicks in the lists, so a pending slow-click rename knows
+    /// another click came.
+    static CLICKS: Cell<u64> = const { Cell::new(0) };
+}
+
 impl FileTable {
+    /// The item a click would rename in place: a single click on the name
+    /// (not the icon) of the only item selected, in the focused list.
+    fn rename_candidate(&self, event: &NSEvent) -> Option<PathBuf> {
+        let keys = NSEventModifierFlags::Command
+            | NSEventModifierFlags::Shift
+            | NSEventModifierFlags::Option
+            | NSEventModifierFlags::Control;
+        if event.clickCount() != 1 || event.modifierFlags().intersects(keys) {
+            return None;
+        }
+        let controller = self.controller()?;
+        let window = self.window()?;
+        let focused = window.isKeyWindow()
+            && window.firstResponder().is_some_and(|r| {
+                std::ptr::eq(&*r as *const _ as *const AnyObject, self as *const _ as *const AnyObject)
+            });
+        if !focused || !super::renames_in_place() || controller.fs().read_only() {
+            return None;
+        }
+        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        let row = self.rowAtPoint(point);
+        let column = self.columnAtPoint(point);
+        let name = self.columnWithIdentifier(&ns("name"));
+        if row < 0 || column != name || self.selectedRowIndexes().count() != 1 || self.selectedRow() != row {
+            return None;
+        }
+        // On the name, not the icon.
+        let icon = (look().row - 6.0).clamp(16.0, 32.0).floor() + 8.0;
+        if point.x < self.rectOfColumn(name).origin.x + icon {
+            return None;
+        }
+        let state = controller.ivars().state.borrow();
+        if is_parent_row(&state, row as usize) {
+            return None;
+        }
+        entry_at(&state, row as usize).map(|e| e.path.clone())
+    }
+
+    /// Renames in place once the double-click time is over, unless another
+    /// click came, the selection changed, or the click was a drag.
+    fn rename_after_pause(&self, event: &NSEvent, serial: u64, path: PathBuf) {
+        let interval = NSEvent::doubleClickInterval();
+        let held = objc2_foundation::NSProcessInfo::processInfo().systemUptime() - event.timestamp();
+        if held >= interval {
+            return;
+        }
+        let Some(index) = self.controller().map(|c| c.index()) else { return };
+        let wait = std::time::Duration::from_secs_f64(interval - held + 0.05);
+        let when = dispatch2::DispatchTime::try_from(wait).unwrap_or(dispatch2::DispatchTime::NOW);
+        let _ = DispatchQueue::main().after(when, move || {
+            if CLICKS.with(Cell::get) != serial {
+                return;
+            }
+            let Some(pane) = super::pane(index) else { return };
+            if pane.selected_paths() == [path.clone()] {
+                super::inline_rename::begin(index, &path);
+            }
+        });
+    }
+
     fn double_clicked_parent(&self, event: &NSEvent) -> bool {
         if event.clickCount() != 2 {
             return false;
@@ -2645,6 +2720,29 @@ impl PaneController {
         self.ivars().state.borrow().sort
     }
 
+    /// The Name field of an item's row, to edit it in place (list view
+    /// only).
+    pub fn name_field_for(&self, path: &Path) -> Option<Retained<NSTextField>> {
+        if self.view_mode() != crate::pane::ViewMode::List {
+            return None;
+        }
+        let row = self.ivars().state.borrow().table_row_of(path)? as NSInteger;
+        let table = self.table();
+        let column = table.columnWithIdentifier(&ns("name"));
+        if column < 0 {
+            return None;
+        }
+        table.scrollRowToVisible(row);
+        let view = table.viewAtColumn_row_makeIfNecessary(column, row, true)?;
+        let cell = view.downcast::<NSTableCellView>().ok()?;
+        unsafe { cell.textField() }
+    }
+
+    /// Draws the rows again (keeping the selection).
+    pub fn redraw_rows(&self) {
+        self.table().reloadData();
+    }
+
     /// Sorts the list another way (as a click on a column title would).
     pub fn apply_sort(&self, sort: Sort) {
         if self.sort() == sort {
@@ -2705,6 +2803,12 @@ impl PaneController {
 
     /// Reads the folder again, keeping the selection.
     pub fn reload(&self) {
+        // Not while a name is edited in the list (it would end the
+        // editing): after it.
+        if super::inline_rename::is_editing(self.index()) {
+            super::inline_rename::reload_later();
+            return;
+        }
         // The column view lists every column again (a drop or change may
         // be in any of them).
         if let Some(columns) = self.ivars().columns.get() {

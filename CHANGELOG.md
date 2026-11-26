@@ -7,6 +7,16 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-11-26
+
+### Added
+
+- Rename in the list, as in Finder: press Return (or F2), or click the name of the selected item again, and type the new name; the part before the extension is selected. Return or a click elsewhere renames, and Escape leaves it as it was ([#12](https://github.com/houseofmackee/forkz/issues/12)). Settings > General > Rename in the list turns it off (Return then asks in a dialog, as before).
+
+### Changed
+
+- Updated notify (folder watching) to 9.0, suppaftp (FTP) to 13.0, regex, and toml. suppaftp no longer uses the unmaintained chrono crate.
+
 ## [0.23.0] - 2026-11-26
 
 ### Added
@@ -479,7 +489,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.23.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.23.1...HEAD
+[0.23.1]: https://github.com/houseofmackee/forkz/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/houseofmackee/forkz/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/houseofmackee/forkz/compare/v0.21.1...v0.22.0
 [0.21.1]: https://github.com/houseofmackee/forkz/compare/v0.21.0...v0.21.1

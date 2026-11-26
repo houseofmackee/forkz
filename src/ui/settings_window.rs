@@ -44,6 +44,7 @@ struct Controls {
     show_hidden: Retained<NSButton>,
     start_on_parent: Retained<NSButton>,
     folder_views: Retained<NSButton>,
+    rename_in_place: Retained<NSButton>,
     app_leftovers: Retained<NSButton>,
     sound_effects: Retained<NSButton>,
     transfer_sounds: Retained<NSButton>,
@@ -343,6 +344,7 @@ impl SettingsWindow {
             show_hidden: checkbox("Show hidden files", self, mtm),
             start_on_parent: checkbox("Select \u{201c}..\u{201d} when opening a folder", self, mtm),
             folder_views: checkbox("Remember view settings for each folder", self, mtm),
+            rename_in_place: checkbox("Rename in the list (Return, or click a selected name)", self, mtm),
             app_leftovers: checkbox(
                 "Offer to remove an app\u{2019}s leftover files when it goes to the Trash",
                 self,
@@ -446,6 +448,7 @@ impl SettingsWindow {
             vec![
                 (label("Files:", mtm), view(&*controls.show_hidden)),
                 (empty(mtm), view(&*controls.start_on_parent)),
+                (empty(mtm), view(&*controls.rename_in_place)),
                 (empty(mtm), view(&*controls.folder_views)),
                 (
                     empty(mtm),
@@ -771,6 +774,7 @@ impl SettingsWindow {
         set(&c.show_hidden, settings.show_hidden);
         set(&c.start_on_parent, settings.general.start_on_parent);
         set(&c.folder_views, settings.general.remember_folder_views);
+        set(&c.rename_in_place, settings.general.rename_in_place);
         set(&c.app_leftovers, settings.general.app_leftovers);
         set(&c.sound_effects, settings.general.sound_effects);
         set(&c.transfer_sounds, settings.general.transfer_sounds);
@@ -831,6 +835,7 @@ impl SettingsWindow {
             s.show_hidden = show_hidden;
             s.general.start_on_parent = on(&c.start_on_parent);
             s.general.remember_folder_views = on(&c.folder_views);
+            s.general.rename_in_place = on(&c.rename_in_place);
             s.general.app_leftovers = on(&c.app_leftovers);
             s.general.sound_effects = on(&c.sound_effects);
             s.general.transfer_sounds = on(&c.transfer_sounds);

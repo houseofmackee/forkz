@@ -246,7 +246,7 @@ Settings > Tools holds your own commands, run by zsh in the pane's folder on the
 | Key | Action |
 | --- | --- |
 | Tab | Switch to the other pane |
-| Return or F2 | Rename (several items: Rename Multiple Items) |
+| Return or F2 | Rename in the list (several items: Rename Multiple Items); clicking the name of the selected item again does the same |
 | Command-Down or Command-O | Open |
 | Option-Command-O | Open with the default app (right-click > Open With for another) |
 | Command-Up, or open ".." | Enclosing folder |

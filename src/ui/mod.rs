@@ -16,6 +16,7 @@ mod filters_editor;
 mod gallery_view;
 mod git_actions;
 mod icon_view;
+mod inline_rename;
 pub mod intents;
 mod listing_cache;
 mod multi_rename;
@@ -2978,6 +2979,8 @@ fn new_folder(pane: &PaneController) {
 fn rename(pane: &PaneController) {
     let targets = pane.target_paths();
     match targets.as_slice() {
+        // In the list itself when it can be (list view), else asked.
+        [path] if renames_in_place() && !pane.fs().read_only() && inline_rename::begin(pane.index(), path) => {}
         [path] => rename_path(pane, path),
         [] => {}
         _ => multi_rename(pane),
@@ -3105,7 +3108,19 @@ fn rename_path(pane: &PaneController, path: &Path) {
     ) else {
         return;
     };
-    match ops::rename(&fs, path, new_name.trim()) {
+    rename_to(pane, path, new_name.trim());
+}
+
+/// Whether Return and a click on a selected name rename in the list.
+fn renames_in_place() -> bool {
+    app().is_none_or(|a| a.settings.borrow().general.rename_in_place)
+}
+
+/// Renames an item (logged, undoable), then selects it.
+fn rename_to(pane: &PaneController, path: &Path, new_name: &str) {
+    let name = title_of(path);
+    let fs = pane.fs();
+    match ops::rename(&fs, path, new_name) {
         Ok(renamed) => {
             let folder = if fs.is_local() {
                 renamed.parent().map(|p| p.display().to_string())

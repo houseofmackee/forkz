@@ -236,6 +236,9 @@ pub struct GeneralSettings {
     /// Each folder keeps its own view, sort, and grouping (others use the
     /// pane's).
     pub remember_folder_views: bool,
+    /// Return, and a click on the selected item's name, rename it in the
+    /// list (else Return asks in a dialog).
+    pub rename_in_place: bool,
 }
 
 impl Default for GeneralSettings {
@@ -249,6 +252,7 @@ impl Default for GeneralSettings {
             transfer_sounds: true,
             drag_moves: false,
             remember_folder_views: false,
+            rename_in_place: true,
         }
     }
 }
