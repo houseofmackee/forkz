@@ -1144,6 +1144,13 @@ impl PaneController {
                 }
             }
             "group" => entry.group.clone().unwrap_or_default(),
+            "opened" => match state.meta_of(&entry.path).and_then(|m| m.last_opened) {
+                Some(time) => format_date(Some(time)),
+                None => String::new(),
+            },
+            "dimensions" | "duration" | "comment" => {
+                state.meta_of(&entry.path).map(|m| m.text(&column_id)).unwrap_or_default()
+            }
             _ => kind_of(entry),
         };
         // The full name on hover (for names too long for the column).
@@ -1229,6 +1236,10 @@ impl PaneController {
             ("group", "Group", 90.0, NSTextAlignment::Left),
             ("tags", "Tags", 110.0, NSTextAlignment::Left),
             ("git", "Git", 80.0, NSTextAlignment::Left),
+            ("dimensions", "Dimensions", 100.0, NSTextAlignment::Left),
+            ("duration", "Duration", 70.0, NSTextAlignment::Right),
+            ("opened", "Date Last Opened", 140.0, NSTextAlignment::Left),
+            ("comment", "Comments", 160.0, NSTextAlignment::Left),
             // Search results: where each item is.
             ("folder", "Folder", 170.0, NSTextAlignment::Left),
         ] {
@@ -1240,7 +1251,8 @@ impl PaneController {
             column.headerCell().setAlignment(align);
             // Size and date sort largest/newest first on the first click.
             let ascending = !matches!(id, "size" | "modified");
-            if !matches!(id, "permissions" | "owner" | "group" | "tags" | "folder" | "git") {
+            let unsorted = ["permissions", "owner", "group", "tags", "folder", "git"];
+            if !unsorted.contains(&id) && !crate::fs::metadata::COLUMNS.contains(&id) {
                 let prototype = NSSortDescriptor::sortDescriptorWithKey_ascending(Some(&ns(id)), ascending);
                 column.setSortDescriptorPrototype(Some(&prototype));
             }
@@ -1722,6 +1734,41 @@ impl PaneController {
         }
         let pending = self.ivars().pending_select.take();
         self.refresh(pending.as_deref());
+        self.read_metadata();
+    }
+
+    /// Reads what Spotlight knows of the items in the background, when a
+    /// metadata column shows (Dimensions, Duration, Date Last Opened,
+    /// Comments); the list shows it when it comes.
+    pub fn read_metadata(&self) {
+        let state = self.ivars().state.borrow();
+        let columns = super::visible_columns(true);
+        if !state.is_local() || !columns.iter().any(|c| crate::fs::metadata::COLUMNS.contains(&c.as_str())) {
+            return;
+        }
+        let generation = state.generation();
+        // Enough for any folder one looks through.
+        let paths: Vec<PathBuf> = state.entries().iter().take(5000).map(|e| e.path.clone()).collect();
+        drop(state);
+        let index = self.index();
+        std::thread::spawn(move || {
+            let found: std::collections::HashMap<PathBuf, crate::fs::metadata::Meta> = paths
+                .into_iter()
+                .map(|path| {
+                    let meta = crate::fs::metadata::read(&path);
+                    (path, meta)
+                })
+                .filter(|(_, meta)| !meta.is_empty())
+                .collect();
+            DispatchQueue::main().exec_async(move || {
+                let Some(pane) = super::pane(index) else { return };
+                if pane.ivars().state.borrow_mut().set_meta(generation, found)
+                    && let Some(table) = pane.ivars().table.get()
+                {
+                    table.reloadData();
+                }
+            });
+        });
     }
 
     /// A background listing arrived.
@@ -2417,6 +2464,10 @@ impl PaneController {
         menu.setAutoenablesItems(false);
         menu.addItem(&note);
         for (index, (id, title)) in crate::settings::COLUMNS.iter().enumerate() {
+            // What Spotlight knows: only on the Mac.
+            if !self.is_local() && crate::fs::metadata::COLUMNS.contains(id) {
+                continue;
+            }
             let item = unsafe {
                 NSMenuItem::initWithTitle_action_keyEquivalent(
                     NSMenuItem::alloc(self.mtm()),
@@ -2592,6 +2643,16 @@ impl PaneController {
 
     pub fn sort(&self) -> Sort {
         self.ivars().state.borrow().sort
+    }
+
+    /// Sorts the list another way (as a click on a column title would).
+    pub fn apply_sort(&self, sort: Sort) {
+        if self.sort() == sort {
+            return;
+        }
+        let descriptor = NSSortDescriptor::sortDescriptorWithKey_ascending(Some(&ns(sort.key.id())), sort.ascending);
+        // The table tells its delegate, which sorts.
+        self.table().setSortDescriptors(&NSArray::from_slice(&[&*descriptor]));
     }
 
     /// Whether the pane shows search results.

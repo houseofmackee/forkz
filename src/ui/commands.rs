@@ -80,6 +80,9 @@ pub enum Command {
     GroupKind,
     GroupModified,
     GroupSize,
+    GroupTag,
+    UseAsDefaultView,
+    ResetFolderView,
     ViewAsList,
     ViewAsIcons,
     ViewAsColumns,
@@ -152,6 +155,7 @@ impl Command {
             Command::GroupKind => Some(GroupBy::Kind),
             Command::GroupModified => Some(GroupBy::Modified),
             Command::GroupSize => Some(GroupBy::Size),
+            Command::GroupTag => Some(GroupBy::Tag),
             _ => None,
         }
     }
@@ -229,6 +233,9 @@ impl Command {
         Command::GroupKind,
         Command::GroupModified,
         Command::GroupSize,
+        Command::GroupTag,
+        Command::UseAsDefaultView,
+        Command::ResetFolderView,
         Command::ViewAsList,
         Command::ViewAsIcons,
         Command::ViewAsColumns,
@@ -381,6 +388,9 @@ impl Command {
             Command::GroupKind => "Group by Kind",
             Command::GroupModified => "Group by Date Modified",
             Command::GroupSize => "Group by Size",
+            Command::GroupTag => "Group by Tags",
+            Command::UseAsDefaultView => "Use as Default View",
+            Command::ResetFolderView => "Reset to Default View",
             Command::ViewAsList => "as List",
             Command::ViewAsIcons => "as Icons",
             Command::ViewAsColumns => "as Columns",
@@ -513,7 +523,13 @@ impl Command {
             Command::SyncBrowsing => ("b", shift_cmd),
             Command::ExpandPreview => ("p", cmd | NSEventModifierFlags::Control),
             // Control-Command-1 to 9 open workspaces.
-            Command::GroupNone | Command::GroupKind | Command::GroupModified | Command::GroupSize => ("", cmd),
+            Command::GroupNone
+            | Command::GroupKind
+            | Command::GroupModified
+            | Command::GroupSize
+            | Command::GroupTag
+            | Command::UseAsDefaultView
+            | Command::ResetFolderView => ("", cmd),
             // As in Finder.
             Command::ViewAsList => ("1", cmd),
             Command::ViewAsIcons => ("2", cmd),

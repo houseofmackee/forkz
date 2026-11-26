@@ -346,6 +346,7 @@ pub fn toggle_column(local: bool, id: &str) {
     for pane in &app.panes {
         if pane.is_local() == local {
             pane.apply_columns();
+            pane.read_metadata();
         }
     }
 }
@@ -385,7 +386,8 @@ fn validate_menu_item(item: &NSMenuItem) -> bool {
         let id = crate::settings::COLUMNS.get(item.tag() as usize).map_or("", |c| c.0);
         let on = app.settings.borrow().columns.visible(local).iter().any(|v| v == id);
         item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
-        return true;
+        // What Spotlight knows: only on the Mac.
+        return local || !crate::fs::metadata::COLUMNS.contains(&id);
     }
     if item.action() == Some(sel!(transferLimit:)) {
         let current = app().map_or(0, |a| a.activity.limit()) as isize;
@@ -662,10 +664,14 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     apply_appearance(&app);
     apply_speed_limits(&app);
     APP.with(|a| a.set(app.clone())).map_err(|_| anyhow::anyhow!("the app is already running"))?;
+    // Folders that keep their own view show it from the start.
+    apply_folder_view(0);
+    apply_folder_view(1);
     // The columns from settings (the panes were made before the app was
     // reachable, with the default columns).
     for pane in &app.panes {
         pane.apply_columns();
+        pane.read_metadata();
     }
 
     start_watching();
@@ -1043,13 +1049,17 @@ fn main_menu(
     }
     separator(&view);
     let group = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Group By"));
-    for c in [Command::GroupNone, Command::GroupKind, Command::GroupModified, Command::GroupSize] {
+    for c in [Command::GroupNone, Command::GroupKind, Command::GroupModified, Command::GroupSize, Command::GroupTag] {
         command(&group, c);
     }
     let group_item = NSMenuItem::new(mtm);
     group_item.setTitle(&ns("Group By"));
     group_item.setSubmenu(Some(&group));
     view.addItem(&group_item);
+    // With Settings > General > Remember view settings for each folder.
+    for c in [Command::UseAsDefaultView, Command::ResetFolderView] {
+        command(&view, c);
+    }
     let columns = NSMenu::initWithTitle(NSMenu::alloc(mtm), &ns("Columns"));
     for (index, (_, title)) in crate::settings::COLUMNS.iter().enumerate() {
         let item = unsafe {
@@ -1313,6 +1323,9 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
         Command::Disconnect => !local || pane.fs().key().starts_with("mount:"),
         Command::OpenWithApp => has_selection,
         Command::CopyShareLink => has_selection && shares_links(&pane.fs()),
+        Command::UseAsDefaultView | Command::ResetFolderView => {
+            app.settings.borrow().general.remember_folder_views && !pane.showing_results()
+        }
         Command::MakeSymlink
         | Command::MakeAlias
         | Command::MakeHardLink
@@ -1415,19 +1428,28 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::ViewAsList | Command::ViewAsIcons | Command::ViewAsColumns | Command::ViewAsGallery => {
             if let Some(mode) = command.view_mode() {
                 pane.set_view_mode(mode);
-                update_settings(|s| {
-                    let side = if index == 0 { &mut s.left } else { &mut s.right };
-                    side.view = mode;
-                });
+                view_changed(index);
             }
         }
-        Command::GroupNone | Command::GroupKind | Command::GroupModified | Command::GroupSize => {
+        Command::GroupNone | Command::GroupKind | Command::GroupModified | Command::GroupSize | Command::GroupTag => {
             if let Some(group) = command.grouping() {
                 pane.set_group_by(group);
-                update_settings(|s| {
-                    let side = if index == 0 { &mut s.left } else { &mut s.right };
-                    side.group_by = group;
-                });
+                view_changed(index);
+            }
+        }
+        Command::UseAsDefaultView => {
+            let (view, sort, group) = (pane.view_mode(), pane.sort(), pane.group_by());
+            update_settings(|s| {
+                let side = if index == 0 { &mut s.left } else { &mut s.right };
+                side.view = view;
+                side.sort = sort;
+                side.group_by = group;
+            });
+        }
+        Command::ResetFolderView => {
+            if let Some(key) = folder_key(&pane) {
+                update_settings(|s| s.forget_folder_view(&key));
+                apply_folder_view(index);
             }
         }
         Command::ZoomIn => zoom(1),
@@ -1840,10 +1862,10 @@ pub fn open_link(link: &str) {
                 None => Err(format!("There is no saved site named \u{201c}{site}\u{201d}.")),
             }
         }
-        Ok(Link::Search { path, text, kind, contents, pane }) => {
+        Ok(Link::Search { path, text, kind, contents, filters, pane }) => {
             let index = pane_index(pane);
             set_active(index);
-            search::search_link(index, path, text, kind.as_deref(), contents)
+            search::search_link(index, path, text, kind.as_deref(), contents, filters)
         }
         Ok(Link::Synclet(name)) => {
             by_name(settings.synclets.iter().map(|s| s.name.clone()).collect(), &name, "synclet").map(open_synclet)
@@ -4753,6 +4775,7 @@ fn current_place(app: &App) -> sidebar::Current {
 
 /// A pane went to another folder.
 pub fn location_changed(index: usize) {
+    apply_folder_view(index);
     follow_sync_browsing(index);
     let Some(app) = app() else { return };
     let pane = &app.panes[index];
@@ -4793,15 +4816,75 @@ fn listing_arrived(index: usize, generation: u64, result: std::io::Result<Vec<cr
     }
 }
 
-fn pane_sort_changed(index: usize, sort: Sort) {
-    let Some(app) = app() else { return };
-    let mut settings = app.settings.borrow_mut();
-    if index == 0 {
-        settings.left.sort = sort;
-    } else {
-        settings.right.sort = sort;
+fn pane_sort_changed(index: usize, _sort: Sort) {
+    view_changed(index);
+}
+
+thread_local! {
+    /// A folder's view is being applied (not changed by the user).
+    static APPLYING_VIEW: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Whether each folder keeps its own view.
+fn remembers_folder_views() -> bool {
+    app().is_some_and(|a| a.settings.borrow().general.remember_folder_views)
+}
+
+/// The key a folder's view is kept under (None for search results).
+fn folder_key(pane: &PaneController) -> Option<String> {
+    if pane.showing_results() {
+        return None;
     }
-    settings.save();
+    let fs = pane.fs();
+    let path = pane.location().display().to_string();
+    Some(if fs.is_local() { path } else { format!("{}{path}", fs.key()) })
+}
+
+/// The view, sort, or grouping of a pane changed: kept for its folder
+/// (when folders keep their own), else as the pane's.
+fn view_changed(index: usize) {
+    if APPLYING_VIEW.with(Cell::get) {
+        return;
+    }
+    let Some(app) = app() else { return };
+    let pane = app.panes[index].clone();
+    let (view, sort, group_by) = (pane.view_mode(), pane.sort(), pane.group_by());
+    let key = folder_key(&pane).filter(|_| remembers_folder_views());
+    update_settings(|s| match key {
+        Some(folder) => s.remember_folder_view(crate::settings::FolderView { folder, view, sort, group_by }),
+        None => {
+            let side = if index == 0 { &mut s.left } else { &mut s.right };
+            side.view = view;
+            side.sort = sort;
+            side.group_by = group_by;
+        }
+    });
+}
+
+/// Shows a folder with its own view (or the pane's), when folders keep
+/// their own.
+fn apply_folder_view(index: usize) {
+    if !remembers_folder_views() {
+        return;
+    }
+    let Some(app) = app() else { return };
+    let pane = app.panes[index].clone();
+    let Some(key) = folder_key(&pane) else { return };
+    let (view, sort, group) = {
+        let settings = app.settings.borrow();
+        let side = if index == 0 { &settings.left } else { &settings.right };
+        match settings.folder_view(&key) {
+            Some(own) => (own.view, own.sort, own.group_by),
+            None => (side.view, side.sort, side.group_by),
+        }
+    };
+    APPLYING_VIEW.with(|a| a.set(true));
+    pane.set_view_mode(view);
+    if pane.group_by() != group {
+        pane.set_group_by(group);
+    }
+    pane.apply_sort(sort);
+    APPLYING_VIEW.with(|a| a.set(false));
 }
 
 /// Shows a folder in the active pane, with items selected.
@@ -4970,6 +5053,22 @@ impl vfs::sftp::Prompter for UiPrompter {
     }
 }
 
+/// Shows the code of an AWS sign-in in the browser (from the connecting
+/// thread; the sign-in goes on while it shows).
+struct UiSignIn;
+
+impl vfs::aws::SignIn for UiSignIn {
+    fn show_code(&self, code: &str, _url: &str) {
+        let code = code.to_string();
+        DispatchQueue::main().exec_async(move || {
+            dialogs::show_info(
+                "Sign in to AWS in your browser.".into(),
+                format!("Check that the page shows the code {code}, then allow forkz access. forkz connects once you have signed in."),
+            );
+        });
+    }
+}
+
 /// Connects to a site in a pane (reusing an open connection), then shows
 /// its remote folder, and its local folder in the other pane.
 fn connect_site(site: crate::sites::Site, pane_index: usize, password: Option<String>, save_password: bool) {
@@ -5107,6 +5206,43 @@ fn open_connection(
             let fs: FsRef = vfs::mount::MountFs::new(mountpoint, &params);
             Ok((fs, params.password))
         }
+        Protocol::S3 | Protocol::S3Http if site.aws_profile.is_some() => {
+            let profile = site.aws_profile.clone().unwrap_or_default();
+            let bucket = first_folder(site.remote_dir.as_deref());
+            let keys = vfs::aws::credentials(&profile, prompter, &UiSignIn)?;
+            // A renewal may ask again (an MFA code, a sign-in), from the
+            // thread that needs the keys.
+            let name = profile.clone();
+            let renew: vfs::s3::Renew = Box::new(move || {
+                let prompter = UiPrompter { offer_save: false, save: std::sync::Mutex::new(false) };
+                vfs::aws::credentials(&name, &prompter, &UiSignIn)
+            });
+            let host = if site.host.trim().is_empty() { "s3.amazonaws.com".to_string() } else { site.host.clone() };
+            // The site's region, else the bucket's (on AWS), else the
+            // profile's.
+            let set = site.region.as_deref().map(str::trim).filter(|r| !r.is_empty()).map(str::to_string);
+            let aws = host.eq_ignore_ascii_case("s3.amazonaws.com");
+            let found = if set.is_none() && aws {
+                bucket.as_deref().and_then(|b| vfs::s3::bucket_region(b, timeout))
+            } else {
+                None
+            };
+            let region = set.or(found).or_else(|| vfs::aws::region(&profile)).unwrap_or_else(|| site.s3_region());
+            let host = if aws { format!("s3.{region}.amazonaws.com") } else { host };
+            let params = vfs::s3::S3Params {
+                host,
+                port: site.port,
+                secure: site.protocol == Protocol::S3,
+                access_key: profile,
+                secret_key: None,
+                region,
+                timeout,
+                check: bucket,
+                session: Some(vfs::s3::Session::new(keys, renew)),
+            };
+            let fs: FsRef = vfs::s3::connect(params, prompter)?;
+            Ok((fs, None))
+        }
         Protocol::S3 | Protocol::S3Http => {
             let bucket = first_folder(site.remote_dir.as_deref());
             // AWS's general server with no region: the bucket's region, and
@@ -5127,6 +5263,7 @@ fn open_connection(
                 region,
                 timeout,
                 check: bucket,
+                session: None,
             };
             let fs = vfs::s3::connect(params, prompter)?;
             let secret = fs.secret().map(str::to_string);
@@ -5145,6 +5282,7 @@ fn open_connection(
                 region: site.region.clone().filter(|r| !r.trim().is_empty()).unwrap_or_else(|| "auto".into()),
                 timeout,
                 check: first_folder(site.remote_dir.as_deref()),
+                session: None,
             };
             let fs = vfs::s3::connect(params, prompter)?;
             let secret = fs.secret().map(str::to_string);
@@ -5336,7 +5474,31 @@ fn open_target(target: &str) {
         Some((server, bucket_path)) => (server, Some(bucket_path)),
         None => (host, path),
     };
-    let user = if user.is_empty() && protocol == crate::sites::Protocol::S3 && host == "s3.amazonaws.com" {
+    // On AWS: "s3://profile@bucket" names an AWS profile; with no user,
+    // the profiles are offered before typed keys.
+    let on_aws = protocol == crate::sites::Protocol::S3 && host == "s3.amazonaws.com";
+    let profiles = if on_aws { vfs::aws::profiles() } else { Vec::new() };
+    let mut profile = profiles.iter().find(|p| **p == user).cloned();
+    if profile.is_none() && on_aws && user.is_empty() && !profiles.is_empty() {
+        let bucket = first_folder(path.as_deref()).unwrap_or_default();
+        let mut choices: Vec<String> = profiles.iter().map(|p| format!("AWS profile \u{201c}{p}\u{201d}")).collect();
+        choices.push("Access keys (typed next)".into());
+        let names: Vec<&str> = choices.iter().map(String::as_str).collect();
+        match dialogs::choose(
+            &format!("Open \u{201c}{bucket}\u{201d} with"),
+            "A profile from ~/.aws/config or ~/.aws/credentials (IAM Identity Center, a role, or keys), or access keys you type.",
+            "Continue",
+            &names,
+            0,
+        ) {
+            Some(i) if i < profiles.len() => profile = Some(profiles[i].clone()),
+            Some(_) => {}
+            None => return,
+        }
+    }
+    let user = if profile.is_some() {
+        String::new()
+    } else if user.is_empty() && on_aws {
         let bucket = first_folder(path.as_deref()).unwrap_or_default();
         match dialogs::prompt(
             &format!("Access key ID for \u{201c}{bucket}\u{201d}"),
@@ -5353,6 +5515,7 @@ fn open_target(target: &str) {
     };
     let mut wanted = crate::sites::Site::new(&host, port, &user);
     wanted.protocol = protocol;
+    wanted.aws_profile = profile.clone();
     // A saved site for the same account brings its login settings.
     let same_family = |p: crate::sites::Protocol| p.scheme() == protocol.scheme() || p == protocol;
     let saved = app
@@ -5365,6 +5528,7 @@ fn open_target(target: &str) {
                 && s.host.eq_ignore_ascii_case(&host)
                 && s.port == port
                 && (user.is_empty() || s.user == user)
+                && s.aws_profile == profile
         })
         .cloned();
     // Otherwise: keys from the agent or ~/.ssh, then a password prompt.

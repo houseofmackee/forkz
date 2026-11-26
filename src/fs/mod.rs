@@ -9,6 +9,7 @@ pub mod filters;
 pub mod git;
 pub mod glob;
 pub mod icloud;
+pub mod metadata;
 pub mod ops;
 pub mod search;
 pub mod split;

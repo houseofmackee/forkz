@@ -14,7 +14,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 
 - Two panes side by side, or stacked one above the other (View > Stack Panes), each with tabs, and a sidebar with favorites, smart folders, iCloud Drive, volumes, Network (the file servers on your network), saved sites, synclets, and Finder tags. Drag items in the sidebar to put them in the order you like, within each section. The sidebar, either pane, and the preview pane can each be hidden.
 - A line in your accent color along the top of the active pane shows where commands, new connections, and Go to Folder will open. Tabs show a close button when the pointer is over them.
-- A sortable list (name, date modified, size, kind, Git status, and more) with ".." on top to go up, groups by kind, date, or size, a clickable path bar, a filter field, and a status line with the selection size and free space; or icons, or columns, as in Finder
+- A sortable list (name, date modified, size, kind, Git status, and more; on the Mac also image and video dimensions, duration, Date Last Opened, and Finder comments) with ".." on top to go up, groups by kind, date, size, or tag, a clickable path bar, a filter field, and a status line with the selection size and free space; or icons, or columns, as in Finder
 - A viewer for text and hex (F3), and filename filters that hide items in the lists and leave them out of copies
 - Copy, move, duplicate, trash, rename, new file, and new folder (right-click Copy To and Move To send items to the other pane, another open tab, or a folder you choose), with progress, Stop, Pause, and a conflict dialog (Replace, Replace if Older, Keep Both, Skip, Merge, and "Apply to all")
 - Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files. Pasting an image (a screenshot, or an image copied in a browser) saves it as a PNG file in the pane's folder
@@ -34,7 +34,8 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - A terminal pane below the panes (View > Show Terminal, Control-`) that follows the active pane's folder
 - Workspaces: saved sets of tabs for both panes, including server folders
 - A transfer queue: speed limits, Pause and Resume, Pause All and Stop All, and waiting transfers that can be started now or moved up and down (right-click a transfer), plus rules for errors
-- Zoom (Command-= and Command-minus) and a Settings window (Command-comma) with color themes, text size, row spacing, and your own keyboard shortcuts
+- Zoom (Command-= and Command-minus) and a Settings window (Command-comma) with color themes, text size, row spacing, and your own keyboard shortcuts, and a search field that finds a setting (or a command's shortcut) by its words
+- Optionally, each folder keeps its own view, sort, and grouping (Settings > General > Remember view settings for each folder); other folders use the default view, set with View > Use as Default View
 - Optionally used for "Show in Finder" in other apps (Settings > General): the file opens selected in forkz. macOS keeps Finder as the app that opens folders, but forkz can open them with Open With
 
 ### Icons, columns, Group By, and Git status
@@ -65,7 +66,7 @@ Select several items and press Return (or Option-Command-R). Rules (replace, reg
 
 ![Search results for images across subfolders, with a Folder column](docs/images/search.png)
 
-Search (Shift-Command-F) finds items by name or contents, by kind (folders, images, movies, audio, documents, archives, source code, and more), and by Finder tag, or any mix of these. It uses Spotlight on the Mac and also works on servers and in archives. The results open in a pane, with a column for the folder each one is in, and work like any other list.
+Search (Shift-Command-F) finds items by name or contents, by kind (folders, images, movies, audio, documents, archives, source code, and more), by Finder tag, by size (larger or smaller than a size you type), and by when they were modified (today, the last 7 or 30 days, the last 12 months, more than 30 days or a year ago, or between two dates), or any mix of these. Smart folders keep dates relative, so "the last 7 days" stays current. It uses Spotlight on the Mac and also works on servers and in archives. The results open in a pane, with a column for the folder each one is in, and work like any other list.
 
 A search on the Mac can be saved as a smart folder ("Save as a smart folder in the sidebar"): clicking it in the sidebar searches again and shows what it finds now. Right-click a smart folder to change its search, rename it, or delete it.
 
@@ -167,7 +168,7 @@ The same things work as `forkz://` links, for scripts, launchers such as Raycast
 | --- | --- |
 | `forkz://open?path=~/Downloads` | Shows a folder (or a file, selected) in the active pane; add `pane=left`, `right`, or `other`, and `tab=new` |
 | `forkz://connect?site=Staging&path=/var/www` | Connects to a saved site (by name), optionally in a folder |
-| `forkz://search?path=~/Documents&text=invoice&kind=documents` | Searches a folder (`kind`: folders, files, images, movies, audio, documents, archives, or code; `contents=1` searches inside files) |
+| `forkz://search?path=~/Documents&text=invoice&kind=documents` | Searches a folder (`kind`: folders, files, images, movies, audio, documents, archives, or code; `contents=1` searches inside files; `larger=100MB`, `smaller=1MB`, and `days=7` for files modified in the last 7 days) |
 | `forkz://synclet?name=Website` | Opens a synclet and compares its folders |
 | `forkz://smart-folder?name=Photos` | Opens a smart folder |
 | `forkz://workspace?name=Work` | Opens a workspace |
@@ -199,6 +200,7 @@ Choose the protocol in Connect to Server; sites keep it.
 - **FXP:** copies between two FTP servers go straight from one server to the other when both allow it, without passing through your Mac (the activity shows "server to server"). Many servers refuse this; forkz checks once per pair of servers and otherwise copies through the Mac as usual. With FTPS, one of the servers must support SSCN; FXP is never used when only one of the two connections is encrypted.
 - **WebDAV** over HTTPS or HTTP, with Basic login. Put the server's WebDAV path in Remote folder (for Nextcloud, `/remote.php/dav/files/USER`).
 - **S3 and S3-compatible storage:** the access key ID goes in User and the secret key in Password (kept in the Keychain). The top level lists your buckets. The region comes from an AWS server name (`s3.eu-west-1.amazonaws.com`); for other providers, set it in Region (Cloudflare R2 uses `auto`). Files up to 5 GB; folders can be created and deleted, files renamed. Copies and moves within one account (between its buckets, say) happen on the server, also for folders and for files over 5 GB.
+- **AWS profiles:** instead of keys, choose an AWS profile (from `~/.aws/config` and `~/.aws/credentials`, as the AWS CLI uses them) in AWS profile, or open `s3://profile@bucket/folder`; `s3://bucket` offers your profiles first. Profiles with IAM Identity Center (SSO) use the sign-in the AWS CLI made (`aws sso login`) and renew it, or forkz signs in in the browser itself (and keeps the sign-in where the CLI does). Roles assumed from another profile (asking for an MFA code if the profile has `mfa_serial`), `credential_process`, and keys with session tokens work too; keys that expire are renewed while connected.
 - **Google Cloud Storage** through its S3-compatible XML API: create an HMAC key (Cloud Storage > Settings > Interoperability) and put the access key in User and the secret in Password. Server defaults to `storage.googleapis.com`.
 - **Azure Blob Storage:** the storage account name goes in User and an access key in Password. Server defaults to `ACCOUNT.blob.core.windows.net`; the top level lists the account's containers, and Remote folder can start in one (`/container/folder`). Files up to 5000 MiB; folders work as in the Azure portal. For the Azurite emulator, set Server to `127.0.0.1` and Port to `10000`.
 - **Box:** choose Box in Connect to Server (no server, user, or password), and sign in in the browser when forkz opens it. forkz keeps the sign-in in your login Keychain, so later connections go straight in (Box asks again after 60 days without connecting). Remote folder can start in a folder (`/Projects`). Files of any size the account allows (large ones are uploaded in parts); deleted items go to Box's trash.

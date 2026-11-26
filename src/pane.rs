@@ -31,10 +31,12 @@ pub enum GroupBy {
     Kind,
     Modified,
     Size,
+    /// By Finder tag (an item's first tag; on the Mac).
+    Tag,
 }
 
 impl GroupBy {
-    pub const ALL: [GroupBy; 4] = [GroupBy::None, GroupBy::Kind, GroupBy::Modified, GroupBy::Size];
+    pub const ALL: [GroupBy; 5] = [GroupBy::None, GroupBy::Kind, GroupBy::Modified, GroupBy::Size, GroupBy::Tag];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -42,6 +44,7 @@ impl GroupBy {
             GroupBy::Kind => "Kind",
             GroupBy::Modified => "Date Modified",
             GroupBy::Size => "Size",
+            GroupBy::Tag => "Tags",
         }
     }
 }
@@ -163,6 +166,9 @@ pub struct PaneState {
     tags: std::collections::HashMap<PathBuf, Vec<fs::tags::Tag>>,
     /// The tags above were read (else they are read when shown).
     tags_read: bool,
+    /// What Spotlight knows of the items (for the metadata columns; read
+    /// in the background after the listing).
+    meta: std::collections::HashMap<PathBuf, fs::metadata::Meta>,
 }
 
 impl PaneState {
@@ -191,6 +197,7 @@ impl PaneState {
             free_space: None,
             tags: std::collections::HashMap::new(),
             tags_read: false,
+            meta: std::collections::HashMap::new(),
         };
         pane.load();
         pane
@@ -263,6 +270,21 @@ impl PaneState {
     /// Space left on the folder's volume, if read with the listing.
     pub fn free_space(&self) -> Option<u64> {
         self.free_space
+    }
+
+    /// An item's metadata, if read.
+    pub fn meta_of(&self, path: &Path) -> Option<&fs::metadata::Meta> {
+        self.meta.get(path)
+    }
+
+    /// Metadata read for the listing of `generation`; false if the pane
+    /// has moved on.
+    pub fn set_meta(&mut self, generation: u64, meta: std::collections::HashMap<PathBuf, fs::metadata::Meta>) -> bool {
+        if generation != self.generation {
+            return false;
+        }
+        self.meta = meta;
+        true
     }
 
     /// An item's Finder tags, if read with the listing (None: not read,
@@ -371,13 +393,38 @@ impl PaneState {
         self.group_rows();
     }
 
+    /// An item's tag group: its first Finder tag, by name ("No Tags" last).
+    fn tag_group(&self, entry: &Entry) -> (i64, String) {
+        let read;
+        let tags = if self.tags_read {
+            self.tags.get(&entry.path).map_or(&[][..], Vec::as_slice)
+        } else if self.fs.is_local() {
+            // Search results: read now.
+            read = fs::tags::read(&entry.path);
+            &read
+        } else {
+            &[][..]
+        };
+        match tags.first() {
+            Some(tag) => (0, tag.name.clone()),
+            None => (1, "No Tags".into()),
+        }
+    }
+
     /// Orders `visible` by group (keeping the sort within each) and lays
     /// out the rows.
     fn group_rows(&mut self) {
         let mut keys: Vec<(i64, String)> = Vec::new();
         if self.group != GroupBy::None {
             let today = local_date(std::time::SystemTime::now());
-            keys = self.visible.iter().map(|e| group_key(self.group, e, today, self.kind_label)).collect();
+            keys = self
+                .visible
+                .iter()
+                .map(|e| match self.group {
+                    GroupBy::Tag => self.tag_group(e),
+                    group => group_key(group, e, today, self.kind_label),
+                })
+                .collect();
             let mut order: Vec<usize> = (0..self.visible.len()).collect();
             order.sort_by(|&a, &b| {
                 keys[a].0.cmp(&keys[b].0).then_with(|| keys[a].1.to_lowercase().cmp(&keys[b].1.to_lowercase()))
@@ -723,7 +770,7 @@ fn date_group(today: Date, date: Date) -> (i64, String) {
 /// An entry's group (order, then title) for a grouping.
 fn group_key(group: GroupBy, entry: &Entry, today: Date, kind: KindLabel) -> (i64, String) {
     match group {
-        GroupBy::None => (0, String::new()),
+        GroupBy::None | GroupBy::Tag => (0, String::new()),
         GroupBy::Kind => (i64::from(!entry.is_folder_like()), kind(entry)),
         GroupBy::Modified => match entry.modified {
             Some(time) => date_group(today, local_date(time)),

@@ -3,7 +3,8 @@
 //! - `forkz://open?path=~/Downloads` (a folder, or a file to select; with
 //!   `pane=left|right|other` and `tab=new`)
 //! - `forkz://connect?site=Staging` (a saved site, by name; `path=/var/www`)
-//! - `forkz://search?path=~/Documents&text=invoice&kind=documents`
+//! - `forkz://search?path=~/Documents&text=invoice&kind=documents` (also
+//!   `larger=100MB`, `smaller=1MB`, and `days=7`: modified in the last 7)
 //! - `forkz://synclet?name=Website`, `forkz://smart-folder?name=Photos`,
 //!   `forkz://workspace?name=Work`
 //! - `forkz://command?name=ComparePanes` (a command, by its id; commands
@@ -14,6 +15,15 @@
 use std::path::PathBuf;
 
 use percent_encoding::percent_decode_str;
+
+/// A search link's size and date conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Filters {
+    pub larger: Option<u64>,
+    pub smaller: Option<u64>,
+    /// Modified in the last so many days.
+    pub days: Option<u32>,
+}
 
 /// Which pane a link acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -29,7 +39,7 @@ pub enum Pane {
 pub enum Link {
     Open { path: PathBuf, pane: Pane, new_tab: bool },
     Connect { site: String, path: Option<String>, pane: Pane },
-    Search { path: PathBuf, text: String, kind: Option<String>, contents: bool, pane: Pane },
+    Search { path: PathBuf, text: String, kind: Option<String>, contents: bool, filters: Filters, pane: Pane },
     Synclet(String),
     SmartFolder { name: String, pane: Pane },
     Workspace(String),
@@ -70,13 +80,31 @@ pub fn parse(link: &str) -> Result<Link, String> {
     Ok(match action.as_str() {
         "open" | "reveal" | "go" => Link::Open { path: expand(&need("path")?), pane, new_tab: yes("tab") },
         "connect" => Link::Connect { site: need("site")?, path: get("path"), pane },
-        "search" => Link::Search {
-            path: expand(&need("path")?),
-            text: get("text").unwrap_or_default(),
-            kind: get("kind"),
-            contents: yes("contents"),
-            pane,
-        },
+        "search" => {
+            let size = |key: &str| match get(key) {
+                None => Ok(None),
+                Some(v) => crate::fs::split::parse_size(&v)
+                    .map(Some)
+                    .ok_or_else(|| format!("\u{201c}{v}\u{201d} is not a size: write it as 100MB or 2GB.")),
+            };
+            let days = match get("days") {
+                None => None,
+                Some(v) => Some(
+                    v.parse::<u32>()
+                        .ok()
+                        .filter(|d| *d > 0)
+                        .ok_or_else(|| format!("\u{201c}{v}\u{201d} is not a number of days."))?,
+                ),
+            };
+            Link::Search {
+                path: expand(&need("path")?),
+                text: get("text").unwrap_or_default(),
+                kind: get("kind"),
+                contents: yes("contents"),
+                filters: Filters { larger: size("larger")?, smaller: size("smaller")?, days },
+                pane,
+            }
+        }
         "synclet" | "sync" => Link::Synclet(need("name")?),
         "smart-folder" | "smartfolder" => Link::SmartFolder { name: need("name")?, pane },
         "workspace" => Link::Workspace(need("name")?),
@@ -137,9 +165,23 @@ mod tests {
                 text: "invoice".into(),
                 kind: Some("documents".into()),
                 contents: true,
+                filters: Filters::default(),
                 pane: Pane::Other
             })
         );
+        assert_eq!(
+            parse("forkz://search?path=/tmp&larger=1GB&days=7"),
+            Ok(Link::Search {
+                path: "/tmp".into(),
+                text: String::new(),
+                kind: None,
+                contents: false,
+                filters: Filters { larger: Some(1 << 30), smaller: None, days: Some(7) },
+                pane: Pane::Active
+            })
+        );
+        assert!(parse("forkz://search?path=/tmp&larger=huge").is_err());
+        assert!(parse("forkz://search?path=/tmp&days=0").is_err());
         assert_eq!(parse("forkz://synclet?name=Web"), Ok(Link::Synclet("Web".into())));
         assert_eq!(
             parse("forkz://smart-folder?name=Rust"),

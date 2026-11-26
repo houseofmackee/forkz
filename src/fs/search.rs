@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +35,79 @@ pub struct Query {
     pub kind: Kind,
     /// Only items with this Finder tag (on the Mac).
     pub tag: Option<String>,
+    /// Only files larger than this many bytes.
+    pub larger_than: Option<u64>,
+    /// Only files smaller than this many bytes.
+    pub smaller_than: Option<u64>,
+    /// Only items last modified then.
+    pub modified: Modified,
+}
+
+/// When items were last modified, relative to the day the search runs (so
+/// a smart folder of "the last 7 days" stays current).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Modified {
+    #[default]
+    Any,
+    Today,
+    /// Within the last so many days.
+    WithinDays(u32),
+    /// More than so many days ago.
+    OlderThanDays(u32),
+    /// From one day to another (both included; "YYYY-MM-DD", either may be
+    /// empty).
+    Between(String, String),
+}
+
+/// Midnight (local time) at the start of a "YYYY-MM-DD" day.
+pub fn day_start(text: &str) -> Option<SystemTime> {
+    let text = text.trim();
+    if text.len() != 10 {
+        return None;
+    }
+    super::taken::parse_exif(&format!("{text} 00:00:00"))
+}
+
+impl Modified {
+    /// The choices in the search dialog (Between is chosen with dates).
+    pub const PRESETS: [(Modified, &'static str); 7] = [
+        (Modified::Any, "Any date"),
+        (Modified::Today, "Today"),
+        (Modified::WithinDays(7), "In the last 7 days"),
+        (Modified::WithinDays(30), "In the last 30 days"),
+        (Modified::WithinDays(365), "In the last 12 months"),
+        (Modified::OlderThanDays(30), "More than 30 days ago"),
+        (Modified::OlderThanDays(365), "More than a year ago"),
+    ];
+
+    /// (modified at or after, modified before), as of `now`.
+    pub fn range(&self, now: SystemTime) -> (Option<SystemTime>, Option<SystemTime>) {
+        let days = |n: u32| Duration::from_secs(u64::from(n) * 86_400);
+        match self {
+            Modified::Any => (None, None),
+            Modified::Today => (day_start(&crate::rename::format_date("YYYY-MM-DD", now)), None),
+            Modified::WithinDays(n) => (now.checked_sub(days(*n)), None),
+            Modified::OlderThanDays(n) => (None, now.checked_sub(days(*n))),
+            // The last day counts whole: before the next one starts.
+            Modified::Between(from, to) => (day_start(from), day_start(to).map(|t| t + days(1))),
+        }
+    }
+
+    /// In words: "modified in the last 7 days".
+    pub fn describe(&self) -> Option<String> {
+        if let Some((_, name)) = Self::PRESETS.iter().find(|(m, _)| m == self) {
+            return (*self != Modified::Any).then(|| format!("modified {}", name.to_lowercase()));
+        }
+        Some(match self {
+            Modified::WithinDays(n) => format!("modified in the last {n} days"),
+            Modified::OlderThanDays(n) => format!("modified more than {n} days ago"),
+            Modified::Between(from, to) if to.trim().is_empty() => format!("modified since {from}"),
+            Modified::Between(from, to) if from.trim().is_empty() => format!("modified until {to}"),
+            Modified::Between(from, to) => format!("modified {from} to {to}"),
+            _ => return None,
+        })
+    }
 }
 
 /// Kinds of items to search for.
@@ -123,13 +196,38 @@ impl Kind {
 impl Query {
     /// A search needs some text or a filter.
     pub fn is_empty(&self) -> bool {
-        self.text.trim().is_empty() && self.kind == Kind::Any && self.tag.is_none()
+        self.text.trim().is_empty()
+            && self.kind == Kind::Any
+            && self.tag.is_none()
+            && self.larger_than.is_none()
+            && self.smaller_than.is_none()
+            && self.modified == Modified::Any
     }
 
-    /// The kind and tag filters (the text is checked separately).
-    fn filters_match(&self, fs: &FsRef, entry: &Entry) -> bool {
+    /// Whether a size filter is set (folders are left out then: their size
+    /// is not known as they are found).
+    fn by_size(&self) -> bool {
+        self.larger_than.is_some() || self.smaller_than.is_some()
+    }
+
+    /// The kind, size, date, and tag filters (the text is checked
+    /// separately). `range` is the date filter's, worked out once.
+    fn filters_match(&self, fs: &FsRef, entry: &Entry, range: (Option<SystemTime>, Option<SystemTime>)) -> bool {
         if !self.kind.matches(entry) {
             return false;
+        }
+        if self.by_size()
+            && (entry.is_folder_like()
+                || self.larger_than.is_some_and(|n| entry.size <= n)
+                || self.smaller_than.is_some_and(|n| entry.size >= n))
+        {
+            return false;
+        }
+        if range != (None, None) {
+            let Some(modified) = entry.modified else { return false };
+            if range.0.is_some_and(|after| modified < after) || range.1.is_some_and(|before| modified >= before) {
+                return false;
+            }
         }
         match &self.tag {
             None => true,
@@ -151,6 +249,7 @@ const CONTENT_LIMIT: u64 = 20 * 1024 * 1024;
 pub fn walk(fs: &FsRef, root: &Path, query: &Query, cancel: &CancelToken) -> io::Result<Vec<Entry>> {
     let patterns = Patterns::new(&query.text);
     let needle = query.text.to_lowercase();
+    let range = query.modified.range(SystemTime::now());
     let mut found = Vec::new();
     let mut folders = VecDeque::from([root.to_path_buf()]);
     let mut first = true;
@@ -176,7 +275,7 @@ pub fn walk(fs: &FsRef, root: &Path, query: &Query, cancel: &CancelToken) -> io:
                 Mode::Name => patterns.is_empty() || patterns.matches(&entry.name),
                 Mode::Contents => !entry.is_folder_like() && (needle.is_empty() || contains(fs, &entry, &needle)),
             };
-            let hit = text_hit && query.filters_match(fs, &entry);
+            let hit = text_hit && query.filters_match(fs, &entry, range);
             if entry.is_folder_like() {
                 folders.push_back(entry.path.clone());
             }
@@ -203,6 +302,10 @@ fn contains(fs: &FsRef, entry: &Entry, needle: &str) -> bool {
 
 /// The Spotlight query for `mdfind` (a raw query expression).
 pub fn spotlight_query(query: &Query) -> String {
+    spotlight_query_at(query, SystemTime::now())
+}
+
+fn spotlight_query_at(query: &Query, now: SystemTime) -> String {
     let escape = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
     let mut parts = Vec::new();
     if !query.text.trim().is_empty() {
@@ -213,6 +316,23 @@ pub fn spotlight_query(query: &Query) -> String {
     }
     if let Some(tag) = &query.tag {
         parts.push(format!("kMDItemUserTags == \"{}\"cd", escape(tag)));
+    }
+    if query.by_size() {
+        parts.push("kMDItemContentType != \"public.folder\"".to_string());
+    }
+    if let Some(n) = query.larger_than {
+        parts.push(format!("kMDItemFSSize > {n}"));
+    }
+    if let Some(n) = query.smaller_than {
+        parts.push(format!("kMDItemFSSize < {n}"));
+    }
+    let time = |t: SystemTime| format!("$time.iso({})", crate::vfs::http::iso_utc(t));
+    let (after, before) = query.modified.range(now);
+    if let Some(after) = after {
+        parts.push(format!("kMDItemFSContentChangeDate >= {}", time(after)));
+    }
+    if let Some(before) = before {
+        parts.push(format!("kMDItemFSContentChangeDate < {}", time(before)));
     }
     if parts.len() == 1 && !query.text.trim().is_empty() {
         // Just the text: as before, without brackets.
@@ -329,16 +449,34 @@ mod tests {
         let dir = tree();
         let fs = crate::vfs::local();
         let cancel = CancelToken::default();
-        let by_name =
-            Query { text: "notes".into(), mode: Mode::Name, include_hidden: false, kind: Kind::Any, tag: None };
+        let by_name = Query {
+            text: "notes".into(),
+            mode: Mode::Name,
+            include_hidden: false,
+            kind: Kind::Any,
+            tag: None,
+            ..Query::default()
+        };
         assert_eq!(names(&walk(&fs, dir.path(), &by_name, &cancel).unwrap()), ["Notes 2.md", "notes.txt"]);
         let hidden = Query { include_hidden: true, ..by_name.clone() };
         assert_eq!(walk(&fs, dir.path(), &hidden, &cancel).unwrap().len(), 3);
-        let pattern =
-            Query { text: "*.pdf; deep".into(), mode: Mode::Name, include_hidden: false, kind: Kind::Any, tag: None };
+        let pattern = Query {
+            text: "*.pdf; deep".into(),
+            mode: Mode::Name,
+            include_hidden: false,
+            kind: Kind::Any,
+            tag: None,
+            ..Query::default()
+        };
         assert_eq!(names(&walk(&fs, dir.path(), &pattern, &cancel).unwrap()), ["deep", "report.pdf"]);
-        let contents =
-            Query { text: "MILK".into(), mode: Mode::Contents, include_hidden: false, kind: Kind::Any, tag: None };
+        let contents = Query {
+            text: "MILK".into(),
+            mode: Mode::Contents,
+            include_hidden: false,
+            kind: Kind::Any,
+            tag: None,
+            ..Query::default()
+        };
         assert_eq!(names(&walk(&fs, dir.path(), &contents, &cancel).unwrap()), ["notes.txt"]);
         assert!(walk(&fs, &dir.path().join("missing"), &by_name, &cancel).is_err());
         cancel.cancel();
@@ -359,6 +497,7 @@ mod tests {
             include_hidden: false,
             kind,
             tag: tag.map(str::to_string),
+            ..Query::default()
         };
         assert_eq!(names(&walk(&fs, dir.path(), &query(Kind::Images, None), &cancel).unwrap()), ["photo.JPG"]);
         assert_eq!(names(&walk(&fs, dir.path(), &query(Kind::Audio, None), &cancel).unwrap()), ["song.mp3"]);
@@ -375,9 +514,59 @@ mod tests {
     }
 
     #[test]
+    fn filters_by_size_and_date() {
+        let dir = tree();
+        let fs = crate::vfs::local();
+        let cancel = CancelToken::default();
+        std::fs::write(dir.path().join("big.bin"), vec![0u8; 5000]).unwrap();
+        let old = day_start("2020-06-15").unwrap();
+        std::fs::File::open(dir.path().join("a/report.pdf")).unwrap().set_modified(old).unwrap();
+        let larger = Query { larger_than: Some(1000), ..Query::default() };
+        assert!(!larger.is_empty());
+        assert_eq!(names(&walk(&fs, dir.path(), &larger, &cancel).unwrap()), ["big.bin"]);
+        // Folders have no size to compare: left out.
+        let smaller = Query { smaller_than: Some(15), ..Query::default() };
+        assert_eq!(names(&walk(&fs, dir.path(), &smaller, &cancel).unwrap()), ["Notes 2.md", "report.pdf"]);
+        let recent = Query { modified: Modified::WithinDays(7), kind: Kind::Files, ..Query::default() };
+        assert_eq!(names(&walk(&fs, dir.path(), &recent, &cancel).unwrap()), ["Notes 2.md", "big.bin", "notes.txt"]);
+        let older = Query { modified: Modified::OlderThanDays(365), ..Query::default() };
+        assert_eq!(names(&walk(&fs, dir.path(), &older, &cancel).unwrap()), ["report.pdf"]);
+        // Both days included.
+        let between =
+            Query { modified: Modified::Between("2020-06-15".into(), "2020-06-15".into()), ..Query::default() };
+        assert_eq!(names(&walk(&fs, dir.path(), &between, &cancel).unwrap()), ["report.pdf"]);
+        let since = Query { modified: Modified::Between("2020-06-16".into(), String::new()), ..recent.clone() };
+        assert_eq!(walk(&fs, dir.path(), &since, &cancel).unwrap().len(), 3);
+
+        assert_eq!(Modified::WithinDays(7).describe().as_deref(), Some("modified in the last 7 days"));
+        assert_eq!(Modified::Any.describe(), None);
+        assert_eq!(
+            Modified::Between("2026-01-01".into(), String::new()).describe().as_deref(),
+            Some("modified since 2026-01-01")
+        );
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_764_115_200); // 2025-11-26 00:00 UTC
+        let q = Query { larger_than: Some(1 << 30), modified: Modified::WithinDays(7), ..Query::default() };
+        assert_eq!(
+            spotlight_query_at(&q, now),
+            r#"kMDItemContentType != "public.folder" && kMDItemFSSize > 1073741824 && kMDItemFSContentChangeDate >= $time.iso(2025-11-19T00:00:00Z)"#
+        );
+        // Saved smart folders read as before, and with the new filters.
+        let saved: Query = toml::from_str("text = \"x\"").unwrap();
+        assert_eq!(saved.modified, Modified::Any);
+        let round: Query = toml::from_str(&toml::to_string(&since).unwrap()).unwrap();
+        assert_eq!(round, since);
+    }
+
+    #[test]
     fn spotlight_queries() {
-        let q =
-            Query { text: "*.jpg; notes".into(), mode: Mode::Name, include_hidden: false, kind: Kind::Any, tag: None };
+        let q = Query {
+            text: "*.jpg; notes".into(),
+            mode: Mode::Name,
+            include_hidden: false,
+            kind: Kind::Any,
+            tag: None,
+            ..Query::default()
+        };
         assert_eq!(spotlight_query(&q), r#"kMDItemFSName == "*.jpg"cd || kMDItemFSName == "*notes*"cd"#);
         let q = Query {
             text: r#"say "hi""#.into(),
@@ -385,6 +574,7 @@ mod tests {
             include_hidden: false,
             kind: Kind::Any,
             tag: None,
+            ..Query::default()
         };
         assert_eq!(spotlight_query(&q), r#"kMDItemTextContent == "*say \"hi\"*"cd"#);
     }

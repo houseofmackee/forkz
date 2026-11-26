@@ -216,6 +216,10 @@ pub struct Site {
     /// The S3 region (from the server name if None, else us-east-1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub region: Option<String>,
+    /// For S3: the AWS profile (in ~/.aws) whose keys to use, instead of
+    /// the user and password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws_profile: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -237,6 +241,7 @@ impl Site {
             remote_dir: None,
             local_dir: None,
             region: None,
+            aws_profile: None,
         }
     }
 

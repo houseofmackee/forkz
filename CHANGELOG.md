@@ -7,6 +7,17 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-26
+
+### Added
+
+- Search by size (larger or smaller than a size you type) and by date modified: today, the last 7 or 30 days, the last 12 months, more than 30 days or a year ago, or between two dates. Smart folders keep dates relative, so "the last 7 days" stays current. `forkz://search` links take `larger=`, `smaller=`, and `days=`.
+- S3 sites can use an AWS profile from `~/.aws/config` and `~/.aws/credentials` instead of keys, including IAM Identity Center (SSO): forkz uses the sign-in the AWS CLI made and renews it, or signs in in the browser itself. Roles assumed from another profile (with an MFA code if needed), `credential_process`, and keys with session tokens work too, and expiring keys are renewed while connected. `s3://profile@bucket` opens a bucket with a profile, and `s3://bucket` offers your profiles first.
+- New columns for folders on the Mac: Dimensions (of images and videos), Duration (of videos and audio), Date Last Opened, and Comments (Finder comments).
+- View > Group By > Tags groups items by their Finder tag.
+- Settings > General > Remember view settings for each folder: the view, sort, and grouping chosen in a folder are kept for it; other folders use the default view (View > Use as Default View sets it, and Reset to Default View forgets a folder's own).
+- Settings has a search field: it shows the tab with matching settings and marks them, and a command's name finds its shortcut.
+
 ## [0.22.0] - 2026-11-26
 
 ### Added
@@ -468,7 +479,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.22.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.23.0...HEAD
+[0.23.0]: https://github.com/houseofmackee/forkz/compare/v0.22.0...v0.23.0
 [0.22.0]: https://github.com/houseofmackee/forkz/compare/v0.21.1...v0.22.0
 [0.21.1]: https://github.com/houseofmackee/forkz/compare/v0.21.0...v0.21.1
 [0.21.0]: https://github.com/houseofmackee/forkz/compare/v0.20.2...v0.21.0

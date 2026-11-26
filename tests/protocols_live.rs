@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use forkz::fs::ops::{self, Answer, CancelToken, Conflict, ErrorAnswer, Job, JobKind, Observer, Progress, Resolution};
 use forkz::vfs::known_hosts::Status;
 use forkz::vfs::sftp::Prompter;
-use forkz::vfs::{self, FsRef, Vfs, azure, boxcom, ftp, s3, webdav};
+use forkz::vfs::{self, FsRef, Vfs, aws, azure, boxcom, ftp, s3, webdav};
 
 /// Trusts certificates and gives the password when asked.
 struct Answers {
@@ -487,6 +487,7 @@ fn s3() {
         region: "us-east-1".into(),
         timeout: Duration::from_secs(10),
         check: None,
+        session: None,
     };
     let s3fs = s3::connect(params.clone(), &answers()).unwrap();
     let fs: FsRef = s3fs.clone();
@@ -552,4 +553,113 @@ fn s3() {
 fn download(link: &str) -> Result<Vec<u8>, String> {
     let response = ureq::get(link).call().map_err(|e| e.to_string())?;
     response.into_body().read_to_vec().map_err(|e| e.to_string())
+}
+
+/// Shows nothing (the stand-in's sign-in finishes by itself).
+struct NoBrowser(Mutex<Vec<String>>);
+impl aws::SignIn for NoBrowser {
+    fn show_code(&self, code: &str, _url: &str) {
+        self.0.lock().unwrap().push(code.to_string());
+    }
+}
+
+/// AWS profiles: IAM Identity Center (signing in, the cached sign-in,
+/// renewing it), a role assumed with an MFA code, keys from a process,
+/// and S3 with a profile's keys (session token included).
+#[test]
+#[ignore = "needs the AWS stand-in and an S3 server (scripts/test_protocols.sh)"]
+fn aws_profiles() {
+    let Some((host, port)) = address("FORKZ_TEST_AWS") else { return };
+    let Some((s3_host, s3_port)) = address("FORKZ_TEST_S3") else { return };
+    let base = format!("http://{host}:{port}");
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join("config");
+    let keys = home.path().join("credentials");
+    std::fs::write(
+        &config,
+        "[profile sso]\nsso_session = corp\nsso_account_id = 111122223333\nsso_role_name = Dev\nregion = eu-west-1\n\n\
+         [sso-session corp]\nsso_start_url = https://corp.awsapps.com/start\nsso_region = us-east-1\n\n\
+         [profile admin]\nrole_arn = arn:aws:iam::111122223333:role/Admin\nsource_profile = source\nmfa_serial = arn:aws:iam::111122223333:mfa/me\n\n\
+         [profile tool]\ncredential_process = echo '{\"Version\":1,\"AccessKeyId\":\"AKIATOOL\",\"SecretAccessKey\":\"t\"}'\n",
+    )
+    .unwrap();
+    std::fs::write(&keys, "[source]\naws_access_key_id = AKIASOURCE\naws_secret_access_key = source-secret\n").unwrap();
+    // SAFETY: the live tests run one at a time (--test-threads=1).
+    unsafe {
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("AWS_CONFIG_FILE", &config);
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &keys);
+        std::env::set_var("FORKZ_TEST_AWS_OIDC", &base);
+        std::env::set_var("FORKZ_TEST_AWS_PORTAL", &base);
+        std::env::set_var("FORKZ_TEST_AWS_STS", &base);
+    }
+    let stats =
+        || -> serde_json::Value { serde_json::from_slice(&download(&format!("{base}/stats")).unwrap()).unwrap() };
+    assert_eq!(aws::profiles(), ["admin", "source", "sso", "tool"]);
+    assert_eq!(aws::region("sso").as_deref(), Some("eu-west-1"));
+
+    // SSO: signs in once (the code is shown), then the cached sign-in is
+    // used; an expired one is renewed with the refresh token.
+    let shown = NoBrowser(Mutex::new(Vec::new()));
+    let first = aws::credentials("sso", &answers(), &shown).unwrap();
+    assert_eq!(first.access_key, "ASIASSOEXAMPLE");
+    assert_eq!(first.session_token.as_deref(), Some("sso-session-token"));
+    assert!(first.expires.is_some());
+    assert_eq!(*shown.0.lock().unwrap(), ["ABCD-EFGH"]);
+    let cache_dir = home.path().join(".aws/sso/cache");
+    let cache_file = std::fs::read_dir(&cache_dir).unwrap().next().unwrap().unwrap().path();
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(&cache_file).unwrap().permissions().mode() & 0o777, 0o600);
+    aws::credentials("sso", &answers(), &shown).unwrap();
+    assert_eq!(stats()["device"], 1, "the cached sign-in was used");
+    let mut cache: serde_json::Value = serde_json::from_slice(&std::fs::read(&cache_file).unwrap()).unwrap();
+    assert_eq!(cache["startUrl"], "https://corp.awsapps.com/start");
+    cache["expiresAt"] = "2020-01-01T00:00:00Z".into();
+    std::fs::write(&cache_file, cache.to_string()).unwrap();
+    aws::credentials("sso", &answers(), &shown).unwrap();
+    assert_eq!((stats()["device"].clone(), stats()["refreshed"].clone()), (1.into(), 1.into()));
+
+    // A role, assumed with the source profile's keys and an MFA code.
+    let mfa = Answers { password: "123456", ..answers() };
+    let role = aws::credentials("admin", &mfa, &shown).unwrap();
+    assert_eq!(role.access_key, "ASIAROLEEXAMPLE");
+    assert_eq!(*mfa.asked_secret.lock().unwrap(), 1);
+    let wrong = Answers { password: "000000", ..answers() };
+    assert!(aws::credentials("admin", &wrong, &shown).unwrap_err().to_string().contains("MultiFactor"));
+    assert_eq!(aws::credentials("tool", &answers(), &shown).unwrap().access_key, "AKIATOOL");
+    assert!(aws::credentials("missing", &answers(), &shown).is_err());
+
+    // S3 with the profile's keys: the session token goes along, and is in
+    // share links; expiring keys are renewed (off the main thread).
+    let renewals = std::sync::Arc::new(Mutex::new(0));
+    let counted = renewals.clone();
+    let expiring = aws::Credentials { expires: Some(std::time::SystemTime::now()), ..first.clone() };
+    let renew: s3::Renew = Box::new(move || {
+        *counted.lock().unwrap() += 1;
+        aws::credentials("sso", &answers(), &NoBrowser(Mutex::new(Vec::new())))
+    });
+    let params = s3::S3Params {
+        host: s3_host,
+        port: s3_port,
+        secure: false,
+        access_key: "sso".into(),
+        secret_key: None,
+        region: "us-east-1".into(),
+        timeout: Duration::from_secs(10),
+        check: None,
+        session: Some(s3::Session::new(expiring, renew)),
+    };
+    let fs: FsRef = s3::connect(params, &answers()).unwrap();
+    assert_eq!(*renewals.lock().unwrap(), 1, "renewed before the first request");
+    fs.create_dir(Path::new("/forkz-profile")).unwrap();
+    let mut file = fs.open_write_sized(Path::new("/forkz-profile/a.txt"), Some(2)).unwrap();
+    file.write_all(b"hi").unwrap();
+    file.flush().unwrap();
+    drop(file);
+    let (link, _) = fs.share_link(Path::new("/forkz-profile/a.txt"), Duration::from_secs(600)).unwrap();
+    assert!(link.contains("X-Amz-Security-Token=sso-session-token"), "{link}");
+    assert_eq!(download(&link).unwrap(), b"hi");
+    assert_eq!(*renewals.lock().unwrap(), 1, "renewed keys last");
+    fs.remove_file(Path::new("/forkz-profile/a.txt")).unwrap();
+    fs.remove_dir(Path::new("/forkz-profile")).unwrap();
 }

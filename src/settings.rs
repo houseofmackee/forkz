@@ -57,6 +57,10 @@ pub struct Settings {
     pub sidebar_order: std::collections::BTreeMap<String, Vec<String>>,
     /// The drop stack's files (where they are).
     pub drop_stack: Vec<PathBuf>,
+    /// Views remembered for folders (with Remember view settings for each
+    /// folder), the latest last.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub folder_views: Vec<FolderView>,
     /// The terminal pane goes where the active pane goes.
     pub terminal_follows: bool,
 }
@@ -229,6 +233,9 @@ pub struct GeneralSettings {
     /// the same server (any disk), instead of following Finder (move on
     /// the same disk, copy across disks). Option still copies.
     pub drag_moves: bool,
+    /// Each folder keeps its own view, sort, and grouping (others use the
+    /// pane's).
+    pub remember_folder_views: bool,
 }
 
 impl Default for GeneralSettings {
@@ -241,6 +248,7 @@ impl Default for GeneralSettings {
             sound_effects: true,
             transfer_sounds: true,
             drag_moves: false,
+            remember_folder_views: false,
         }
     }
 }
@@ -267,6 +275,41 @@ pub const COMPARE_TOOLS: &[(&str, &str, &str)] = &[
     ("araxis", "Araxis Merge", "com.araxis.merge"),
 ];
 
+/// A folder's own view settings.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FolderView {
+    /// The folder: a path on the Mac, or a server's key and the path.
+    pub folder: String,
+    #[serde(default)]
+    pub view: crate::pane::ViewMode,
+    #[serde(default)]
+    pub sort: Sort,
+    #[serde(default)]
+    pub group_by: crate::pane::GroupBy,
+}
+
+/// At most this many folders' views are kept (the oldest go).
+pub const FOLDER_VIEWS: usize = 1000;
+
+impl Settings {
+    /// The view remembered for a folder.
+    pub fn folder_view(&self, folder: &str) -> Option<&FolderView> {
+        self.folder_views.iter().find(|v| v.folder == folder)
+    }
+
+    /// Remembers a folder's view (as the latest).
+    pub fn remember_folder_view(&mut self, view: FolderView) {
+        self.folder_views.retain(|v| v.folder != view.folder);
+        self.folder_views.push(view);
+        let extra = self.folder_views.len().saturating_sub(FOLDER_VIEWS);
+        self.folder_views.drain(..extra);
+    }
+
+    pub fn forget_folder_view(&mut self, folder: &str) {
+        self.folder_views.retain(|v| v.folder != folder);
+    }
+}
+
 /// A folder on a saved site, shown in the sidebar.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RemoteFavorite {
@@ -284,6 +327,10 @@ pub const COLUMNS: &[(&str, &str)] = &[
     ("owner", "Owner"),
     ("group", "Group"),
     ("git", "Git"),
+    ("dimensions", "Dimensions"),
+    ("duration", "Duration"),
+    ("opened", "Date Last Opened"),
+    ("comment", "Comments"),
 ];
 
 /// Which optional columns show (Name always does), for folders on the Mac
@@ -445,6 +492,7 @@ impl Default for Settings {
             tools: example_tools(),
             sidebar_order: std::collections::BTreeMap::new(),
             drop_stack: Vec::new(),
+            folder_views: Vec::new(),
             terminal_follows: true,
         }
     }

@@ -37,6 +37,7 @@ struct Fields {
     port: Retained<NSTextField>,
     user: Retained<NSTextField>,
     region: Retained<NSTextField>,
+    profile: Retained<NSPopUpButton>,
     remote: Retained<NSTextField>,
     key_file: Retained<NSTextField>,
     choose: Retained<NSButton>,
@@ -128,11 +129,15 @@ impl FormTarget {
         fields.key_file.setEnabled(key);
         fields.choose.setEnabled(key);
         fields.region.setEnabled(s3 || protocol == Protocol::Gcs);
+        fields.profile.setEnabled(s3);
+        // An AWS profile has the keys.
+        let profile = s3 && fields.profile.indexOfSelectedItem() > 0;
+        fields.password.setEnabled(!profile);
         // Box: signing in happens in the browser.
         let browser = protocol.signs_in_with_browser();
         fields.host.setEnabled(!browser);
         fields.port.setEnabled(!browser);
-        fields.user.setEnabled(!browser);
+        fields.user.setEnabled(!browser && !profile);
         fields.host.setPlaceholderString(Some(&ns(if browser {
             "Not needed"
         } else {
@@ -255,6 +260,25 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
     );
     key_row.setSpacing(6.0);
     let region = text_field(mtm, site.region.as_deref().unwrap_or(""), "From the server name, or us-east-1", 260.0);
+    // AWS profiles from ~/.aws (SSO, roles, keys), instead of typed keys.
+    let profile = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, false);
+    let mut profiles = crate::vfs::aws::profiles();
+    if let Some(saved) = &site.aws_profile
+        && !profiles.contains(saved)
+    {
+        profiles.push(saved.clone());
+    }
+    let mut profile_titles = vec![ns("None (keys as user and password)")];
+    profile_titles.extend(profiles.iter().map(|p| ns(p)));
+    profile.addItemsWithTitles(&NSArray::from_retained_slice(&profile_titles));
+    if let Some(index) = site.aws_profile.as_ref().and_then(|p| profiles.iter().position(|x| x == p)) {
+        profile.selectItemAtIndex(index as isize + 1);
+    }
+    profile.setToolTip(Some(&ns("A profile in ~/.aws/config or ~/.aws/credentials: IAM Identity Center (SSO), a role, a credential_process, or keys")));
+    unsafe {
+        profile.setTarget(Some(&target));
+        profile.setAction(Some(sel!(authChanged:)));
+    }
     let remote = text_field(mtm, site.remote_dir.as_deref().unwrap_or(""), "Login folder", 260.0);
     let local_path = site.local_dir.as_ref().map(|d| d.display().to_string()).unwrap_or_default();
     let local = text_field(mtm, &local_path, "Optional: shown in the other pane", 260.0);
@@ -278,6 +302,7 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
         ("Password:", as_view(&*password_field)),
         ("Key file:", as_view(&*key_row)),
         ("Region:", as_view(&*region)),
+        ("AWS profile:", as_view(&*profile)),
         ("Remote folder:", as_view(&*remote)),
         ("Local folder:", as_view(&*local)),
         ("", as_view(&*save)),
@@ -298,6 +323,7 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
         port: port.clone(),
         user: user.clone(),
         region: region.clone(),
+        profile: profile.clone(),
         remote: remote.clone(),
         key_file: key_file.clone(),
         choose: choose.clone(),
@@ -333,7 +359,14 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
         let cloud = protocol_choice.is_object_storage();
         // Google's and Azure's servers when none is typed.
         let browser = protocol_choice.signs_in_with_browser();
-        let host_text = if browser {
+        let profile_choice = usize::try_from(profile.indexOfSelectedItem() - 1)
+            .ok()
+            .and_then(|i| profiles.get(i))
+            .filter(|_| s3)
+            .cloned();
+        let host_text = if s3 && profile_choice.is_some() && host_text.is_empty() {
+            "s3.amazonaws.com".to_string()
+        } else if browser {
             protocol_choice.default_host("").unwrap_or_default()
         } else if host_text.is_empty() {
             protocol_choice.default_host(&user.stringValue().to_string()).unwrap_or_default()
@@ -347,7 +380,7 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
             Some("Enter the server\u{2019}s name or address.")
         } else if port_number.is_none() {
             Some("The port must be a number from 1 to 65535.")
-        } else if browser {
+        } else if browser || profile_choice.is_some() {
             None
         } else if cloud && user.stringValue().to_string().trim().is_empty() && !host_text.contains('@') {
             Some(match protocol_choice {
@@ -376,7 +409,8 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
         result.port = port_number.unwrap_or(protocol_choice.default_port());
         let region_text = region.stringValue().to_string().trim().to_string();
         result.region = ((s3 || protocol_choice == Protocol::Gcs) && !region_text.is_empty()).then_some(region_text);
-        result.user = user_text;
+        result.user = if profile_choice.is_some() { String::new() } else { user_text };
+        result.aws_profile = profile_choice;
         result.auth = auth_choice;
         result.key_file = (!key_text.is_empty()).then(|| PathBuf::from(key_text));
         let name_text = name.stringValue().to_string().trim().to_string();
@@ -391,9 +425,10 @@ pub fn show(site: Option<&Site>, password: Option<String>) -> Option<FormResult>
         result.local_dir = (!local_text.is_empty()).then(|| PathBuf::from(local_text));
         let password_text = password_field.stringValue().to_string();
         let save_state = save.state() == NSControlStateValueOn;
+        let uses_profile = result.aws_profile.is_some();
         return Some(FormResult {
             site: result,
-            password: (!password_text.is_empty()).then_some(password_text),
+            password: (!password_text.is_empty() && !uses_profile).then_some(password_text),
             save: save_state,
         });
     }

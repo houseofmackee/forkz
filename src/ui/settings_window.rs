@@ -43,6 +43,7 @@ const ERROR_RULES: [(&str, &str); 3] =
 struct Controls {
     show_hidden: Retained<NSButton>,
     start_on_parent: Retained<NSButton>,
+    folder_views: Retained<NSButton>,
     app_leftovers: Retained<NSButton>,
     sound_effects: Retained<NSButton>,
     transfer_sounds: Retained<NSButton>,
@@ -75,6 +76,9 @@ struct Controls {
 
 pub struct WindowIvars {
     window: OnceCell<Retained<NSWindow>>,
+    tabs: OnceCell<Retained<NSTabView>>,
+    /// The marks behind controls that match the search.
+    highlights: RefCell<Vec<Retained<NSView>>>,
     controls: OnceCell<Controls>,
     filters: OnceCell<Retained<super::filters_editor::FiltersEditor>>,
     tools: OnceCell<Retained<super::tools_editor::ToolsEditor>>,
@@ -140,6 +144,11 @@ define_class!(
         fn reset_all_shortcuts_action(&self, _sender: Option<&AnyObject>) {
             self.reset_shortcut(true);
         }
+
+        #[unsafe(method(searchSettings:))]
+        fn search_settings(&self, sender: &objc2_app_kit::NSSearchField) {
+            self.search(&sender.stringValue().to_string());
+        }
     }
 
     unsafe impl NSObjectProtocol for SettingsWindow {}
@@ -188,6 +197,37 @@ pub fn show_tab(title: &str) {
         if index >= 0 {
             tabs.selectTabViewItemAtIndex(index);
         }
+    }
+}
+
+/// The views under `view` whose words match: labels and notes, buttons
+/// and checkboxes, and pop-up menus (by any of their items). Fields one
+/// types in are left out (their text is a value, not a setting's name).
+fn matching_views(view: &NSView, hit: &dyn Fn(&str) -> bool, found: &mut Vec<Retained<NSView>>) {
+    if let Some(popup) = view.downcast_ref::<NSPopUpButton>() {
+        if popup.itemTitles().iter().any(|t| hit(&t.to_string())) {
+            found.push(view.retain());
+        }
+        return;
+    }
+    if let Some(button) = view.downcast_ref::<NSButton>() {
+        if hit(&button.title().to_string()) {
+            found.push(view.retain());
+        }
+        return;
+    }
+    if let Some(field) = view.downcast_ref::<NSTextField>() {
+        if !field.isEditable() && hit(&field.stringValue().to_string()) {
+            found.push(view.retain());
+        }
+        return;
+    }
+    // Tables (filters, tools, shortcuts) are searched otherwise.
+    if view.downcast_ref::<NSTableView>().is_some() {
+        return;
+    }
+    for sub in view.subviews().iter() {
+        matching_views(&sub, hit, found);
     }
 }
 
@@ -278,6 +318,8 @@ impl SettingsWindow {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(WindowIvars {
             window: OnceCell::new(),
+            tabs: OnceCell::new(),
+            highlights: RefCell::new(Vec::new()),
             controls: OnceCell::new(),
             filters: OnceCell::new(),
             tools: OnceCell::new(),
@@ -300,6 +342,7 @@ impl SettingsWindow {
         let controls = Controls {
             show_hidden: checkbox("Show hidden files", self, mtm),
             start_on_parent: checkbox("Select \u{201c}..\u{201d} when opening a folder", self, mtm),
+            folder_views: checkbox("Remember view settings for each folder", self, mtm),
             app_leftovers: checkbox(
                 "Offer to remove an app\u{2019}s leftover files when it goes to the Trash",
                 self,
@@ -403,6 +446,14 @@ impl SettingsWindow {
             vec![
                 (label("Files:", mtm), view(&*controls.show_hidden)),
                 (empty(mtm), view(&*controls.start_on_parent)),
+                (empty(mtm), view(&*controls.folder_views)),
+                (
+                    empty(mtm),
+                    note(
+                        "The view (list, icons, columns, or gallery), sort, and grouping chosen in a folder are kept for it. Other folders use the default view: View > Use as Default View sets it.",
+                        mtm,
+                    ),
+                ),
                 (label("Apps:", mtm), view(&*controls.app_leftovers)),
                 (label("Sounds:", mtm), view(&*controls.sound_effects)),
                 (empty(mtm), view(&*controls.transfer_sounds)),
@@ -523,10 +574,31 @@ impl SettingsWindow {
             tabs.addTabViewItem(&item);
         }
 
+        // A search field above the tabs: finds a setting by its words.
+        let search = objc2_app_kit::NSSearchField::new(mtm);
+        search.setPlaceholderString(Some(&ns("Search Settings")));
+        unsafe {
+            search.setTarget(Some(self));
+            search.setAction(Some(sel!(searchSettings:)));
+        }
+        let content = NSView::new(mtm);
+        content.addSubview(&search);
+        content.addSubview(&tabs);
+        search.setTranslatesAutoresizingMaskIntoConstraints(false);
+        tabs.setTranslatesAutoresizingMaskIntoConstraints(false);
+        search.topAnchor().constraintEqualToAnchor_constant(&content.topAnchor(), 10.0).setActive(true);
+        search.trailingAnchor().constraintEqualToAnchor_constant(&content.trailingAnchor(), -16.0).setActive(true);
+        search.widthAnchor().constraintEqualToConstant(220.0).setActive(true);
+        tabs.topAnchor().constraintEqualToAnchor_constant(&search.bottomAnchor(), 4.0).setActive(true);
+        tabs.leadingAnchor().constraintEqualToAnchor(&content.leadingAnchor()).setActive(true);
+        tabs.trailingAnchor().constraintEqualToAnchor(&content.trailingAnchor()).setActive(true);
+        tabs.bottomAnchor().constraintEqualToAnchor(&content.bottomAnchor()).setActive(true);
+        let _ = self.ivars().tabs.set(tabs.clone());
+
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
-                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 460.0)),
+                NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(600.0, 490.0)),
                 NSWindowStyleMask::Titled | NSWindowStyleMask::Closable,
                 NSBackingStoreType::Buffered,
                 false,
@@ -534,11 +606,85 @@ impl SettingsWindow {
         };
         unsafe { window.setReleasedWhenClosed(false) };
         window.setTitle(&ns("forkz Settings"));
-        window.setContentView(Some(&tabs));
+        window.setContentView(Some(&content));
         window.center();
         window.setFrameAutosaveName(&ns("ForkzSettings"));
         let _ = self.ivars().window.set(window);
         let _ = self.ivars().controls.set(controls);
+    }
+
+    /// Finds settings by their words: shows the first tab with a match and
+    /// marks the matching controls there (a command's name selects it in
+    /// Shortcuts). The window's subtitle says how many matched.
+    fn search(&self, query: &str) {
+        for mark in self.ivars().highlights.take() {
+            mark.removeFromSuperview();
+        }
+        let (Some(tabs), Some(window)) = (self.ivars().tabs.get(), self.ivars().window.get()) else { return };
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            window.setSubtitle(&ns(""));
+            return;
+        }
+        let words: Vec<&str> = query.split_whitespace().collect();
+        let hit = |text: &str| {
+            let text = text.to_lowercase();
+            words.iter().all(|w| text.contains(w))
+        };
+        let mut found: Vec<(isize, Vec<Retained<NSView>>)> = Vec::new();
+        for (index, item) in tabs.tabViewItems().iter().enumerate() {
+            let mut matched = Vec::new();
+            if let Some(view) = item.view(self.mtm()) {
+                matching_views(&view, &hit, &mut matched);
+            }
+            if !matched.is_empty() || hit(&item.label().to_string()) {
+                found.push((index as isize, matched));
+            }
+        }
+        // Commands, for their shortcuts.
+        let command = Command::ALL.iter().position(|c| hit(c.title()));
+        let shortcuts = unsafe { tabs.indexOfTabViewItemWithIdentifier(&ns("Shortcuts")) };
+        if let Some(row) = command
+            && !found.iter().any(|(i, _)| *i == shortcuts)
+        {
+            found.push((shortcuts, Vec::new()));
+            if let Some(c) = self.ivars().controls.get() {
+                c.shortcuts.selectRowIndexes_byExtendingSelection(
+                    &objc2_foundation::NSIndexSet::indexSetWithIndex(row),
+                    false,
+                );
+                c.shortcuts.scrollRowToVisible(row as isize);
+            }
+        }
+        let count: usize = found.iter().map(|(_, views)| views.len().max(1)).sum();
+        window.setSubtitle(&ns(&match count {
+            0 => "No settings match".to_string(),
+            1 => "1 match".to_string(),
+            n => format!("{n} matches"),
+        }));
+        let Some((index, views)) = found.into_iter().next() else { return };
+        tabs.selectTabViewItemAtIndex(index);
+        let Some(page) = tabs.selectedTabViewItem().and_then(|i| i.view(self.mtm())) else { return };
+        page.layoutSubtreeIfNeeded();
+        let mtm = self.mtm();
+        let mut marks = Vec::new();
+        for matched in views {
+            let frame = matched.convertRect_toView(matched.bounds(), Some(&page));
+            let mark = objc2_app_kit::NSBox::new(mtm);
+            mark.setBoxType(objc2_app_kit::NSBoxType::Custom);
+            mark.setBorderWidth(0.0);
+            mark.setCornerRadius(4.0);
+            mark.setFillColor(&objc2_app_kit::NSColor::findHighlightColor().colorWithAlphaComponent(0.45));
+            mark.setTitlePosition(objc2_app_kit::NSTitlePosition::NoTitle);
+            mark.setFrame(NSRect::new(
+                NSPoint::new(frame.origin.x - 4.0, frame.origin.y - 2.0),
+                NSSize::new(frame.size.width + 8.0, frame.size.height + 4.0),
+            ));
+            // Behind the controls (the first of the page's views).
+            page.addSubview_positioned_relativeTo(&mark, objc2_app_kit::NSWindowOrderingMode::Below, None);
+            marks.push(Retained::into_super(mark));
+        }
+        self.ivars().highlights.replace(marks);
     }
 
     /// The theme popup: macOS's choices, the built-in themes, then the
@@ -624,6 +770,7 @@ impl SettingsWindow {
         let set = |b: &NSButton, on: bool| b.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
         set(&c.show_hidden, settings.show_hidden);
         set(&c.start_on_parent, settings.general.start_on_parent);
+        set(&c.folder_views, settings.general.remember_folder_views);
         set(&c.app_leftovers, settings.general.app_leftovers);
         set(&c.sound_effects, settings.general.sound_effects);
         set(&c.transfer_sounds, settings.general.transfer_sounds);
@@ -683,6 +830,7 @@ impl SettingsWindow {
         super::update_settings(|s| {
             s.show_hidden = show_hidden;
             s.general.start_on_parent = on(&c.start_on_parent);
+            s.general.remember_folder_views = on(&c.folder_views);
             s.general.app_leftovers = on(&c.app_leftovers);
             s.general.sound_effects = on(&c.sound_effects);
             s.general.transfer_sounds = on(&c.transfer_sounds);

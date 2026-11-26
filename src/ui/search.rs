@@ -18,7 +18,7 @@ use super::oplog;
 use super::pane_view::PaneController;
 use super::util::{mtm, ns};
 use crate::fs::ops::CancelToken;
-use crate::fs::search::{self, Kind, Mode, Query};
+use crate::fs::search::{self, Kind, Mode, Modified, Query};
 use crate::pane::title_of;
 use crate::vfs::{self, FsRef};
 
@@ -29,7 +29,16 @@ struct Last {
 
 thread_local! {
     static LAST: RefCell<Last> = const { RefCell::new(Last {
-        query: Query { text: String::new(), mode: Mode::Name, include_hidden: false, kind: Kind::Any, tag: None },
+        query: Query {
+            text: String::new(),
+            mode: Mode::Name,
+            include_hidden: false,
+            kind: Kind::Any,
+            tag: None,
+            larger_than: None,
+            smaller_than: None,
+            modified: Modified::Any,
+        },
         spotlight: true,
     }) };
 }
@@ -51,6 +60,13 @@ fn describe(query: &Query) -> String {
     if let Some(tag) = &query.tag {
         parts.push(format!("tagged {tag}"));
     }
+    if let Some(n) = query.larger_than {
+        parts.push(format!("larger than {}", crate::fs::format_size(n)));
+    }
+    if let Some(n) = query.smaller_than {
+        parts.push(format!("smaller than {}", crate::fs::format_size(n)));
+    }
+    parts.extend(query.modified.describe());
     parts.join(", ")
 }
 
@@ -91,7 +107,7 @@ fn ask(folder: &str, local: bool, editing: Option<(&Query, bool, &str)>) -> Opti
         NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(300.0, 24.0)),
     );
     field.setStringValue(&ns(&last_query.text));
-    field.setPlaceholderString(Some(&ns("report, *.pdf, or text (empty: just the kind or tag)")));
+    field.setPlaceholderString(Some(&ns("report, *.pdf, or text (empty: just the filters)")));
     field.widthAnchor().constraintEqualToConstant(300.0).setActive(true);
     let mode = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm), NSRect::ZERO, false);
     let titles: Vec<Retained<NSString>> = ["Names", "Contents of files"].iter().map(|t| ns(t)).collect();
@@ -115,6 +131,54 @@ fn ask(folder: &str, local: bool, editing: Option<(&Query, bool, &str)>) -> Opti
     tags.extend(crate::fs::tags::COLORS.iter().map(|c| c.0));
     let tag_index = last_query.tag.as_deref().and_then(|t| tags.iter().position(|x| *x == t)).unwrap_or(0);
     let tag = popup(&tags, tag_index);
+    // Size: a comparison and a size ("100 MB").
+    let size_kind = popup(
+        &["Any size", "Larger than", "Smaller than"],
+        if last_query.larger_than.is_some() {
+            1
+        } else if last_query.smaller_than.is_some() {
+            2
+        } else {
+            0
+        },
+    );
+    let size_field = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
+    let size_value = last_query.larger_than.or(last_query.smaller_than);
+    size_field.setStringValue(&ns(&size_value.map(crate::fs::format_size).unwrap_or_else(|| "100 MB".into())));
+    size_field.widthAnchor().constraintEqualToConstant(110.0).setActive(true);
+    let size_row = objc2_app_kit::NSStackView::stackViewWithViews(
+        &NSArray::from_retained_slice(&[view(&*size_kind), view(&*size_field)]),
+        mtm,
+    );
+    // Modified: a preset, or between two days.
+    let mut dates: Vec<&str> = Modified::PRESETS.iter().map(|m| m.1).collect();
+    dates.push("Between dates");
+    let (from_text, to_text) = match &last_query.modified {
+        Modified::Between(from, to) => (from.clone(), to.clone()),
+        _ => (String::new(), String::new()),
+    };
+    let date_index = Modified::PRESETS
+        .iter()
+        .position(|m| m.0 == last_query.modified)
+        .unwrap_or(if matches!(last_query.modified, Modified::Between(..)) { dates.len() - 1 } else { 0 });
+    let date = popup(&dates, date_index);
+    let day_field = |text: &str| {
+        let field = NSTextField::initWithFrame(NSTextField::alloc(mtm), NSRect::ZERO);
+        field.setStringValue(&ns(text));
+        field.setPlaceholderString(Some(&ns("YYYY-MM-DD")));
+        field.widthAnchor().constraintEqualToConstant(110.0).setActive(true);
+        field
+    };
+    let from = day_field(&from_text);
+    let to = day_field(&to_text);
+    let between_row = objc2_app_kit::NSStackView::stackViewWithViews(
+        &NSArray::from_retained_slice(&[
+            view(&*from),
+            Retained::into_super(Retained::into_super(NSTextField::labelWithString(&ns("to"), mtm))),
+            view(&*to),
+        ]),
+        mtm,
+    );
     let hidden = checkbox("Include hidden items", last_query.include_hidden);
     let spotlight = checkbox("Use Spotlight (fast, for indexed folders)", local && last_spotlight);
     spotlight.setEnabled(local);
@@ -126,6 +190,9 @@ fn ask(folder: &str, local: bool, editing: Option<(&Query, bool, &str)>) -> Opti
         (label("Look in:"), view(&*mode)),
         (label("Kind:"), view(&*kind)),
         (label("Tag:"), view(&*tag)),
+        (label("Size:"), view(&*size_row)),
+        (label("Modified:"), view(&*date)),
+        (label(""), view(&*between_row)),
         (label(""), view(&*hidden)),
         (label(""), view(&*spotlight)),
         (label(""), view(&*save)),
@@ -147,12 +214,49 @@ fn ask(folder: &str, local: bool, editing: Option<(&Query, bool, &str)>) -> Opti
     }
     let text = field.stringValue().to_string().trim().to_string();
     let tag_index = tag.indexOfSelectedItem().max(0) as usize;
+    let size_text = size_field.stringValue().to_string();
+    let size = match size_kind.indexOfSelectedItem() {
+        1 | 2 => match crate::fs::split::parse_size(&size_text) {
+            Some(n) => Some(n),
+            None => {
+                super::dialogs::show_error(
+                    format!("\u{201c}{}\u{201d} is not a size.", size_text.trim()),
+                    "Write it as 500 KB, 100 MB, or 2 GB.".into(),
+                );
+                return None;
+            }
+        },
+        _ => None,
+    };
+    let date_choice = date.indexOfSelectedItem().max(0) as usize;
+    let modified = match Modified::PRESETS.get(date_choice) {
+        Some((preset, _)) => preset.clone(),
+        None => {
+            let (from, to) = (from.stringValue().to_string(), to.stringValue().to_string());
+            let bad = [&from, &to].into_iter().find(|d| !d.trim().is_empty() && search::day_start(d).is_none());
+            if let Some(bad) = bad {
+                super::dialogs::show_error(
+                    format!("\u{201c}{}\u{201d} is not a date.", bad.trim()),
+                    "Write dates as 2026-11-26.".into(),
+                );
+                return None;
+            }
+            if from.trim().is_empty() && to.trim().is_empty() {
+                Modified::Any
+            } else {
+                Modified::Between(from.trim().to_string(), to.trim().to_string())
+            }
+        }
+    };
     let query = Query {
         text,
         mode: if mode.indexOfSelectedItem() == 1 { Mode::Contents } else { Mode::Name },
         include_hidden: hidden.state() == NSControlStateValueOn,
         kind: Kind::ALL.get(kind.indexOfSelectedItem().max(0) as usize).map_or(Kind::Any, |k| k.0),
         tag: (tag_index > 0).then(|| tags[tag_index].to_string()),
+        larger_than: size.filter(|_| size_kind.indexOfSelectedItem() == 1),
+        smaller_than: size.filter(|_| size_kind.indexOfSelectedItem() == 2),
+        modified,
     };
     // Some text, or a kind or tag.
     if query.is_empty() {
@@ -258,6 +362,7 @@ pub fn search_link(
     text: String,
     kind: Option<&str>,
     contents: bool,
+    filters: crate::links::Filters,
 ) -> Result<(), String> {
     let kind = match kind {
         None => Kind::Any,
@@ -269,9 +374,17 @@ pub fn search_link(
                 format!("\u{201c}{name}\u{201d} is not a kind: use folders, files, images, movies, audio, documents, archives, or code.")
             })?,
     };
-    let query = Query { text, mode: if contents { Mode::Contents } else { Mode::Name }, kind, ..Query::default() };
+    let query = Query {
+        text,
+        mode: if contents { Mode::Contents } else { Mode::Name },
+        kind,
+        larger_than: filters.larger,
+        smaller_than: filters.smaller,
+        modified: filters.days.map_or(Modified::Any, Modified::WithinDays),
+        ..Query::default()
+    };
     if query.is_empty() {
-        return Err("The search needs some text= or a kind=.".into());
+        return Err("The search needs some text=, or a kind=, larger=, smaller=, or days=.".into());
     }
     if !root.is_dir() {
         return Err(format!("{} is not a folder.", root.display()));

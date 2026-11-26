@@ -30,6 +30,39 @@ pub struct S3Params {
     /// The bucket to check the keys with (keys for one bucket may not list
     /// all of them); None: the list of buckets.
     pub check: Option<String>,
+    /// Keys from an AWS profile (renewed as they expire), instead of
+    /// `access_key` and `secret_key`.
+    pub session: Option<Arc<Session>>,
+}
+
+/// Renews a session's keys.
+pub type Renew = Box<dyn Fn() -> io::Result<super::aws::Credentials> + Send + Sync>;
+
+/// Keys that expire (from an AWS profile: SSO, a role, a process), and
+/// how to get new ones.
+pub struct Session {
+    keys: std::sync::Mutex<super::aws::Credentials>,
+    renew: Renew,
+}
+
+impl Session {
+    pub fn new(keys: super::aws::Credentials, renew: Renew) -> Arc<Session> {
+        Arc::new(Session { keys: std::sync::Mutex::new(keys), renew })
+    }
+
+    /// The keys, renewed first if they expire within five minutes. Not on
+    /// the main thread: renewing may ask (an MFA code, a sign-in in the
+    /// browser), and the asking happens there.
+    pub fn current(&self) -> super::aws::Credentials {
+        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        if keys.expiring(Duration::from_secs(300)) && objc2::MainThreadMarker::new().is_none() {
+            match (self.renew)() {
+                Ok(new) => *keys = new,
+                Err(e) => tracing::warn!("the AWS keys could not be renewed: {e}"),
+            }
+        }
+        keys.clone()
+    }
 }
 
 pub struct S3Fs {
@@ -113,6 +146,7 @@ pub fn authorization(
 pub fn presigned_url(
     access_key: &str,
     secret_key: &str,
+    token: Option<&str>,
     region: &str,
     scheme: &str,
     host: &str,
@@ -129,6 +163,9 @@ pub fn presigned_url(
         ("X-Amz-Expires".into(), expires.min(604_800).to_string()),
         ("X-Amz-SignedHeaders".into(), "host".into()),
     ];
+    if let Some(token) = token {
+        query.push(("X-Amz-Security-Token".into(), token.to_string()));
+    }
     query = query.into_iter().map(|(k, v)| (http::encode_value(&k), http::encode_value(&v))).collect();
     query.sort();
     let canonical_query = query.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
@@ -144,6 +181,12 @@ pub fn presigned_url(
 /// secret key if it is missing or refused.
 pub fn connect(params: S3Params, prompter: &dyn Prompter) -> io::Result<Arc<S3Fs>> {
     let mut fs = S3Fs { agent: http::agent(params.timeout), secret: params.secret_key.clone(), params };
+    // Keys from a profile: nothing to ask.
+    if fs.params.session.is_some() {
+        let check = fs.params.check.as_ref().map_or_else(|| PathBuf::from("/"), |b| PathBuf::from(format!("/{b}")));
+        fs.list(&check)?;
+        return Ok(Arc::new(fs));
+    }
     for attempt in 0..4 {
         if fs.secret.is_some() {
             let check = fs.params.check.as_ref().map_or_else(|| PathBuf::from("/"), |b| PathBuf::from(format!("/{b}")));
@@ -191,6 +234,17 @@ impl S3Fs {
         self.secret.as_deref()
     }
 
+    /// (access key, secret key, session token) to sign with now.
+    fn keys(&self) -> (String, String, Option<String>) {
+        match &self.params.session {
+            Some(session) => {
+                let keys = session.current();
+                (keys.access_key, keys.secret_key, keys.session_token)
+            }
+            None => (self.params.access_key.clone(), self.secret.clone().unwrap_or_default(), None),
+        }
+    }
+
     fn host_header(&self) -> String {
         let default = if self.params.secure { 443 } else { 80 };
         if self.params.port == default {
@@ -211,10 +265,14 @@ impl S3Fs {
     ) -> ureq::http::request::Builder {
         let path = http::encode_path(bucket_and_key);
         let query: Vec<(String, String)> = query.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        let headers: Vec<(String, String)> = headers.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        let mut headers: Vec<(String, String)> = headers.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+        let (access_key, secret_key, token) = self.keys();
+        if let Some(token) = token {
+            headers.push(("x-amz-security-token".into(), token));
+        }
         let (authorization, stamp) = authorization(
-            &self.params.access_key,
-            self.secret.as_deref().unwrap_or(""),
+            &access_key,
+            &secret_key,
             &self.params.region,
             method,
             &self.host_header(),
@@ -615,9 +673,11 @@ impl Vfs for S3Fs {
             return Err(io::Error::new(io::ErrorKind::IsADirectory, "Only files can be shared with a link."));
         }
         let scheme = if self.params.secure { "https" } else { "http" };
+        let (access_key, secret_key, token) = self.keys();
         let url = presigned_url(
-            &self.params.access_key,
-            self.secret.as_deref().unwrap_or(""),
+            &access_key,
+            &secret_key,
+            token.as_deref(),
             &self.params.region,
             scheme,
             &self.host_header(),
@@ -806,6 +866,7 @@ mod tests {
         let url = presigned_url(
             "AKIAIOSFODNN7EXAMPLE",
             "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            None,
             "us-east-1",
             "https",
             "examplebucket.s3.amazonaws.com",
