@@ -1,0 +1,465 @@
+/* forkz's web pages: the shared design system (DESIGN.md), with its light,
+   dark, and high-contrast themes. Colors come only from these variables. */
+
+:root,
+[data-theme="light"] {
+  --ink-navy: #0b3558;
+  --signal-blue: #006bff;
+  --slate-gray: #476788;
+  --mist-gray: #a6bbd1;
+  --cloud: #f8f9fb;
+  --paper: #ffffff;
+  --pebble: #f0f3f8;
+  --hairline: #d4e0ed;
+  --deep-cobalt: #004eba;
+  --badge-fill: #e6f0ff;
+  --link: #004eba;
+  --shadow-card: rgba(71, 103, 136, 0.04) 0 4px 5px, rgba(71, 103, 136, 0.03) 0 8px 15px,
+    rgba(71, 103, 136, 0.08) 0 30px 50px;
+  --shadow-small: rgba(71, 103, 136, 0.04) 0 4px 5px, rgba(71, 103, 136, 0.03) 0 4px 10px,
+    rgba(71, 103, 136, 0.05) 0 10px 20px;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --ink-navy: #e8eef6;
+  --signal-blue: #4d94ff;
+  --slate-gray: #9db4cc;
+  --mist-gray: #7f9bb9;
+  --cloud: #071b2e;
+  --paper: #0e2a45;
+  --pebble: #163a5c;
+  --hairline: #2f5578;
+  --deep-cobalt: #a9cbff;
+  --badge-fill: #12335c;
+  --link: #a9cbff;
+  --shadow-card: rgba(0, 10, 24, 0.3) 0 4px 5px, rgba(0, 10, 24, 0.25) 0 8px 15px, rgba(0, 10, 24, 0.4) 0 30px 50px;
+  --shadow-small: rgba(0, 10, 24, 0.3) 0 4px 5px, rgba(0, 10, 24, 0.25) 0 4px 10px, rgba(0, 10, 24, 0.3) 0 10px 20px;
+  color-scheme: dark;
+}
+
+[data-theme="high-contrast"] {
+  --ink-navy: #06223a;
+  --signal-blue: #0046b8;
+  --slate-gray: #2f4a66;
+  --mist-gray: #3d566f;
+  --cloud: #f8f9fb;
+  --paper: #ffffff;
+  --pebble: #f0f3f8;
+  --hairline: #6f8aa6;
+  --deep-cobalt: #003a8c;
+  --badge-fill: #e6f0ff;
+  --link: #003a8c;
+  color-scheme: light;
+}
+
+/* No theme chosen: follow the system's dark mode. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --ink-navy: #e8eef6;
+    --signal-blue: #4d94ff;
+    --slate-gray: #9db4cc;
+    --mist-gray: #7f9bb9;
+    --cloud: #071b2e;
+    --paper: #0e2a45;
+    --pebble: #163a5c;
+    --hairline: #2f5578;
+    --deep-cobalt: #a9cbff;
+    --badge-fill: #12335c;
+    --link: #a9cbff;
+    --shadow-card: rgba(0, 10, 24, 0.3) 0 4px 5px, rgba(0, 10, 24, 0.25) 0 8px 15px, rgba(0, 10, 24, 0.4) 0 30px 50px;
+    --shadow-small: rgba(0, 10, 24, 0.3) 0 4px 5px, rgba(0, 10, 24, 0.25) 0 4px 10px, rgba(0, 10, 24, 0.3) 0 10px 20px;
+    color-scheme: dark;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--cloud);
+  color: var(--ink-navy);
+  font-family: Manrope, system-ui, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+a {
+  color: var(--link);
+}
+
+a:focus-visible,
+button:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--signal-blue);
+  outline-offset: 2px;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+}
+
+.skip:focus {
+  left: 16px;
+  top: 16px;
+  z-index: 10;
+  background: var(--paper);
+  padding: 8px 16px;
+  border-radius: 8px;
+}
+
+/* The header: 64px on Paper, the icon and name, tabs, and the theme. */
+header {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--paper);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.bar {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 24px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink-navy);
+  text-decoration: none;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.brand img {
+  width: 28px;
+  height: 28px;
+}
+
+nav {
+  display: flex;
+  gap: 4px;
+  margin-left: 24px;
+}
+
+nav a {
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 8px;
+  color: var(--ink-navy);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+nav a:hover {
+  background: var(--pebble);
+}
+
+nav a[aria-current="page"] {
+  color: var(--signal-blue);
+  font-weight: 600;
+  border-radius: 8px 8px 0 0;
+  box-shadow: inset 0 -2px 0 var(--signal-blue);
+  background: none;
+}
+
+.theme {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--slate-gray);
+}
+
+.theme select {
+  height: 40px;
+  padding: 0 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 8px;
+  background: var(--pebble);
+  color: var(--ink-navy);
+  font: inherit;
+}
+
+main {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 48px 24px 64px;
+}
+
+/* The home page's first section: the icon, name, and download. */
+.hero {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 48px;
+  align-items: center;
+  margin-bottom: 64px;
+}
+
+.hero h1 {
+  font-size: 50px;
+  line-height: 1.2;
+  margin: 0 0 16px;
+}
+
+.lead {
+  font-size: 20px;
+  line-height: 1.5;
+  color: var(--slate-gray);
+  margin: 0 0 32px;
+  max-width: 640px;
+}
+
+.hero .icon {
+  width: 256px;
+  height: 256px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: var(--signal-blue);
+  color: var(--paper);
+  font-size: 18px;
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: var(--shadow-small);
+}
+
+.button.secondary {
+  background: var(--paper);
+  color: var(--ink-navy);
+  border: 1px solid var(--hairline);
+}
+
+code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 14px;
+  background: var(--pebble);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.note {
+  color: var(--slate-gray);
+  font-size: 14px;
+  margin-top: 16px;
+}
+
+h2 {
+  font-size: 28px;
+  line-height: 1.3;
+  margin: 0 0 16px;
+}
+
+h3 {
+  font-size: 20px;
+  line-height: 1.4;
+  margin: 0 0 8px;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 24px;
+  margin-bottom: 64px;
+}
+
+.card {
+  background: var(--paper);
+  border: 1px solid var(--hairline);
+  border-radius: 16px;
+  padding: 24px;
+  box-shadow: var(--shadow-card);
+}
+
+.card p {
+  margin: 0;
+  color: var(--slate-gray);
+}
+
+/* Screenshots: real windows, with their shadow and transparent corners. */
+.shot {
+  margin: 0;
+}
+
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.shot.wide {
+  max-width: 1040px;
+  margin: 0 auto 64px;
+}
+
+/* A closer look: text beside a screenshot, sides alternating. */
+.tour {
+  margin-bottom: 64px;
+}
+
+.tour > h2 {
+  font-size: 38px;
+  line-height: 1.21;
+  text-align: center;
+  margin-bottom: 48px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 1fr 1.6fr;
+  gap: 48px;
+  align-items: center;
+  margin-bottom: 56px;
+}
+
+/* Screenshot first: it keeps the wide column. */
+.row:nth-child(odd of .row) {
+  grid-template-columns: 1.6fr 1fr;
+}
+
+.row:nth-child(odd of .row) .text {
+  order: 2;
+}
+
+.row .text p {
+  color: var(--slate-gray);
+  font-size: 18px;
+  margin: 0;
+}
+
+.row h3 {
+  font-size: 24px;
+  margin-bottom: 12px;
+}
+
+/* Long text (the privacy policy, and the data section). */
+.prose {
+  max-width: 760px;
+}
+
+.prose p,
+.prose li {
+  color: var(--ink-navy);
+}
+
+.prose h2 {
+  margin-top: 48px;
+}
+
+.prose .updated {
+  color: var(--slate-gray);
+  font-size: 14px;
+}
+
+.panel {
+  background: var(--paper);
+  border: 1px solid var(--hairline);
+  border-radius: 24px;
+  padding: 32px;
+  box-shadow: var(--shadow-card);
+  margin-bottom: 64px;
+}
+
+.panel h2:first-child {
+  margin-top: 0;
+}
+
+.panel p:last-child {
+  margin-bottom: 0;
+}
+
+footer {
+  border-top: 1px solid var(--hairline);
+}
+
+footer .bar {
+  height: auto;
+  padding-top: 24px;
+  padding-bottom: 24px;
+  gap: 24px;
+  flex-wrap: wrap;
+  font-size: 14px;
+  color: var(--slate-gray);
+}
+
+footer a {
+  font-weight: 500;
+}
+
+@media (max-width: 720px) {
+  .row {
+    grid-template-columns: 1fr;
+    gap: 16px;
+    margin-bottom: 40px;
+  }
+  .row:nth-child(odd of .row) {
+    grid-template-columns: 1fr;
+  }
+  .row:nth-child(odd of .row) .text {
+    order: 0;
+  }
+  .tour > h2 {
+    font-size: 28px;
+    margin-bottom: 32px;
+  }
+  .bar {
+    padding: 0 16px;
+  }
+  main {
+    padding: 32px 16px 48px;
+  }
+  .hero {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+  .hero .icon {
+    width: 128px;
+    height: 128px;
+    order: -1;
+  }
+  .hero h1 {
+    font-size: 38px;
+  }
+}
+
+/* Narrow: the name shortens to the icon, and the theme label goes. */
+@media (max-width: 480px) {
+  .brand span,
+  .theme label {
+    position: absolute;
+    left: -9999px;
+  }
+  nav {
+    margin-left: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

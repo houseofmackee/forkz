@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>forkz: a dual-pane file manager for macOS</title>
+  <meta name="description" content="forkz is a free, open source, dual-pane file manager for macOS, for files on your Mac and on servers and cloud storage.">
+  <script src="theme.js"></script>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to the content</a>
+  <header>
+    <div class="bar">
+      <a class="brand" href="./"><img src="favicon.svg" alt=""><span>forkz</span></a>
+      <nav aria-label="Pages">
+        <a href="./" aria-current="page">Home</a>
+        <a href="privacy.html">Privacy</a>
+      </nav>
+      <div class="theme">
+        <label for="theme">Theme</label>
+        <select id="theme">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+          <option value="high-contrast">High contrast</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero">
+      <div>
+        <h1>forkz</h1>
+        <p class="lead">A dual-pane file manager for macOS: browse, copy, move, compare, and sync files on your Mac, on servers, and in cloud storage, side by side.</p>
+        <div class="actions">
+          <a class="button" href="https://github.com/houseofmackee/forkz/releases/latest">Download forkz</a>
+          <a class="button secondary" href="https://github.com/houseofmackee/forkz">Source code on GitHub</a>
+        </div>
+        <p class="note">Free and open source. For Macs with Apple silicon, macOS 14 or later. Or install it with Homebrew: <code>brew install --cask houseofmackee/tap/forkz</code></p>
+      </div>
+      <img class="icon" src="icon-256.png" alt="The forkz app icon: two panes with an arrow forking between them">
+    </section>
+
+    <figure class="shot wide">
+      <img src="screens/main.webp" width="1200" height="751" alt="forkz with a folder on the Mac on the left, an FTP server on the right, and a photo in the preview pane">
+    </figure>
+
+    <section class="cards" aria-label="What forkz does">
+      <div class="card">
+        <h3>Two panes</h3>
+        <p>Lists, icons, columns, or a gallery, with tabs, a filter, Quick Look, and a terminal below the panes.</p>
+      </div>
+      <div class="card">
+        <h3>Servers and cloud storage</h3>
+        <p>SFTP, FTP, WebDAV, S3, Azure, Box, Dropbox, Google Drive, and network shares, in the same panes as your Mac.</p>
+      </div>
+      <div class="card">
+        <h3>File tools</h3>
+        <p>Rename many items at once, compare and sync folders, search by name, contents, size, or date, and undo changes.</p>
+      </div>
+    </section>
+
+    <section class="tour" aria-labelledby="tour">
+      <h2 id="tour">A closer look</h2>
+      <div class="row">
+        <div class="text">
+          <h3>Rename many files at once</h3>
+          <p>Stack rules (replace, insert, remove, change case, number, or date) and see every new name before anything changes. Save rule sets as presets for next time.</p>
+        </div>
+        <figure class="shot">
+          <img src="screens/rename.webp" width="1200" height="834" loading="lazy" alt="Rename Multiple Items replacing a prefix and lowercasing extensions, with a live preview">
+        </figure>
+      </div>
+      <div class="row">
+        <div class="text">
+          <h3>Compare files and folders</h3>
+          <p>See what changed between two files, word by word, or between two folders, on your Mac or on a server.</p>
+        </div>
+        <figure class="shot">
+          <img src="screens/compare-files.webp" width="1200" height="835" loading="lazy" alt="Two versions of a JavaScript file side by side, with changed lines in blue, the changed words marked, and added lines in green">
+        </figure>
+      </div>
+      <div class="row">
+        <div class="text">
+          <h3>Sync a folder with a server</h3>
+          <p>Preview what will be copied and deleted, then sync in either direction. Save it as a synclet to run again in one click.</p>
+        </div>
+        <figure class="shot">
+          <img src="screens/sync.webp" width="1200" height="848" loading="lazy" alt="Sync Folders comparing a local folder with a staging server, showing four copies and one delete">
+        </figure>
+      </div>
+      <div class="row">
+        <div class="text">
+          <h3>Transfers you can steer</h3>
+          <p>Pause, resume, and reorder uploads and downloads, set speed limits, and keep browsing while they run.</p>
+        </div>
+        <figure class="shot">
+          <img src="screens/queue.webp" width="1200" height="774" loading="lazy" alt="Five uploads to a server: two running, three waiting with their place in line, and Pause All and Stop All above them">
+        </figure>
+      </div>
+      <div class="row">
+        <div class="text">
+          <h3>Everything from the keyboard</h3>
+          <p>The command palette runs any command and goes to any place, site, or folder. Every shortcut can be changed.</p>
+        </div>
+        <figure class="shot">
+          <img src="screens/palette.webp" width="1200" height="843" loading="lazy" alt="The command palette showing commands and saved sites that match &#8220;on&#8221;">
+        </figure>
+      </div>
+      <div class="row">
+        <div class="text">
+          <h3>Make it yours</h3>
+          <p>Light, dark, and a range of color themes, or make your own. Text size, row spacing, and columns are up to you.</p>
+        </div>
+        <figure class="shot">
+          <img src="screens/themes.webp" width="1200" height="774" loading="lazy" alt="forkz in the Dracula theme, with rename presets in the sidebar">
+        </figure>
+      </div>
+    </section>
+
+    <section class="panel prose" aria-labelledby="google">
+      <h2 id="google">How forkz uses Google Drive</h2>
+      <p>forkz can show your Google Drive in one of its panes, so you can work with your files there as you do with files on your Mac. When you choose to connect, forkz asks Google for permission to see, edit, create, and delete your Google Drive files. It needs this to list your folders, download and upload files, rename, move, copy, and delete them, and make share links, each time because you asked it to.</p>
+      <p>forkz talks to Google straight from your Mac. Your files and your sign-in are never sent to the developer of forkz or to anyone else, and forkz has no servers. The sign-in is kept in your Mac&#8217;s Keychain, and you can remove forkz&#8217;s access at any time in your Google Account. The <a href="privacy.html">privacy policy</a> has the details.</p>
+    </section>
+  </main>
+
+  <footer>
+    <div class="bar">
+      <span>forkz by houseofmackee</span>
+      <a href="privacy.html">Privacy policy</a>
+      <a href="https://github.com/houseofmackee/forkz/issues">Support</a>
+      <a href="https://github.com/houseofmackee/forkz#license">License (MIT or Apache 2.0)</a>
+    </div>
+  </footer>
+</body>
+</html>

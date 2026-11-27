@@ -7,6 +7,16 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-11-27
+
+### Added
+
+- The right-click menu has Share… near the top, as in Finder (AirDrop, Mail, Messages, and the rest), for items on the Mac. The share sheet points at the right-clicked item.
+
+### Fixed
+
+- Disconnecting from a server (or closing an archive) took the pane to the home folder instead of the folder it was in before connecting. It now goes back to that folder (the latest folder on the Mac in its history that still exists).
+
 ## [0.24.0] - 2026-11-26
 
 ### Added
@@ -505,7 +515,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.24.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.24.1...HEAD
+[0.24.1]: https://github.com/houseofmackee/forkz/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/houseofmackee/forkz/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/houseofmackee/forkz/compare/v0.23.0...v0.23.1
 [0.23.0]: https://github.com/houseofmackee/forkz/compare/v0.22.0...v0.23.0

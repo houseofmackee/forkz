@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy policy: forkz</title>
+  <meta name="description" content="How forkz, a file manager for macOS, handles your data: it stays on your Mac and with the services you connect to.">
+  <script src="theme.js"></script>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to the content</a>
+  <header>
+    <div class="bar">
+      <a class="brand" href="./"><img src="favicon.svg" alt=""><span>forkz</span></a>
+      <nav aria-label="Pages">
+        <a href="./">Home</a>
+        <a href="privacy.html" aria-current="page">Privacy</a>
+      </nav>
+      <div class="theme">
+        <label for="theme">Theme</label>
+        <select id="theme">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+          <option value="high-contrast">High contrast</option>
+        </select>
+      </div>
+    </div>
+  </header>
+
+  <main id="main" class="prose">
+    <h1>Privacy policy</h1>
+    <p class="updated">Last updated November 27, 2026</p>
+
+    <p>forkz is a file manager for macOS. It runs on your Mac and works with your files there and on the servers and cloud services you connect it to. This policy explains what forkz does with your data. In short: your data stays on your Mac and with the services you connect to. forkz has no servers, no accounts, no analytics, and no advertising, and the developer of forkz never receives your files or your sign-ins.</p>
+
+    <h2>What stays on your Mac</h2>
+    <ul>
+      <li><strong>Settings:</strong> your preferences, saved sites, favorites, recent folders, trusted server keys, and similar settings are kept in files in your Library folder (<code>~/Library/Application Support/forkz</code>).</li>
+      <li><strong>Passwords and sign-ins:</strong> passwords, keys, and the sign-ins for cloud services (such as Google Drive, Dropbox, and Box) are kept in your Mac&#8217;s login Keychain, and only for sites you choose to save.</li>
+      <li><strong>Your files:</strong> forkz reads and changes files only when you ask it to, such as to show a folder, copy, or rename. Folder listings from servers may be kept in memory while forkz runs, so folders open quickly; they are not written to disk.</li>
+      <li><strong>Temporary copies:</strong> a server file you preview, or open in another app, is downloaded to a temporary folder on your Mac. forkz empties that folder each time it starts.</li>
+      <li><strong>AWS sign-ins:</strong> if you sign in to AWS IAM Identity Center through forkz, the sign-in is kept where the AWS command line tools keep theirs (<code>~/.aws/sso/cache</code>), so each can use the other&#8217;s.</li>
+    </ul>
+
+    <h2>What forkz sends, and where</h2>
+    <ul>
+      <li><strong>To the servers and services you connect to:</strong> when you connect to a server or cloud service, forkz sends your sign-in to it and exchanges files with it, as you ask. This goes straight from your Mac to that service. Each service handles your data under its own privacy policy.</li>
+      <li><strong>Update checks:</strong> forkz checks GitHub for new versions (you can turn this off in Settings). GitHub sees your Mac&#8217;s IP address and the version of forkz, as with any download.</li>
+    </ul>
+    <p>forkz sends nothing else. There is no tracking, no crash reporting, and no data collection of any kind.</p>
+
+    <h2>Google user data</h2>
+    <p>When you connect forkz to Google Drive, forkz asks Google for permission to see, edit, create, and delete your Google Drive files (the <code>https://www.googleapis.com/auth/drive</code> scope). It uses this only to do what you ask in forkz:</p>
+    <ul>
+      <li>to list your folders and show your files in a pane;</li>
+      <li>to download files to your Mac, and upload files from your Mac;</li>
+      <li>to rename, move, copy, and delete files and folders (deleted items go to your Drive&#8217;s trash);</li>
+      <li>to set a file&#8217;s modification date when it is copied, and to make a share link when you ask for one.</li>
+    </ul>
+    <p>Your Google Drive data goes only between your Mac and Google. It is not sent to the developer of forkz or to anyone else, not stored on any server, not sold, not used for advertising, and not used to develop, improve, or train artificial intelligence or machine learning models. People do not read it. forkz keeps your Google sign-in (a refresh token) in your Mac&#8217;s Keychain if you save the site, and asks Google for your email address to show which account a pane is connected to.</p>
+    <p>forkz&#8217;s use and transfer to any other app of information received from Google APIs will adhere to the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</p>
+
+    <h2>Removing your data</h2>
+    <ul>
+      <li>To remove forkz&#8217;s access to Google Drive, open your Google Account, go to Security, then &#8220;Your connections to third-party apps &amp; services&#8221;, and remove forkz. For Dropbox and Box, remove forkz in their account settings.</li>
+      <li>To remove a saved sign-in from your Mac, delete the site in forkz, or remove its entry in the Keychain Access app.</li>
+      <li>To remove everything forkz keeps, delete the app and the <code>~/Library/Application Support/forkz</code> folder.</li>
+    </ul>
+    <p>Because the developer of forkz never receives your data, there is nothing to delete on their side.</p>
+
+    <h2>Children</h2>
+    <p>forkz is a general-purpose tool and does not knowingly collect any information from anyone, including children.</p>
+
+    <h2>Changes</h2>
+    <p>If this policy changes, the new version will be posted on this page with a new date. The history of changes is public in forkz&#8217;s <a href="https://github.com/houseofmackee/forkz">source code repository</a>.</p>
+
+    <h2>Contact</h2>
+    <p>Questions about privacy in forkz are welcome as an <a href="https://github.com/houseofmackee/forkz/issues">issue on GitHub</a>.</p>
+  </main>
+
+  <footer>
+    <div class="bar">
+      <span>forkz by houseofmackee</span>
+      <a href="./">Home</a>
+      <a href="https://github.com/houseofmackee/forkz/issues">Support</a>
+      <a href="https://github.com/houseofmackee/forkz#license">License (MIT or Apache 2.0)</a>
+    </div>
+  </footer>
+</body>
+</html>

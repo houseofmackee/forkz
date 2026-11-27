@@ -978,6 +978,8 @@ impl PaneController {
             add(Some(OpenInNewTab));
             if self.is_local() {
                 add(Some(QuickLook));
+                // As in Finder: AirDrop, Mail, Messages, and the rest.
+                add(Some(Share));
             }
             add(None);
             place_menu("Copy To", "doc.on.doc", PlaceAction::Copy, false, true);
@@ -1972,6 +1974,21 @@ impl PaneController {
         self.ivars().index
     }
 
+    /// Where a popover about the items goes (the share sheet): the
+    /// right-clicked or selected row in the list, else the pane.
+    pub fn anchor_for_items(&self) -> (Retained<NSView>, objc2_foundation::NSRect) {
+        let table = self.table();
+        if self.view_mode() == crate::pane::ViewMode::List && !table.isHidden() {
+            let row = self.ivars().context_row.get().map_or_else(|| table.selectedRow(), |r| r as NSInteger);
+            let rect = if row >= 0 { table.rectOfRow(row) } else { table.visibleRect() };
+            let view: &NSView = table;
+            return (view.retain(), rect);
+        }
+        let view = self.view();
+        let bounds = view.bounds();
+        (view, bounds)
+    }
+
     pub fn view(&self) -> Retained<NSView> {
         Retained::into_super(self.ivars().container.get().expect("built").clone())
     }
@@ -2882,19 +2899,18 @@ impl PaneController {
     /// Leaves a server: back to the Mac, forgetting its history.
     pub fn leave(&self, key: &str) {
         // Tabs not shown that are on that server go back to the Mac.
+        // Back to the folder on the Mac each was in before.
         for state in self.ivars().tabs.borrow_mut().iter_mut().flatten() {
             if state.fs().key() == key {
-                let local = vfs::local();
-                let home = local.home();
-                state.navigate_to(local, home);
+                let before = state.place_before(key);
+                state.navigate_to(vfs::local(), before);
             }
             state.forget(key);
         }
+        let before = self.ivars().state.borrow().place_before(key);
         self.ivars().state.borrow_mut().forget(key);
         if self.fs().key() == key {
-            let local = vfs::local();
-            let home = local.home();
-            self.ivars().state.borrow_mut().navigate_to(local, home);
+            self.ivars().state.borrow_mut().navigate_to(vfs::local(), before);
             self.ivars().state.borrow_mut().forget(key);
             self.refresh(Some(&[]));
             super::location_changed(self.index());

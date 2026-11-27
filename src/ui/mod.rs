@@ -3931,10 +3931,8 @@ fn share(pane: &PaneController) {
             &NSArray::from_retained_slice(&urls),
         )
     };
-    let table = pane.table();
-    let row = table.selectedRow();
-    let rect = if row >= 0 { table.rectOfRow(row) } else { table.visibleRect() };
-    picker.showRelativeToRect_ofView_preferredEdge(rect, table, objc2_foundation::NSRectEdge::MaxY);
+    let (view, rect) = pane.anchor_for_items();
+    picker.showRelativeToRect_ofView_preferredEdge(rect, &view, objc2_foundation::NSRectEdge::MaxY);
 }
 
 fn activity_view() -> Option<Retained<Activity>> {

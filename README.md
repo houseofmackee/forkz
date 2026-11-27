@@ -24,7 +24,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - File > Images: convert images to JPEG, PNG, HEIC, TIFF, GIF, or BMP, make smaller copies (at most 640 to 3840 pixels), rotate them, or make one PDF of them, a page each
 - File > Split File and Join Files: a large file in parts of any size ("movie.mkv.001", ".002", and so on, as 7-Zip and `split` make them), and back
 - Commands > Copy to Several Folders: one copy of the selection to each folder checked (the other pane's, favorites, recent folders, or others you pick)
-- Quick Look (Space, Command-Y, or a force click on the trackpad, as in Finder), a hidden files toggle, and live updates when folders change
+- Quick Look (Space, Command-Y, or a force click on the trackpad, as in Finder), Share in the right-click menu, a hidden files toggle, and live updates when folders change
 - Flat View (Option-Command-F): every file in a folder and the folders in it, in one list
 - Reopen Closed Tab (Shift-Command-T), Move Tab to Other Pane, Select Same Type, and the mouse's Back and Forward buttons
 - Go > Recent Folders: the folders you were in lately, on the Mac and on servers

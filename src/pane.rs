@@ -598,6 +598,25 @@ impl PaneState {
     }
 
     /// Forgets history on a file system (after disconnecting from it).
+    /// Where to go on the Mac when leaving a file system (disconnecting
+    /// from a server): the latest folder on the Mac in the history that
+    /// is still there, else the home folder.
+    pub fn place_before(&self, key: &str) -> PathBuf {
+        self.back
+            .iter()
+            .rev()
+            .find(|(fs, path)| {
+                fs.is_local()
+                    && fs.key() != key
+                    && fs.browse_fs().is_none()
+                    && fs.outside().is_none()
+                    && !fs.key().starts_with("mount:")
+                    && path.is_dir()
+            })
+            .map(|(_, path)| path.clone())
+            .unwrap_or_else(|| vfs::local().home())
+    }
+
     pub fn forget(&mut self, key: &str) {
         self.back.retain(|(fs, _)| fs.key() != key);
         self.forward.retain(|(fs, _)| fs.key() != key);
@@ -807,6 +826,28 @@ fn group_key(group: GroupBy, entry: &Entry, today: Date, kind: KindLabel) -> (i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Leaving a server (here, search results) goes back to the latest
+    /// folder on the Mac that is still there, else home.
+    #[test]
+    fn leaves_to_the_folder_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let mut pane = PaneState::new(vfs::local(), a.clone(), Sort::default(), false);
+        pane.navigate_to(vfs::local(), b.clone());
+        let results = vfs::results::ResultsFs::new(vfs::local(), b.clone(), "Found".into(), Vec::new());
+        let key = crate::vfs::Vfs::key(&*results);
+        pane.navigate_to(results, b.clone());
+        pane.navigate_to(vfs::local(), a.join("missing"));
+        // The latest on the Mac (the results and the missing folder are not).
+        assert_eq!(pane.place_before(&key), b);
+        std::fs::remove_dir(&b).unwrap();
+        assert_eq!(pane.place_before(&key), a);
+        std::fs::remove_dir(&a).unwrap();
+        assert_eq!(pane.place_before(&key), vfs::local().home());
+    }
 
     #[test]
     fn date_groups_like_finder() {
