@@ -235,6 +235,12 @@ Sites forkz already has are left as they are. Transmit's exports are in a privat
 
 `forkz .` opens the current folder in forkz, and `forkz ~/Projects` or `forkz sftp://me@host/var/www` other places; a running forkz shows them in its window. Installed with Homebrew, the `forkz` command is there already; otherwise choose forkz > Install Command Line Tool (it asks for an administrator's password, and puts the command in /usr/local/bin). Without the command, `open -a forkz .` works too.
 
+## Raycast
+
+The [Raycast](https://www.raycast.com) extension in `raycast/` connects to saved sites, opens recent folders and favorites, runs synclets, opens smart folders and workspaces, opens Finder's folder in forkz, and searches files, all through `forkz://` links. Its README is its Store page.
+
+To work on it: `cd raycast && npm install --registry=https://registry.npmjs.org/`, then `npm run dev` (it shows up in Raycast while that runs), `npm run lint`, and `npm run build`. The lists come from `src/data.ts`, which reads forkz's `settings.toml` and `sites.toml` (names, folders, and addresses only, never the Keychain) and has no Raycast imports, so it runs in plain Node. Before publishing, check that `package-lock.json` only points at `registry.npmjs.org`, and add two or three 2000 by 1250 screenshots to `raycast/metadata` (Raycast's Capture Window command, with Save to Metadata). `npm run publish` must run in a real terminal; it opens a draft pull request in raycast/extensions, which needs `gh pr ready` before anyone reviews it. After it is merged, copy the reviewer's changes back (`npx @raycast/api@latest pull-contributions`).
+
 ## Custom tools
 
 Settings > Tools holds your own commands, run by zsh in the pane's folder on the selection: from Commands > Tools, the toolbar (View > Customize Toolbar, with an SF Symbol as the icon), or the command palette. In a command, `{selection}` is the selected items (or the folder if none are selected), `{file}` the first one, `{names}` their names, `{folder}` the pane's folder, and `{other-folder}` and `{other-selection}` the other pane's; paths are quoted for the shell. The same are in the environment as `FORKZ_SELECTION` (one path a line), `FORKZ_FOLDER`, and `FORKZ_OTHER_FOLDER`. A tool can show what it printed when it is done; if it fails, forkz shows its error output. Stop in the activity area ends a tool that runs too long. A few examples come with forkz:

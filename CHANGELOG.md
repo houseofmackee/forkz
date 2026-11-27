@@ -7,6 +7,11 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+### Added
+
+- A Raycast extension (in `raycast/`, for the Raycast Store): connect to saved sites, open recent folders and favorites, run synclets, open smart folders and workspaces, open Finder's folder in forkz, and search files.
+- A terms of use page with the home page and privacy policy (`site/forkz`).
+
 ## [0.24.2] - 2026-11-27
 
 ### Fixed
