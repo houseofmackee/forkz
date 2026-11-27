@@ -700,7 +700,7 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
         }
     }
     apply_appearance(&app);
-    apply_speed_limits(&app);
+    apply_transfer_settings(&app);
     APP.with(|a| a.set(app.clone())).map_err(|_| anyhow::anyhow!("the app is already running"))?;
     // Folders that keep their own view show it from the start.
     apply_folder_view(0);
@@ -1786,7 +1786,7 @@ pub fn update_settings(change: impl FnOnce(&mut Settings)) {
         }
     }
     app.activity.set_limit(limit);
-    apply_speed_limits(&app);
+    apply_transfer_settings(&app);
     if appearance_changed {
         apply_appearance(&app);
     }
@@ -1833,10 +1833,11 @@ fn apply_filters(app: &App) {
     }
 }
 
-/// The upload and download speed limits from settings.
-fn apply_speed_limits(app: &App) {
+/// Speed limits, checksum checks, and reconnecting, from settings.
+fn apply_transfer_settings(app: &App) {
     let transfers = &app.settings.borrow().transfers;
     ops::set_speed_limits(transfers.upload_limit_kbps * 1024, transfers.download_limit_kbps * 1024);
+    ops::set_reliability(transfers.verify_checksums, transfers.reconnect);
 }
 
 /// Applies the appearance again (after a theme file changed).

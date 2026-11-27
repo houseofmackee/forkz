@@ -200,6 +200,9 @@ pub fn status_error(status: u16, body: &str) -> io::Error {
         401 | 403 => io::ErrorKind::PermissionDenied,
         404 => io::ErrorKind::NotFound,
         409 | 412 => io::ErrorKind::AlreadyExists,
+        // Worth trying again in a moment (see ops::is_dropped).
+        408 => io::ErrorKind::TimedOut,
+        429 | 502 | 503 | 504 => io::ErrorKind::ResourceBusy,
         _ => io::ErrorKind::Other,
     };
     let detail = body.trim();

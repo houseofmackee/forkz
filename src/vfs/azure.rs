@@ -503,6 +503,25 @@ impl Vfs for AzureFs {
         false
     }
 
+    fn checksum_kind(&self) -> Option<crate::fs::checksum::Kind> {
+        Some(crate::fs::checksum::Kind::Md5)
+    }
+
+    /// The blob's Content-MD5, when it has one (blobs uploaded in one
+    /// request do; those uploaded in blocks may not).
+    fn server_checksum(&self, path: &Path) -> io::Result<Option<String>> {
+        let (Some(container), blob) = split(path) else { return Ok(None) };
+        let request =
+            self.request("HEAD", &format!("/{container}/{blob}"), &[], &[], 0)?.body(()).map_err(io::Error::other)?;
+        let response = self.agent.run(request).map_err(http::to_io)?;
+        if !response.status().is_success() {
+            return Err(http::status_error(response.status().as_u16(), ""));
+        }
+        let md5 =
+            response.headers().get("content-md5").and_then(|v| v.to_str().ok()).and_then(|v| STANDARD.decode(v).ok());
+        Ok(md5.filter(|b| b.len() == 16).map(|b| b.iter().map(|x| format!("{x:02x}")).collect()))
+    }
+
     fn writes_whole(&self) -> bool {
         true
     }

@@ -538,6 +538,15 @@ impl Vfs for DropboxFs {
         }))
     }
 
+    fn checksum_kind(&self) -> Option<crate::fs::checksum::Kind> {
+        Some(crate::fs::checksum::Kind::Dropbox)
+    }
+
+    fn server_checksum(&self, path: &Path) -> io::Result<Option<String>> {
+        let item = self.api("files/get_metadata", &json!({ "path": dropbox_path(path) }))?;
+        Ok(item["content_hash"].as_str().map(str::to_ascii_lowercase))
+    }
+
     fn writes_whole(&self) -> bool {
         true
     }

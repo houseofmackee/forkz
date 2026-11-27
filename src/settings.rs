@@ -400,6 +400,12 @@ pub struct TransferSettings {
     /// When a transfer hits an error: "ask", "skip", or "retry" (three
     /// tries, then skip).
     pub on_error: String,
+    /// Check uploads and downloads against the server's checksum (where
+    /// the server keeps one).
+    pub verify_checksums: bool,
+    /// When a connection drops, connect again and go on (up to five tries,
+    /// waiting longer each time) before asking.
+    pub reconnect: bool,
 }
 
 impl Default for TransferSettings {
@@ -414,6 +420,8 @@ impl Default for TransferSettings {
             upload_limit_kbps: 0,
             download_limit_kbps: 0,
             on_error: "ask".into(),
+            verify_checksums: true,
+            reconnect: true,
         }
     }
 }

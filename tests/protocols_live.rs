@@ -108,6 +108,17 @@ fn exercise(remote: FsRef, base: &Path, folders_rename: bool) {
     assert_eq!(names(&remote, &project.join("my docs")), [("\u{e4} b+c.txt".to_string(), false)]);
     let stat = remote.stat(&project.join("assets/img/big.bin")).unwrap();
     assert_eq!((stat.size, stat.is_folder_like()), (3_000_000, false));
+    // Where the server reports checksums, they are of what was sent (the
+    // copies were checked against them).
+    if let Some(kind) = remote.checksum_kind() {
+        let reported = remote.server_checksum(&project.join("index.html")).unwrap();
+        eprintln!("{}: {} of index.html: {reported:?}", remote.label(), kind.name());
+        if let Some(theirs) = reported {
+            let mut hasher = forkz::fs::checksum::StreamHasher::new(kind);
+            hasher.update(b"<h1>hello</h1>");
+            assert_eq!(theirs, hasher.finish());
+        }
+    }
     assert!(remote.stat(&project.join("assets")).unwrap().is_folder_like());
     assert_eq!(remote.stat(&project.join("nothing")).unwrap_err().kind(), io::ErrorKind::NotFound);
 

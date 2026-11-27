@@ -957,6 +957,19 @@ impl Vfs for BoxFs {
             .ok_or_else(|| io::Error::other("Box did not answer with a link."))
     }
 
+    fn checksum_kind(&self) -> Option<crate::fs::checksum::Kind> {
+        Some(crate::fs::checksum::Kind::Sha1)
+    }
+
+    fn server_checksum(&self, path: &Path) -> io::Result<Option<String>> {
+        let (id, folder) = self.id_of(path)?;
+        if folder {
+            return Ok(None);
+        }
+        let item = self.json("GET", &format!("{}?fields=sha1", self.item_url(&id, false)), None)?;
+        Ok(item["sha1"].as_str().map(str::to_ascii_lowercase))
+    }
+
     fn writes_whole(&self) -> bool {
         true
     }

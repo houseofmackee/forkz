@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::fs::{Entry, EntryKind};
 use crate::vfs::{self, FsRef};
@@ -268,6 +268,146 @@ pub fn set_speed_limits(upload: u64, download: u64) {
     DOWNLOADS.rate.store(download, Ordering::Relaxed);
 }
 
+/// Checking copies against the server's checksum, and connecting again
+/// when a connection drops (Settings > Transfers).
+static VERIFY: AtomicBool = AtomicBool::new(true);
+static RECONNECT: AtomicBool = AtomicBool::new(true);
+
+pub fn set_reliability(verify: bool, reconnect: bool) {
+    VERIFY.store(verify, Ordering::Relaxed);
+    RECONNECT.store(reconnect, Ordering::Relaxed);
+}
+
+/// Tries after a dropped connection, waiting 1, 2, 4, 8, then 16 seconds
+/// first (a server restarting, Wi-Fi coming back).
+const RECONNECT_TRIES: u32 = 5;
+#[cfg(not(test))]
+const FIRST_WAIT: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const FIRST_WAIT: Duration = Duration::from_millis(5);
+
+/// A copy that does not match the original's checksum is made again this
+/// many times before it counts as an error.
+const MISMATCH_TRIES: u32 = 2;
+
+const MISMATCH: &str = "The copy does not match the original";
+
+/// Whether an error looks like a dropped connection or a busy server:
+/// another try may work. (Errors from servers that are not I/O errors
+/// arrive as text.)
+pub fn is_dropped(error: &io::Error) -> bool {
+    use io::ErrorKind::*;
+    match error.kind() {
+        ConnectionReset | ConnectionAborted | ConnectionRefused | NotConnected | BrokenPipe | TimedOut
+        | UnexpectedEof | HostUnreachable | NetworkUnreachable | NetworkDown | ResourceBusy => true,
+        Other => {
+            let text = error.to_string().to_lowercase();
+            ["timed out", "timeout", "connection", "broken pipe", "socket", "network", "disconnect", "reset by peer"]
+                .iter()
+                .any(|word| text.contains(word))
+        }
+        _ => false,
+    }
+}
+
+fn is_mismatch(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::InvalidData && error.to_string().starts_with(MISMATCH)
+}
+
+/// The end of a copy that can check it: the server (the destination of
+/// an upload, the source of a download), and its kind of checksum.
+/// `true` means the destination.
+fn checking_end(src: &FsRef, dst: &FsRef) -> Option<(bool, crate::fs::checksum::Kind)> {
+    if !VERIFY.load(Ordering::Relaxed) {
+        return None;
+    }
+    if !dst.is_local() {
+        dst.checksum_kind().map(|kind| (true, kind))
+    } else if !src.is_local() {
+        src.checksum_kind().map(|kind| (false, kind))
+    } else {
+        None
+    }
+}
+
+/// Compares the checksum of what was copied with the server's. A server
+/// that cannot say (no checksum for this file, or the question failed)
+/// leaves the copy unchecked, not failed.
+fn verify(fs: &FsRef, path: &Path, kind: crate::fs::checksum::Kind, ours: String, name: &str) -> io::Result<()> {
+    match fs.server_checksum(path) {
+        Ok(Some(theirs)) if theirs == ours => {
+            tracing::debug!("{name}: {} checked", kind.name());
+            Ok(())
+        }
+        Ok(Some(theirs)) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{MISMATCH} (the {} is {theirs} on the server, {ours} here).", kind.name()),
+        )),
+        Ok(None) => Ok(()),
+        Err(e) => {
+            tracing::info!("{name}: could not ask for its checksum ({e}); not checked");
+            Ok(())
+        }
+    }
+}
+
+/// The checksum of the start of a file (a resumed copy's first part).
+fn hash_start(
+    fs: &FsRef,
+    path: &Path,
+    length: u64,
+    kind: crate::fs::checksum::Kind,
+) -> Option<crate::fs::checksum::StreamHasher> {
+    let mut hasher = crate::fs::checksum::StreamHasher::new(kind);
+    let mut reader = fs.open_read(path).ok()?.take(length);
+    let mut buffer = vec![0u8; 256 * 1024];
+    let mut read = 0u64;
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(n) => {
+                hasher.update(&buffer[..n]);
+                read += n as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+    (read == length).then_some(hasher)
+}
+
+/// A connection to a server for a job, trying again (and waiting longer
+/// each time) when the server cannot be reached.
+fn connect_patiently(fs: &FsRef, observer: &mut dyn Observer, cancel: &CancelToken) -> io::Result<FsRef> {
+    if fs.is_local() {
+        return Ok(fs.clone());
+    }
+    let mut tries = 0;
+    loop {
+        match fs.connect_another() {
+            Ok(fs) => return Ok(fs),
+            Err(e) if RECONNECT.load(Ordering::Relaxed) && tries < RECONNECT_TRIES && is_dropped(&e) => {
+                tries += 1;
+                tracing::info!("could not connect to {} ({e}); trying again", fs.label());
+                let mut progress = Progress::default();
+                let until = Instant::now() + FIRST_WAIT * 2u32.pow(tries - 1);
+                while let Some(left) = until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) {
+                    if cancel.is_cancelled() {
+                        return Err(e);
+                    }
+                    progress.current = format!(
+                        "Could not connect; trying again in {} s ({tries} of {RECONNECT_TRIES})",
+                        left.as_secs() + 1
+                    );
+                    observer.progress(&progress);
+                    std::thread::sleep(left.min(Duration::from_millis(250)));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Stops the job: cancelled, or "Stop" chosen.
 struct Stopped;
 
@@ -301,12 +441,11 @@ enum Fxp {
 /// Runs a job to the end (or until cancelled or stopped). Remote ends get
 /// their own connection for the job.
 pub fn run(job: &Job, observer: &mut dyn Observer, cancel: CancelToken) -> Outcome {
-    let connect = |fs: &FsRef| if fs.is_local() { Ok(fs.clone()) } else { fs.connect_another() };
-    let ends = connect(&job.source_fs).and_then(|src| {
+    let ends = connect_patiently(&job.source_fs, observer, &cancel).and_then(|src| {
         // Copies within one server read and write at once, which an FTP
         // connection cannot do: they get a second connection.
         let shared = vfs::same(&job.source_fs, &job.dest_fs) && (job.kind != JobKind::Copy || src.is_local());
-        let dst = if shared { src.clone() } else { connect(&job.dest_fs)? };
+        let dst = if shared { src.clone() } else { connect_patiently(&job.dest_fs, observer, &cancel)? };
         Ok((src, dst))
     });
     let (src, dst) = match ends {
@@ -380,13 +519,32 @@ impl Runner<'_> {
         self.observer.progress(&self.progress);
     }
 
-    /// Runs `f` until it works, the user skips (Ok(false)), or stops.
+    /// Runs `f` until it works, the user skips (Ok(false)), or stops. A
+    /// dropped connection is made again and `f` tried again (waiting
+    /// longer each time), and a copy that does not match its checksum is
+    /// made again, before the error is reported.
     fn attempt(&mut self, path: &Path, mut f: impl FnMut(&mut Self) -> io::Result<()>) -> Result<bool, Stopped> {
+        let (mut drops, mut mismatches) = (0, 0);
         loop {
             self.check_cancel()?;
             match f(self) {
                 Ok(()) => return Ok(true),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted && self.cancel.is_cancelled() => return Err(Stopped),
+                Err(e) if is_mismatch(&e) && mismatches < MISMATCH_TRIES => {
+                    mismatches += 1;
+                    tracing::warn!("{}: {e} Copying it again.", path.display());
+                }
+                Err(e)
+                    if RECONNECT.load(Ordering::Relaxed)
+                        && !self.both_local
+                        && drops < RECONNECT_TRIES
+                        && is_dropped(&e) =>
+                {
+                    drops += 1;
+                    tracing::info!("{}: {e}; connecting again ({drops} of {RECONNECT_TRIES})", path.display());
+                    self.wait_to_try_again(path, drops)?;
+                    self.reconnect();
+                }
                 Err(e) => match self.observer.error(path, &e) {
                     ErrorAnswer::Retry => continue,
                     ErrorAnswer::Skip => {
@@ -397,6 +555,42 @@ impl Runner<'_> {
                 },
             }
         }
+    }
+
+    /// Waits before try number `tries` after a dropped connection (1, 2,
+    /// 4, 8, then 16 seconds), saying so in the progress.
+    fn wait_to_try_again(&mut self, path: &Path, tries: u32) -> Result<(), Stopped> {
+        let name = file_name(path);
+        let until = Instant::now() + FIRST_WAIT * 2u32.pow(tries.saturating_sub(1));
+        while let Some(left) = until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) {
+            self.progress.current = format!(
+                "{name}: the connection dropped; trying again in {} s ({tries} of {RECONNECT_TRIES})",
+                left.as_secs() + 1
+            );
+            self.report();
+            self.check_cancel()?;
+            std::thread::sleep(left.min(Duration::from_millis(250)));
+        }
+        self.progress.current = name;
+        self.report();
+        Ok(())
+    }
+
+    /// New connections to the servers (an old one may be dead). One that
+    /// cannot be made yet keeps the old one: the next try reports it.
+    fn reconnect(&mut self) {
+        let shared = Arc::ptr_eq(&self.src, &self.dst);
+        let again = |fs: &FsRef| {
+            if fs.is_local() {
+                return fs.clone();
+            }
+            fs.connect_another().unwrap_or_else(|e| {
+                tracing::info!("could not connect to {} again yet: {e}", fs.label());
+                fs.clone()
+            })
+        };
+        self.src = again(&self.src);
+        self.dst = if shared { self.src.clone() } else { again(&self.dst) };
     }
 
     fn trash_all(&mut self, sources: &[PathBuf]) -> Result<(), Stopped> {
@@ -938,6 +1132,14 @@ impl Runner<'_> {
         };
         self.progress.done_bytes = start + copied.min(size);
         self.observer.progress(&self.progress);
+        // Checked against the server's checksum when done (a resumed copy
+        // only when its first part can be read again here).
+        let check = checking_end(&self.src, &self.dst);
+        let mut hasher = match check {
+            Some((_, kind)) if copied == 0 => Some(crate::fs::checksum::StreamHasher::new(kind)),
+            Some((_, kind)) if self.src.is_local() => hash_start(&self.src, &entry.path, copied, kind),
+            _ => None,
+        };
         let limiter = self.limiter();
         // Smaller chunks under a speed limit, for steady progress.
         let chunk = if limiter.is_some_and(|l| l.rate.load(Ordering::Relaxed) > 0) { 32 * 1024 } else { 256 * 1024 };
@@ -957,6 +1159,9 @@ impl Runner<'_> {
                 limiter.take(n);
             }
             writer.write_all(&buffer[..n])?;
+            if let Some(hasher) = &mut hasher {
+                hasher.update(&buffer[..n]);
+            }
             copied += n as u64;
             self.progress.done_bytes = start + copied.min(size);
             self.observer.progress(&self.progress);
@@ -964,7 +1169,12 @@ impl Runner<'_> {
         writer.flush()?;
         drop(writer);
         drop(reader);
-        self.finish_transfer(entry, temporary, target)
+        self.finish_transfer(entry, temporary, target)?;
+        if let (Some((on_destination, kind)), Some(hasher)) = (check, hasher) {
+            let (fs, path) = if on_destination { (&self.dst, target) } else { (&self.src, entry.path.as_path()) };
+            verify(fs, path, kind, hasher.finish(), &entry.name)?;
+        }
+        Ok(())
     }
 
     /// Copies a file from one FTP server straight to another, if they
@@ -1228,9 +1438,11 @@ fn transfer_one(
     let direct = dst.writes_whole();
     let temporary = if direct { target.to_path_buf() } else { temporary_name(target) };
     let mut copied = 0u64;
+    let check = checking_end(src, dst);
     let result = (|| {
         let mut reader = src.open_read(&entry.path)?;
         let mut writer = dst.open_write_sized(&temporary, Some(entry.size))?;
+        let mut hasher = check.map(|(_, kind)| crate::fs::checksum::StreamHasher::new(kind));
         let mut buffer = vec![0u8; 256 * 1024];
         loop {
             cancel.wait_while_paused();
@@ -1247,6 +1459,9 @@ fn transfer_one(
                 limiter.take(n);
             }
             writer.write_all(&buffer[..n])?;
+            if let Some(hasher) = &mut hasher {
+                hasher.update(&buffer[..n]);
+            }
             copied += n as u64;
             bytes.fetch_add(n as u64, Ordering::Relaxed);
         }
@@ -1261,6 +1476,10 @@ fn transfer_one(
                 dst.remove_file(target)?;
             }
             dst.rename(&temporary, target)?;
+        }
+        if let (Some((on_destination, kind)), Some(hasher)) = (check, hasher) {
+            let (fs, path) = if on_destination { (dst, target) } else { (src, entry.path.as_path()) };
+            verify(fs, path, kind, hasher.finish(), &entry.name)?;
         }
         Ok(())
     })();
@@ -1394,6 +1613,160 @@ fn copyfile(source: &Path, target: &Path, extra: u32, on_bytes: Option<ProgressF
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server (the Mac, streamed) that drops the connection while
+    /// writing, or reports a wrong checksum, the first so many times.
+    #[derive(Debug, Clone, Default)]
+    struct Flaky {
+        drops: Arc<std::sync::atomic::AtomicU32>,
+        wrong_checksums: Arc<std::sync::atomic::AtomicU32>,
+        connections: Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    impl Flaky {
+        fn new(drops: u32, wrong_checksums: u32) -> Flaky {
+            let flaky = Flaky::default();
+            flaky.drops.store(drops, Ordering::Relaxed);
+            flaky.wrong_checksums.store(wrong_checksums, Ordering::Relaxed);
+            flaky
+        }
+
+        /// Takes one from a count, if any are left.
+        fn take(count: &std::sync::atomic::AtomicU32) -> bool {
+            count.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)).is_ok()
+        }
+    }
+
+    impl vfs::Vfs for Flaky {
+        fn key(&self) -> String {
+            "flaky".into()
+        }
+        fn is_local(&self) -> bool {
+            false
+        }
+        fn label(&self) -> String {
+            "flaky".into()
+        }
+        fn home(&self) -> PathBuf {
+            PathBuf::from("/")
+        }
+        fn list(&self, dir: &Path) -> io::Result<Vec<Entry>> {
+            vfs::FakeRemote.list(dir)
+        }
+        fn stat(&self, path: &Path) -> io::Result<Entry> {
+            vfs::FakeRemote.stat(path)
+        }
+        fn create_dir(&self, path: &Path) -> io::Result<()> {
+            vfs::FakeRemote.create_dir(path)
+        }
+        fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+            vfs::FakeRemote.rename(from, to)
+        }
+        fn remove_file(&self, path: &Path) -> io::Result<()> {
+            vfs::FakeRemote.remove_file(path)
+        }
+        fn remove_dir(&self, path: &Path) -> io::Result<()> {
+            vfs::FakeRemote.remove_dir(path)
+        }
+        fn open_read(&self, path: &Path) -> io::Result<Box<dyn Read + Send>> {
+            vfs::FakeRemote.open_read(path)
+        }
+        fn open_write(&self, path: &Path) -> io::Result<Box<dyn Write + Send>> {
+            if Flaky::take(&self.drops) {
+                return Err(io::Error::new(io::ErrorKind::ConnectionReset, "Connection reset by peer"));
+            }
+            vfs::FakeRemote.open_write(path)
+        }
+        fn set_attributes(
+            &self,
+            path: &Path,
+            modified: Option<SystemTime>,
+            permissions: Option<u32>,
+        ) -> io::Result<()> {
+            vfs::FakeRemote.set_attributes(path, modified, permissions)
+        }
+        fn connect_another(&self) -> io::Result<FsRef> {
+            self.connections.fetch_add(1, Ordering::Relaxed);
+            Ok(Arc::new(self.clone()))
+        }
+        fn display_path(&self, path: &Path) -> String {
+            format!("flaky://{}", path.display())
+        }
+        fn checksum_kind(&self) -> Option<crate::fs::checksum::Kind> {
+            Some(crate::fs::checksum::Kind::Sha256)
+        }
+        fn server_checksum(&self, path: &Path) -> io::Result<Option<String>> {
+            if Flaky::take(&self.wrong_checksums) {
+                return Ok(Some("0".repeat(64)));
+            }
+            let local: FsRef = Arc::new(vfs::FakeRemote);
+            crate::fs::checksum::checksum(&local, path, crate::fs::checksum::Algorithm::Sha256).map(Some)
+        }
+    }
+
+    fn flaky_upload(root: &Path, names: &[&str], flaky: &Flaky) -> Job {
+        let remote: FsRef = Arc::new(flaky.clone());
+        let sources = names.iter().map(|n| root.join("src").join(n)).collect();
+        Job::between(JobKind::Copy, vfs::local(), sources, remote, root.join("dst"))
+    }
+
+    #[test]
+    fn dropped_connections_are_made_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tree(root);
+        let flaky = Flaky::new(2, 0);
+        let mut observer = Scripted::new(Resolution::Replace);
+        let outcome = run(&flaky_upload(root, &["a.txt"], &flaky), &mut observer, CancelToken::default());
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        assert_eq!(std::fs::read_to_string(root.join("dst/a.txt")).unwrap(), "aaaa");
+        // One for the job, then one after each drop.
+        assert_eq!(flaky.connections.load(Ordering::Relaxed), 3);
+        // More drops than tries: reported (and skipped by this observer).
+        std::fs::write(root.join("src/b.txt"), "bb").unwrap();
+        let flaky = Flaky::new(RECONNECT_TRIES + 1, 0);
+        let outcome = run(&flaky_upload(root, &["b.txt"], &flaky), &mut observer, CancelToken::default());
+        assert_eq!(outcome.failed.len(), 1, "{:?}", outcome.failed);
+        assert!(!root.join("dst/b.txt").exists());
+    }
+
+    #[test]
+    fn copies_are_checked_and_made_again_when_they_differ() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        tree(root);
+        let mut observer = Scripted::new(Resolution::Replace);
+        // One wrong checksum: copied again, and fine.
+        let flaky = Flaky::new(0, 1);
+        let outcome = run(&flaky_upload(root, &["a.txt"], &flaky), &mut observer, CancelToken::default());
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        assert_eq!(flaky.wrong_checksums.load(Ordering::Relaxed), 0);
+        // Wrong every time: an error that says so.
+        std::fs::write(root.join("src/b.txt"), "bb").unwrap();
+        let flaky = Flaky::new(0, 10);
+        let outcome = run(&flaky_upload(root, &["b.txt"], &flaky), &mut observer, CancelToken::default());
+        assert_eq!(outcome.failed.len(), 1);
+        assert!(outcome.failed[0].1.starts_with(MISMATCH), "{:?}", outcome.failed);
+        assert_eq!(flaky.wrong_checksums.load(Ordering::Relaxed), 10 - (MISMATCH_TRIES + 1));
+        // Several files at once (their own connections), one wrong: all fine.
+        let flaky = Flaky::new(0, 1);
+        let outcome =
+            run(&flaky_upload(root, &["a.txt", "b.txt", "folder"], &flaky), &mut observer, CancelToken::default());
+        assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
+        assert_eq!(std::fs::read_to_string(root.join("dst/folder/inner/c.txt")).unwrap(), "c");
+    }
+
+    #[test]
+    fn tells_dropped_connections_from_other_errors() {
+        let error = |kind, text: &str| io::Error::new(kind, text.to_string());
+        assert!(is_dropped(&error(io::ErrorKind::ConnectionReset, "reset")));
+        assert!(is_dropped(&error(io::ErrorKind::ResourceBusy, "The server answered 503.")));
+        assert!(is_dropped(&io::Error::other("Timed out waiting on socket")));
+        assert!(is_dropped(&io::Error::other("the connection was lost")));
+        assert!(!is_dropped(&error(io::ErrorKind::PermissionDenied, "Access denied.")));
+        assert!(!is_dropped(&error(io::ErrorKind::NotFound, "No such file or folder.")));
+        assert!(!is_dropped(&io::Error::other("The folder is not empty.")));
+    }
 
     /// Counting from one listing of everything gives what counting folder
     /// by folder gives, filters included.

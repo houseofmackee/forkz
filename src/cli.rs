@@ -215,6 +215,7 @@ impl Cli {
         let settings = Settings::load();
         let transfers = &settings.transfers;
         ops::set_speed_limits(transfers.upload_limit_kbps * 1024, transfers.download_limit_kbps * 1024);
+        ops::set_reliability(transfers.verify_checksums, transfers.reconnect);
         Ok(Cli { sites: SiteStore::load(), settings, connections: HashMap::new(), password: Mutex::new(password) })
     }
 

@@ -696,6 +696,31 @@ impl Vfs for S3Fs {
         true
     }
 
+    fn checksum_kind(&self) -> Option<crate::fs::checksum::Kind> {
+        Some(crate::fs::checksum::Kind::Md5)
+    }
+
+    /// The ETag: an object's MD5 when it was uploaded in one piece and is
+    /// not encrypted with KMS or the customer's own key (those ETags are
+    /// something else).
+    fn server_checksum(&self, path: &Path) -> io::Result<Option<String>> {
+        let (Some(bucket), key) = split(path) else { return Ok(None) };
+        let request = self
+            .request("HEAD", &format!("/{bucket}/{key}"), &[], &[], EMPTY_SHA256)
+            .body(())
+            .map_err(io::Error::other)?;
+        let response = self.agent.run(request).map_err(http::to_io)?;
+        if !response.status().is_success() {
+            return Err(http::status_error(response.status().as_u16(), ""));
+        }
+        let header = |name: &str| response.headers().get(name).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let encrypted = header("x-amz-server-side-encryption").is_some_and(|e| e.contains("kms"))
+            || header("x-amz-server-side-encryption-customer-algorithm").is_some();
+        let etag = header("etag").unwrap_or_default().trim_matches('"').to_ascii_lowercase();
+        let md5 = etag.len() == 32 && etag.chars().all(|c| c.is_ascii_hexdigit());
+        Ok((md5 && !encrypted).then_some(etag))
+    }
+
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let (Some(from_bucket), from_key) = split(from) else {
             return Err(io::Error::other("Buckets cannot be renamed."));

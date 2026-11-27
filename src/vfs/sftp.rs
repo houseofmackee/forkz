@@ -205,6 +205,9 @@ pub struct SftpFs {
     /// saving it.
     secret: Option<String>,
     names: Names,
+    /// The server runs sha256sum or shasum for checking copies (until it
+    /// does not: servers that only allow SFTP refuse commands).
+    runs_checksums: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for SftpFs {
@@ -220,7 +223,14 @@ pub fn connect(params: ConnectParams, prompter: &dyn Prompter) -> io::Result<Arc
     let conn = open(&params, Some(prompter), &mut secret)?;
     let home = conn.sftp.realpath(Path::new(".")).unwrap_or_else(|_| PathBuf::from("/"));
     let names = load_names(&conn.session);
-    let fs = Arc::new(SftpFs { params, conn: Mutex::new(Some(conn)), home, secret, names });
+    let fs = Arc::new(SftpFs {
+        params,
+        conn: Mutex::new(Some(conn)),
+        home,
+        secret,
+        names,
+        runs_checksums: std::sync::atomic::AtomicBool::new(true),
+    });
     keep_alive(Arc::downgrade(&fs));
     Ok(fs)
 }
@@ -641,14 +651,55 @@ impl Vfs for SftpFs {
             home: self.home.clone(),
             secret,
             names: self.names.clone(),
+            runs_checksums: std::sync::atomic::AtomicBool::new(
+                self.runs_checksums.load(std::sync::atomic::Ordering::Relaxed),
+            ),
         });
         Ok(fs)
+    }
+
+    fn checksum_kind(&self) -> Option<crate::fs::checksum::Kind> {
+        use std::sync::atomic::Ordering;
+        self.runs_checksums.load(Ordering::Relaxed).then_some(crate::fs::checksum::Kind::Sha256)
+    }
+
+    /// SHA-256 from the server's sha256sum (Linux) or shasum (BSD, macOS),
+    /// when it runs commands; once it does not, it is not asked again.
+    fn server_checksum(&self, path: &Path) -> io::Result<Option<String>> {
+        use std::sync::atomic::Ordering;
+        if !self.runs_checksums.load(Ordering::Relaxed) {
+            return Ok(None);
+        }
+        let quoted = shell_quote(&path.to_string_lossy());
+        let script = format!("sha256sum -b -- {quoted} 2>/dev/null || shasum -a 256 -b -- {quoted} 2>/dev/null");
+        let guard = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(conn) = guard.as_ref() else { return Ok(None) };
+        let result = (|| -> Result<String, ssh2::Error> {
+            let mut channel = conn.session.channel_session()?;
+            channel.exec(&script)?;
+            let mut text = String::new();
+            let _ = (&mut channel).take(4096).read_to_string(&mut text);
+            let _ = channel.wait_close();
+            Ok(text)
+        })();
+        let hash = result.ok().and_then(|text| parse_sha256_line(&text));
+        if hash.is_none() {
+            tracing::info!("{} does not report checksums; copies there are not checked", self.params.host);
+            self.runs_checksums.store(false, Ordering::Relaxed);
+        }
+        Ok(hash)
     }
 
     fn display_path(&self, path: &Path) -> String {
         let port = if self.params.port == 22 { String::new() } else { format!(":{}", self.params.port) };
         format!("sftp://{}@{}{port}{}", self.params.user, self.params.host, path.display())
     }
+}
+
+/// The hash from a line of sha256sum or shasum output ("<hex> *<name>").
+fn parse_sha256_line(text: &str) -> Option<String> {
+    let hash = text.split_whitespace().next()?.trim_start_matches('\\').to_ascii_lowercase();
+    (hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit())).then_some(hash)
 }
 
 impl Drop for SftpFs {

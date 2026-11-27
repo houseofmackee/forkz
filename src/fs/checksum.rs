@@ -174,8 +174,118 @@ pub fn verify(fs: &FsRef, base: &Path, lines: &[(String, String)]) -> Verified {
     verified
 }
 
+/// A checksum a server keeps for its files, to check a copy against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Md5,
+    Sha1,
+    Sha256,
+    /// Dropbox's content hash: SHA-256 of the SHA-256 of each 4 MiB block.
+    Dropbox,
+}
+
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Md5 => "MD5",
+            Kind::Sha1 => "SHA-1",
+            Kind::Sha256 => "SHA-256",
+            Kind::Dropbox => "content hash",
+        }
+    }
+}
+
+/// Dropbox hashes files in blocks of this size.
+const DROPBOX_BLOCK: usize = 4 * 1024 * 1024;
+
+/// Hashes bytes as they stream past (a copy on its way).
+pub enum StreamHasher {
+    Md5(Md5),
+    Sha1(Sha1),
+    Sha256(Sha256),
+    Dropbox { block: Sha256, in_block: usize, digests: Vec<u8> },
+}
+
+impl StreamHasher {
+    pub fn new(kind: Kind) -> StreamHasher {
+        match kind {
+            Kind::Md5 => StreamHasher::Md5(Md5::new()),
+            Kind::Sha1 => StreamHasher::Sha1(Sha1::new()),
+            Kind::Sha256 => StreamHasher::Sha256(Sha256::new()),
+            Kind::Dropbox => StreamHasher::Dropbox { block: Sha256::new(), in_block: 0, digests: Vec::new() },
+        }
+    }
+
+    pub fn update(&mut self, mut bytes: &[u8]) {
+        match self {
+            StreamHasher::Md5(h) => h.update(bytes),
+            StreamHasher::Sha1(h) => h.update(bytes),
+            StreamHasher::Sha256(h) => h.update(bytes),
+            StreamHasher::Dropbox { block, in_block, digests } => {
+                while !bytes.is_empty() {
+                    let take = (DROPBOX_BLOCK - *in_block).min(bytes.len());
+                    block.update(&bytes[..take]);
+                    *in_block += take;
+                    bytes = &bytes[take..];
+                    if *in_block == DROPBOX_BLOCK {
+                        digests.extend_from_slice(&std::mem::take(block).finalize());
+                        *in_block = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The checksum, as lowercase hex.
+    pub fn finish(self) -> String {
+        let bytes: Vec<u8> = match self {
+            StreamHasher::Md5(h) => h.finalize().to_vec(),
+            StreamHasher::Sha1(h) => h.finalize().to_vec(),
+            StreamHasher::Sha256(h) => h.finalize().to_vec(),
+            StreamHasher::Dropbox { block, in_block, mut digests } => {
+                if in_block > 0 {
+                    digests.extend_from_slice(&block.finalize());
+                }
+                Sha256::digest(&digests).to_vec()
+            }
+        };
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn streamed_checksums() {
+        let hash = |kind: Kind, parts: &[&[u8]]| {
+            let mut hasher = StreamHasher::new(kind);
+            for part in parts {
+                hasher.update(part);
+            }
+            hasher.finish()
+        };
+        assert_eq!(hash(Kind::Md5, &[b"ab", b"c"]), "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(hash(Kind::Sha1, &[b"abc"]), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            hash(Kind::Sha256, &[b"a", b"bc"]),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        // Dropbox: SHA-256 over the blocks' SHA-256s, wherever the reads split.
+        let data = vec![7u8; DROPBOX_BLOCK + 10];
+        let expected = {
+            let mut digests = Sha256::digest(&data[..DROPBOX_BLOCK]).to_vec();
+            digests.extend_from_slice(&Sha256::digest(&data[DROPBOX_BLOCK..]));
+            Sha256::digest(&digests).iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        assert_eq!(hash(Kind::Dropbox, &[&data]), expected);
+        assert_eq!(
+            hash(Kind::Dropbox, &[&data[..3], &data[3..DROPBOX_BLOCK + 1], &data[DROPBOX_BLOCK + 1..]]),
+            expected
+        );
+        // An empty file: the hash of no blocks.
+        assert_eq!(hash(Kind::Dropbox, &[]), hash(Kind::Sha256, &[]));
+    }
+
     use super::*;
 
     #[test]

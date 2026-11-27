@@ -139,6 +139,11 @@ fn host_keys_passphrases_and_transfers() {
     let outcome = ops::run(&upload, &mut Quiet, CancelToken::default());
     assert!(outcome.failed.is_empty(), "{:?}", outcome.failed);
     assert_eq!(std::fs::read(base.join("project/assets/img/big.bin")).unwrap(), big);
+    // The server runs shasum or sha256sum: copies there are checked.
+    assert_eq!(remote.checksum_kind(), Some(forkz::fs::checksum::Kind::Sha256));
+    let mut hasher = forkz::fs::checksum::StreamHasher::new(forkz::fs::checksum::Kind::Sha256);
+    hasher.update(&big);
+    assert_eq!(remote.server_checksum(&base.join("project/assets/img/big.bin")).unwrap(), Some(hasher.finish()));
 
     let listing = remote.list(&base.join("project")).unwrap();
     let mut names: Vec<_> = listing.iter().map(|e| (e.name.clone(), e.is_folder_like())).collect();

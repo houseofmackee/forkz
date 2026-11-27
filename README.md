@@ -99,6 +99,8 @@ A sync can be saved as a synclet in the sidebar: clicking it connects to its sit
 
 Transfers beyond the simultaneous limit (Commands menu, default 2) wait in a queue, each showing its place in line. Right-click a transfer to start it now, move it to the top, up, down, or to the bottom, pause it, or stop it. With several transfers, a line above them shows how many are waiting, with Pause All (or Resume All) and Stop All. Speed limits for uploads and downloads, and what to do on errors, are in Settings > Transfers.
 
+Uploads and downloads are checked: once a file is copied, its checksum is compared with the one the server keeps (MD5 on S3, Google Drive, and Azure; SHA-1 on Box; Dropbox's content hash; and SHA-256 on SFTP servers that run `sha256sum` or `shasum`), and a copy that differs is made again. When a connection drops or a server is busy, forkz connects again and goes on, up to five times, waiting 1, 2, 4, 8, then 16 seconds, before showing the error. Both are on by default, in Settings > Transfers, and apply to `forkz copy` and `forkz sync` too.
+
 ### Command palette
 
 ![The command palette showing commands and saved sites that match "on"](docs/images/palette.png)

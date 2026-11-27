@@ -7,6 +7,13 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-11-27
+
+### Added
+
+- Uploads and downloads are checked against the checksum the server keeps (S3, Google Drive, Dropbox, Box, Azure, and SFTP servers that run `sha256sum` or `shasum`); a copy that differs is made again. Settings > Transfers can turn it off.
+- When a connection drops or a server is busy (HTTP 429 or 503, for example), transfers connect again and go on, up to five times, waiting 1 to 16 seconds, before showing the error. Connecting at the start of a transfer tries again the same way.
+
 ## [0.26.0] - 2026-11-27
 
 ### Added
@@ -542,7 +549,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.27.0...HEAD
+[0.27.0]: https://github.com/houseofmackee/forkz/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/houseofmackee/forkz/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/houseofmackee/forkz/compare/v0.24.2...v0.25.0
 [0.24.2]: https://github.com/houseofmackee/forkz/compare/v0.24.1...v0.24.2

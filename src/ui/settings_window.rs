@@ -57,6 +57,8 @@ struct Controls {
     default_viewer: Retained<NSButton>,
     limit: Retained<NSPopUpButton>,
     keep_dates: Retained<NSButton>,
+    verify: Retained<NSButton>,
+    reconnect: Retained<NSButton>,
     download: Retained<NSPopUpButton>,
     upload: Retained<NSPopUpButton>,
     ask_upload: Retained<NSButton>,
@@ -368,6 +370,8 @@ impl SettingsWindow {
             },
             limit: popup(&limit_titles, self, mtm),
             keep_dates: checkbox("Keep modification dates", self, mtm),
+            verify: checkbox("Check copies against the server's checksum", self, mtm),
+            reconnect: checkbox("Connect again when a connection drops", self, mtm),
             download: popup(&conflict_titles, self, mtm),
             upload: popup(&conflict_titles, self, mtm),
             ask_upload: checkbox("Ask before uploading a saved server file", self, mtm),
@@ -487,6 +491,16 @@ impl SettingsWindow {
                 (label("Simultaneous transfers:", mtm), view(&*controls.limit)),
                 (empty(mtm), note("Uploads and downloads beyond this wait their turn.", mtm)),
                 (label("Dates:", mtm), view(&*controls.keep_dates)),
+                (label("Checksums:", mtm), view(&*controls.verify)),
+                (
+                    empty(mtm),
+                    note(
+                        "After an upload or download, its checksum is compared with the server's (S3, Google Drive, Dropbox, Box, Azure, and SFTP servers that run sha256sum). A copy that differs is made again.",
+                        mtm,
+                    ),
+                ),
+                (label("Dropped connections:", mtm), view(&*controls.reconnect)),
+                (empty(mtm), note("Up to five tries, waiting 1 to 16 seconds, before the error is shown.", mtm)),
                 (label("When a downloaded file exists:", mtm), view(&*controls.download)),
                 (label("When an uploaded file exists:", mtm), view(&*controls.upload)),
                 (label("Opened server files:", mtm), view(&*controls.ask_upload)),
@@ -790,6 +804,8 @@ impl SettingsWindow {
         let limit = TRANSFER_LIMITS.iter().position(|n| *n == settings.transfers.max_transfers).unwrap_or(1);
         c.limit.selectItemAtIndex(limit as isize);
         set(&c.keep_dates, settings.transfers.preserve_timestamps);
+        set(&c.verify, settings.transfers.verify_checksums);
+        set(&c.reconnect, settings.transfers.reconnect);
         let conflict = |r: Option<Resolution>| CONFLICT_CHOICES.iter().position(|c| c.1 == r).unwrap_or(0) as isize;
         c.download.selectItemAtIndex(conflict(settings.transfers.download_conflict));
         c.upload.selectItemAtIndex(conflict(settings.transfers.upload_conflict));
@@ -848,6 +864,8 @@ impl SettingsWindow {
             }
             s.transfers.max_transfers = TRANSFER_LIMITS.get(index(&c.limit)).copied().unwrap_or(2);
             s.transfers.preserve_timestamps = on(&c.keep_dates);
+            s.transfers.verify_checksums = on(&c.verify);
+            s.transfers.reconnect = on(&c.reconnect);
             s.transfers.download_conflict = CONFLICT_CHOICES.get(index(&c.download)).and_then(|c| c.1);
             s.transfers.upload_conflict = CONFLICT_CHOICES.get(index(&c.upload)).and_then(|c| c.1);
             s.transfers.ask_before_upload_on_save = on(&c.ask_upload);

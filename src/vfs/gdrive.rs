@@ -749,6 +749,21 @@ impl Vfs for DriveFs {
         }))
     }
 
+    fn checksum_kind(&self) -> Option<crate::fs::checksum::Kind> {
+        Some(crate::fs::checksum::Kind::Md5)
+    }
+
+    /// Drive keeps an MD5 of files with contents (not Google's own
+    /// documents).
+    fn server_checksum(&self, path: &Path) -> io::Result<Option<String>> {
+        let known = self.id_of(path)?;
+        if known.folder || known.export.is_some() {
+            return Ok(None);
+        }
+        let item = self.json("GET", &format!("{}/files/{}?fields=md5Checksum", self.api(), known.id), None)?;
+        Ok(item["md5Checksum"].as_str().map(str::to_ascii_lowercase))
+    }
+
     fn writes_whole(&self) -> bool {
         true
     }

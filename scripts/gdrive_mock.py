@@ -9,6 +9,7 @@ implementation: just what forkz uses.
 Usage: python3 gdrive_mock.py PORT
 """
 
+import hashlib
 import json
 import re
 import sys
@@ -46,6 +47,7 @@ def public(item):
     out = {k: item[k] for k in ("id", "name", "mimeType") if k in item}
     if item["mimeType"] != FOLDER and not item["mimeType"].startswith("application/vnd.google-apps."):
         out["size"] = str(len(item.get("data", b"")))
+        out["md5Checksum"] = hashlib.md5(item.get("data", b"")).hexdigest()
     out["modifiedTime"] = item.get("modifiedTime", "2026-11-04T10:20:30.000Z")
     return out
 

@@ -43,6 +43,7 @@ def public(item):
     out["modified_at"] = "2026-11-04T02:20:30-08:00"
     if item["type"] == "file":
         out["content_modified_at"] = "2026-11-04T10:20:30Z"
+        out["sha1"] = hashlib.sha1(item.get("data", b"")).hexdigest()
     return out
 
 

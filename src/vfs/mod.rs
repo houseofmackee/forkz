@@ -166,6 +166,19 @@ pub trait Vfs: Send + Sync {
         false
     }
 
+    /// The checksum this server keeps for its files, to check copies
+    /// against (None: none that can be asked for).
+    fn checksum_kind(&self) -> Option<crate::fs::checksum::Kind> {
+        None
+    }
+
+    /// A file's checksum of `checksum_kind`, as the server reports it in
+    /// lowercase hex; None when it has none for this file (an object
+    /// uploaded in parts, a Google Doc).
+    fn server_checksum(&self, _path: &Path) -> io::Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Whether `rename` moves folders. Object storage has no folders to
     /// rename (only names): a move there copies and deletes instead.
     fn renames_folders(&self) -> bool {

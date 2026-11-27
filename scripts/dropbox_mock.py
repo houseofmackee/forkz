@@ -7,6 +7,7 @@ account). Not a real implementation: just what forkz uses.
 Usage: python3 dropbox_mock.py PORT
 """
 
+import hashlib
 import json
 import sys
 import time
@@ -35,7 +36,15 @@ def metadata(item):
         out["size"] = len(item["data"])
         out["client_modified"] = "2026-11-04T10:20:30Z"
         out["server_modified"] = "2026-11-04T10:20:31Z"
+        out["content_hash"] = content_hash(item["data"])
     return out
+
+
+def content_hash(data):
+    """Dropbox's content hash: SHA-256 of the SHA-256 of each 4 MiB block."""
+    block = 4 * 1024 * 1024
+    digests = b"".join(hashlib.sha256(data[i:i + block]).digest() for i in range(0, len(data), block))
+    return hashlib.sha256(digests).hexdigest()
 
 
 def children(path):
