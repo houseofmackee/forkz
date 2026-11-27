@@ -76,7 +76,10 @@ pub fn reload_later() {
 pub fn begin(pane: usize, path: &Path) -> bool {
     finish(true);
     let Some(controller) = super::pane(pane) else { return false };
-    let Some(field) = controller.name_field_for(path) else { return false };
+    let Some(field) = controller.name_field_for(path) else {
+        tracing::debug!("rename in place: no name field for {}", path.display());
+        return false;
+    };
     let name = crate::pane::title_of(path);
     let folder = controller.entries_for(&[path.to_path_buf()]).first().is_some_and(|e| e.is_folder_like());
     let edit = InlineRename::alloc(mtm()).set_ivars(EditIvars {
@@ -98,6 +101,7 @@ pub fn begin(pane: usize, path: &Path) -> bool {
     unsafe { field.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*edit))) };
     ACTIVE.with(|a| *a.borrow_mut() = Some(edit));
     let Some(window) = field.window() else {
+        tracing::debug!("rename in place: the name field is not in a window");
         finish(false);
         return false;
     };

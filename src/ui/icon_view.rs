@@ -85,7 +85,12 @@ define_class!(
         #[unsafe(method_id(hitTest:))]
         fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
             let hit: Option<Retained<NSView>> = unsafe { msg_send![super(self), hitTest: point] };
-            hit.map(|_| self.retain().into_super())
+            // A name being edited keeps its clicks (to place the cursor).
+            let editing = hit.as_ref().is_some_and(|v| {
+                v.downcast_ref::<NSTextField>().is_some_and(|f| f.isEditable())
+                    || v.downcast_ref::<objc2_app_kit::NSTextView>().is_some()
+            });
+            if editing { hit } else { hit.map(|_| self.retain().into_super()) }
         }
     }
 );
@@ -270,6 +275,8 @@ pub struct IconIvars {
     local: Cell<bool>,
     /// Set while forkz changes the selection itself.
     syncing: Cell<bool>,
+    /// This click became a force click (Quick Look shown once).
+    forced: Cell<bool>,
     /// The folder icon highlighted under a drag.
     drop_index: Cell<Option<NSInteger>>,
     /// The gallery's strip (one row, sideways) rather than the grid.
@@ -286,10 +293,38 @@ define_class!(
     pub struct IconView;
 
     impl IconView {
+        /// A new click: it may become a force click, or a slow click on
+        /// the selected icon's name (renaming it in place).
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, event: &NSEvent) {
+            self.ivars().forced.set(false);
+            let candidate = self.rename_candidate(event);
+            let serial = super::pane_view::next_click();
+            unsafe { msg_send![super(self), mouseDown: event] }
+            if let Some(path) = candidate.filter(|_| !self.ivars().forced.get())
+                && let Some(index) = self.pane().map(|p| p.index())
+            {
+                super::pane_view::rename_after_pause(index, event, serial, path);
+            }
+        }
+
         /// A force click on an item: Quick Look, as in Finder.
         #[unsafe(method(quickLookWithEvent:))]
         fn quick_look_with_event(&self, event: &NSEvent) {
-            self.force_click(event);
+            tracing::debug!("force click (icons): quickLookWithEvent");
+            if !self.ivars().forced.replace(true) {
+                self.force_click(event);
+            }
+        }
+
+        /// A force click by its pressure (stage 2).
+        #[unsafe(method(pressureChangeWithEvent:))]
+        fn pressure_change(&self, event: &NSEvent) {
+            let stage = event.stage();
+            tracing::debug!("force click (icons): pressure stage {stage}");
+            if stage >= 2 && !self.ivars().forced.replace(true) {
+                self.force_click(event);
+            }
         }
 
         /// The list's keys: Space, Return, Tab, F-keys (arrows move).
@@ -498,6 +533,7 @@ impl IconView {
             entries: RefCell::new(Vec::new()),
             local: Cell::new(true),
             syncing: Cell::new(false),
+            forced: Cell::new(false),
             drop_index: Cell::new(None),
             strip,
             typed: RefCell::new((String::new(), None)),
@@ -675,6 +711,57 @@ impl IconView {
         if let Some(new) = index.and_then(item) {
             new.show_as_drop_target();
         }
+    }
+
+    /// The icon a click would rename in place: a single click on the name
+    /// (not the picture) of the only item selected, in the focused view.
+    fn rename_candidate(&self, event: &NSEvent) -> Option<PathBuf> {
+        let keys = objc2_app_kit::NSEventModifierFlags::Command
+            | objc2_app_kit::NSEventModifierFlags::Shift
+            | objc2_app_kit::NSEventModifierFlags::Option
+            | objc2_app_kit::NSEventModifierFlags::Control;
+        if self.ivars().strip || event.clickCount() != 1 || event.modifierFlags().intersects(keys) {
+            return None;
+        }
+        let pane = self.pane()?;
+        let window = self.window()?;
+        let focused = window.isKeyWindow()
+            && window.firstResponder().is_some_and(|r| {
+                std::ptr::eq(Retained::as_ptr(&r).cast::<u8>(), (self as *const IconView).cast::<u8>())
+            });
+        if !focused || !super::renames_in_place() || pane.fs().read_only() {
+            return None;
+        }
+        let point = self.convertPoint_fromView(event.locationInWindow(), None);
+        let index_path = self.indexPathForItemAtPoint(point)?;
+        let selected = self.selectionIndexPaths();
+        if selected.count() != 1 || !selected.containsObject(&index_path) {
+            return None;
+        }
+        // On the name, not the picture.
+        let item = self.itemAtIndexPath(&index_path)?;
+        let label = item.textField()?;
+        let on_label = label.convertRect_toView(label.bounds(), Some(self));
+        let inside = point.x >= on_label.origin.x
+            && point.x <= on_label.origin.x + on_label.size.width
+            && point.y >= on_label.origin.y
+            && point.y <= on_label.origin.y + on_label.size.height;
+        if !inside {
+            return None;
+        }
+        self.entry_at(index_path.item()).filter(|e| e.name != "..").map(|e| e.path)
+    }
+
+    /// The name label of an item's icon, to edit it in place.
+    pub fn name_field_for(&self, path: &Path) -> Option<Retained<NSTextField>> {
+        let index = self.ivars().entries.borrow().iter().position(|e| e.path == path)?;
+        let index_path = objc2_foundation::NSIndexPath::indexPathForItem_inSection(index as NSInteger, 0);
+        let set = objc2_foundation::NSSet::setWithObject(&*index_path);
+        self.scrollToItemsAtIndexPaths_scrollPosition(
+            &set,
+            objc2_app_kit::NSCollectionViewScrollPosition::NearestHorizontalEdge,
+        );
+        self.itemAtIndexPath(&index_path)?.textField()
     }
 
     /// Quick Look for the item under the pointer (selected first, unless

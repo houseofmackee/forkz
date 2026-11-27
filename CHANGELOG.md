@@ -7,6 +7,14 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.24.2] - 2026-11-27
+
+### Fixed
+
+- A force click in the list did not show Quick Look (or showed it only when the click ended): the list held the trackpad's pressure until then. forkz now catches the force click while you press, in the list and in icon view, also when "Look up & data detectors" is set to a three-finger tap. A force click on a selected name no longer starts renaming it ([#18](https://github.com/houseofmackee/forkz/issues/18)).
+- Icon view renames in place too: click the name of the selected icon again, or press Return.
+- In icon view, commands (Rename, Move to Trash, Copy, and the rest) could act on nothing after a folder was listed again, though an item still looked selected. Reading the Dimensions, Duration, Date Last Opened, or Comments columns lost the list's selection.
+
 ## [0.24.1] - 2026-11-27
 
 ### Added
@@ -515,7 +523,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.24.1...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.24.2...HEAD
+[0.24.2]: https://github.com/houseofmackee/forkz/compare/v0.24.1...v0.24.2
 [0.24.1]: https://github.com/houseofmackee/forkz/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/houseofmackee/forkz/compare/v0.23.1...v0.24.0
 [0.23.1]: https://github.com/houseofmackee/forkz/compare/v0.23.0...v0.23.1

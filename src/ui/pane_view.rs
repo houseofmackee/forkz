@@ -98,11 +98,18 @@ define_class!(
                 return;
             }
             let candidate = self.rename_candidate(event);
-            let serial = CLICKS.with(|c| c.get() + 1);
-            CLICKS.with(|c| c.set(serial));
-            unsafe { msg_send![super(self), mouseDown: event] }
-            if let Some(path) = candidate {
-                self.rename_after_pause(event, serial, path);
+            let serial = next_click();
+            FORCED.with(|f| f.set(false));
+            // A force click is handled here (the list's own tracking would
+            // hold its pressure until the button is let go).
+            if !self.became_force_click(event) {
+                unsafe { msg_send![super(self), mouseDown: event] }
+            }
+            // A force click is Quick Look, not a rename.
+            if let Some(path) = candidate.filter(|_| !FORCED.with(Cell::get))
+                && let Some(index) = self.controller().map(|c| c.index())
+            {
+                rename_after_pause(index, event, serial, path);
             }
         }
 
@@ -111,7 +118,22 @@ define_class!(
         /// "Look up & data detectors" is set to Force Click.
         #[unsafe(method(quickLookWithEvent:))]
         fn quick_look_with_event(&self, event: &NSEvent) {
-            self.force_click(event);
+            tracing::debug!("force click: quickLookWithEvent");
+            if !FORCED.with(|f| f.replace(true)) {
+                self.force_click(event);
+            }
+        }
+
+        /// A force click by its pressure (stage 2), for when macOS does not
+        /// send quickLookWithEvent (Look up set to a three-finger tap, or
+        /// the click still tracked by the list).
+        #[unsafe(method(pressureChangeWithEvent:))]
+        fn pressure_change(&self, event: &NSEvent) {
+            let stage = event.stage();
+            tracing::debug!("force click: pressure stage {stage}");
+            if stage >= 2 && !FORCED.with(|f| f.replace(true)) {
+                self.force_click(event);
+            }
         }
 
         #[unsafe(method(becomeFirstResponder))]
@@ -228,9 +250,89 @@ thread_local! {
     /// Counts clicks in the lists, so a pending slow-click rename knows
     /// another click came.
     static CLICKS: Cell<u64> = const { Cell::new(0) };
+    /// This click became a force click (Quick Look shown once).
+    static FORCED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Counts a new click in a list or icon view; returns its number.
+pub fn next_click() -> u64 {
+    CLICKS.with(|c| {
+        c.set(c.get() + 1);
+        c.get()
+    })
+}
+
+/// A slow click on a selected name (list or icons): renames it in place
+/// once the double-click time is over, unless another click came, the
+/// selection changed, or the click was held (a drag).
+pub fn rename_after_pause(index: usize, event: &NSEvent, serial: u64, path: PathBuf) {
+    let interval = NSEvent::doubleClickInterval();
+    let held = objc2_foundation::NSProcessInfo::processInfo().systemUptime() - event.timestamp();
+    if held >= interval {
+        return;
+    }
+    let wait = std::time::Duration::from_secs_f64(interval - held + 0.05);
+    let when = dispatch2::DispatchTime::try_from(wait).unwrap_or(dispatch2::DispatchTime::NOW);
+    let _ = DispatchQueue::main().after(when, move || {
+        if CLICKS.with(Cell::get) != serial {
+            return;
+        }
+        let Some(pane) = super::pane(index) else { return };
+        if pane.selected_paths() == [path.clone()] {
+            super::inline_rename::begin(index, &path);
+        }
+    });
 }
 
 impl FileTable {
+    /// Watches a plain click until it is a force click (Quick Look shows,
+    /// and the rest of the click is used up: true), or it ends, drags, or
+    /// clicks again (false: the list handles it, with nothing lost).
+    /// Mice and trackpads without Force Touch send no pressure, so their
+    /// clicks go straight to the list.
+    fn became_force_click(&self, event: &NSEvent) -> bool {
+        use objc2_app_kit::{NSApplication, NSEventMask, NSEventTrackingRunLoopMode, NSEventType};
+        let keys = NSEventModifierFlags::Command
+            | NSEventModifierFlags::Shift
+            | NSEventModifierFlags::Option
+            | NSEventModifierFlags::Control;
+        if event.clickCount() != 1 || event.modifierFlags().intersects(keys) {
+            return false;
+        }
+        let app = NSApplication::sharedApplication(self.mtm());
+        let mask = NSEventMask::Pressure | NSEventMask::LeftMouseUp | NSEventMask::LeftMouseDragged;
+        let mode = unsafe { NSEventTrackingRunLoopMode };
+        let forever = objc2_foundation::NSDate::distantFuture();
+        loop {
+            // Look first: anything but pressure stays for the list.
+            let Some(next) = app.nextEventMatchingMask_untilDate_inMode_dequeue(mask, Some(&forever), mode, false)
+            else {
+                return false;
+            };
+            if next.r#type() != NSEventType::Pressure {
+                let what = if next.r#type() == NSEventType::LeftMouseUp { "a click" } else { "a drag" };
+                tracing::debug!("force click (list): {what}, handled by the list");
+                return false;
+            }
+            let _ =
+                app.nextEventMatchingMask_untilDate_inMode_dequeue(NSEventMask::Pressure, Some(&forever), mode, true);
+            if next.stage() >= 2 {
+                tracing::debug!("force click (list): stage 2 while pressing, Quick Look");
+                FORCED.with(|f| f.set(true));
+                self.force_click(&next);
+                // The rest of this click is part of the force click.
+                while let Some(rest) =
+                    app.nextEventMatchingMask_untilDate_inMode_dequeue(mask, Some(&forever), mode, true)
+                {
+                    if rest.r#type() == NSEventType::LeftMouseUp {
+                        break;
+                    }
+                }
+                return true;
+            }
+        }
+    }
+
     /// Quick Look for the item under the pointer (selected first, unless
     /// it is part of the selection).
     fn force_click(&self, event: &NSEvent) {
@@ -291,26 +393,6 @@ impl FileTable {
 
     /// Renames in place once the double-click time is over, unless another
     /// click came, the selection changed, or the click was a drag.
-    fn rename_after_pause(&self, event: &NSEvent, serial: u64, path: PathBuf) {
-        let interval = NSEvent::doubleClickInterval();
-        let held = objc2_foundation::NSProcessInfo::processInfo().systemUptime() - event.timestamp();
-        if held >= interval {
-            return;
-        }
-        let Some(index) = self.controller().map(|c| c.index()) else { return };
-        let wait = std::time::Duration::from_secs_f64(interval - held + 0.05);
-        let when = dispatch2::DispatchTime::try_from(wait).unwrap_or(dispatch2::DispatchTime::NOW);
-        let _ = DispatchQueue::main().after(when, move || {
-            if CLICKS.with(Cell::get) != serial {
-                return;
-            }
-            let Some(pane) = super::pane(index) else { return };
-            if pane.selected_paths() == [path.clone()] {
-                super::inline_rename::begin(index, &path);
-            }
-        });
-    }
-
     fn double_clicked_parent(&self, event: &NSEvent) -> bool {
         if event.clickCount() != 2 {
             return false;
@@ -1867,10 +1949,8 @@ impl PaneController {
                 .collect();
             DispatchQueue::main().exec_async(move || {
                 let Some(pane) = super::pane(index) else { return };
-                if pane.ivars().state.borrow_mut().set_meta(generation, found)
-                    && let Some(table) = pane.ivars().table.get()
-                {
-                    table.reloadData();
+                if pane.ivars().state.borrow_mut().set_meta(generation, found) {
+                    pane.reload_rows_keeping_selection();
                 }
             });
         });
@@ -2768,8 +2848,10 @@ impl PaneController {
     /// The Name field of an item's row, to edit it in place (list view
     /// only).
     pub fn name_field_for(&self, path: &Path) -> Option<Retained<NSTextField>> {
-        if self.view_mode() != crate::pane::ViewMode::List {
-            return None;
+        match self.view_mode() {
+            crate::pane::ViewMode::List => {}
+            crate::pane::ViewMode::Icons => return self.icon_view()?.name_field_for(path),
+            _ => return None,
         }
         let row = self.ivars().state.borrow().table_row_of(path)? as NSInteger;
         let table = self.table();
@@ -2783,9 +2865,33 @@ impl PaneController {
         unsafe { cell.textField() }
     }
 
+    /// Reloads the list's rows, keeping the selected items selected (by
+    /// path: rows may move when sorted by metadata) without scrolling. A
+    /// reload of the list alone loses its selection while another view
+    /// shows (icons), and commands act on that selection.
+    pub fn reload_rows_keeping_selection(&self) {
+        let selected = self.selected_paths();
+        self.table().reloadData();
+        let set = NSMutableIndexSet::new();
+        {
+            let state = self.ivars().state.borrow();
+            for path in &selected {
+                if let Some(row) = state.table_row_of(path) {
+                    set.addIndex(row);
+                }
+            }
+        }
+        if !selected.is_empty() {
+            self.table().selectRowIndexes_byExtendingSelection(&set, false);
+        }
+    }
+
     /// Draws the rows again (keeping the selection).
     pub fn redraw_rows(&self) {
-        self.table().reloadData();
+        self.reload_rows_keeping_selection();
+        if let Some(icons) = self.icon_view() {
+            icons.refresh_highlights();
+        }
     }
 
     /// Sorts the list another way (as a click on a column title would).
