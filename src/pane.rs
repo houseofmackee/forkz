@@ -379,7 +379,7 @@ impl PaneState {
     }
 
     fn filter(&mut self) {
-        let needle = self.filter_text.to_lowercase();
+        let matcher = NameFilter::new(&self.filter_text);
         for entry in &mut self.all {
             if let Some(size) = self.folder_sizes.get(&entry.path) {
                 entry.size = *size;
@@ -392,7 +392,7 @@ impl PaneState {
             .iter()
             .filter(|e| self.show_hidden || !e.hidden)
             .filter(|e| !excluded(e))
-            .filter(|e| needle.is_empty() || e.name.to_lowercase().contains(&needle))
+            .filter(|e| matcher.matches(&e.name))
             .cloned()
             .collect();
         self.group_rows();
@@ -460,6 +460,22 @@ impl PaneState {
         match self.rows.get(row) {
             Some(Row::Entry(index)) => self.visible.get(*index),
             _ => None,
+        }
+    }
+
+    /// The item `step` rows after (or before, when negative) an item in
+    /// the list, skipping ".." and group titles.
+    pub fn neighbor(&self, path: &Path, step: isize) -> Option<PathBuf> {
+        let mut row = self.table_row_of(path)? as isize;
+        loop {
+            row += step.signum();
+            if row < 0 {
+                return None;
+            }
+            match self.rows.get(row as usize)? {
+                Row::Entry(index) => return self.visible.get(*index).map(|e| e.path.clone()),
+                _ => continue,
+            }
         }
     }
 
@@ -823,8 +839,61 @@ fn group_key(group: GroupBy, entry: &Entry, today: Date, kind: KindLabel) -> (i6
     }
 }
 
+/// What the filter field matches, ignoring case: names containing the
+/// text; with `*`, `?`, or `[a-z]`, a pattern (`*.pdf`), and several
+/// separated by `;`; between slashes, a regular expression (`/^IMG_\d+/`).
+/// A regular expression that is not valid yet (still being typed) matches
+/// as plain text.
+pub enum NameFilter {
+    All,
+    Contains(String),
+    Patterns(crate::fs::glob::Patterns),
+    Regex(regex::Regex),
+}
+
+impl NameFilter {
+    pub fn new(text: &str) -> NameFilter {
+        let text = text.trim();
+        if text.is_empty() {
+            return NameFilter::All;
+        }
+        if let Some(inner) = text.strip_prefix('/').and_then(|t| t.strip_suffix('/')).filter(|t| !t.is_empty())
+            && let Ok(regex) = regex::RegexBuilder::new(inner).case_insensitive(true).build()
+        {
+            return NameFilter::Regex(regex);
+        }
+        let wild = text.contains(['*', '?', ';']) || (text.contains('[') && text.contains(']'));
+        if wild && !text.starts_with('/') {
+            return NameFilter::Patterns(crate::fs::glob::Patterns::new(text));
+        }
+        NameFilter::Contains(text.to_lowercase())
+    }
+
+    pub fn matches(&self, name: &str) -> bool {
+        match self {
+            NameFilter::All => true,
+            NameFilter::Contains(needle) => name.to_lowercase().contains(needle),
+            NameFilter::Patterns(patterns) => patterns.matches(name),
+            NameFilter::Regex(regex) => regex.is_match(name),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn filter_field_matches() {
+        let m = |text: &str, name: &str| NameFilter::new(text).matches(name);
+        assert!(m("", "anything"));
+        assert!(m("port", "Report.PDF"), "plain text: contained, any case");
+        assert!(!m("port", "notes.txt"));
+        assert!(m("*.pdf", "Report.PDF") && !m("*.pdf", "pdf notes.txt"), "a pattern matches the whole name");
+        assert!(m("*.jpg; *.png", "a.png") && m("*.jpg; *.png", "b.JPG") && !m("*.jpg; *.png", "c.gif"));
+        assert!(m("IMG_????.heic", "img_0042.HEIC"));
+        assert!(m("/^img_\\d+/", "IMG_123.jpg") && !m("/^img_\\d+/", "my IMG_1.jpg"), "a regular expression");
+        assert!(m("/(a", "x/(a.txt"), "an unfinished expression matches as text");
+    }
+
     use super::*;
 
     /// Leaving a server (here, search results) goes back to the latest

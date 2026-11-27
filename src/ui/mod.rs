@@ -18,6 +18,7 @@ mod git_actions;
 mod icon_view;
 mod inline_rename;
 pub mod intents;
+mod item_info;
 mod listing_cache;
 mod multi_rename;
 mod oplog;
@@ -458,6 +459,9 @@ pub fn prepare_item(item: &NSMenuItem, command: Command, pane: usize) {
     if let Some(group) = command.grouping() {
         let on = app().is_some_and(|a| a.panes[pane].group_by() == group);
         item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+    }
+    if command == Command::ShowItemInfo {
+        item.setState(if shows_item_info() { NSControlStateValueOn } else { NSControlStateValueOff });
     }
     if command == Command::TerminalFollows {
         let on = app().is_some_and(|a| a.settings.borrow().terminal_follows);
@@ -974,6 +978,7 @@ fn main_menu(
     separator(&file);
     for c in [
         Command::NewFolder,
+        Command::NewFolderInOther,
         Command::NewFolderWithSelection,
         Command::NewFile,
         Command::Rename,
@@ -1063,6 +1068,7 @@ fn main_menu(
     for c in [Command::ToggleHidden, Command::ToggleFilters, Command::FlatView, Command::Refresh, Command::RefreshAll] {
         command(&view, c);
     }
+    command(&view, Command::ShowItemInfo);
     separator(&view);
     for c in [Command::ToggleTerminal, Command::TerminalFollows] {
         command(&view, c);
@@ -1208,6 +1214,9 @@ fn main_menu(
     command(&window, Command::NextTab);
     command(&window, Command::PreviousTab);
     command(&window, Command::MoveTabToOther);
+    for c in [Command::CloseOtherTabs, Command::CloseTabsToLeft, Command::CloseTabsToRight] {
+        command(&window, c);
+    }
     separator(&window);
     command(&window, Command::ShowDropStack);
     separator(&window);
@@ -1347,7 +1356,13 @@ pub fn is_enabled_in(command: Command, index: usize, has_selection: bool) -> boo
             has_selection
         }
         Command::SelectSameType => has_selection,
-        Command::MoveTabToOther => pane.tab_count() > 1,
+        Command::MoveTabToOther | Command::CloseOtherTabs => pane.tab_count() > 1,
+        Command::CloseTabsToLeft => pane.active_tab() > 0,
+        Command::CloseTabsToRight => pane.active_tab() + 1 < pane.tab_count(),
+        Command::NewFolderInOther => {
+            let other = &app.panes[1 - index];
+            !other.view().isHidden() && !other.fs().read_only()
+        }
         Command::ReopenClosedTab => CLOSED_TABS.with(|c| !c.borrow().is_empty()),
         Command::ExportSites => !app.sites.borrow().sites.is_empty(),
         Command::NextTab | Command::PreviousTab => pane.tab_count() > 1,
@@ -1659,11 +1674,24 @@ pub fn run_command(command: Command, pane: Option<usize>) {
         Command::ExportSites => site_transfer::export_sites(),
         Command::SelectSameType => select_same_type(&pane),
         Command::MoveTabToOther => move_tab_to_other(&pane, &other),
+        Command::CloseOtherTabs => pane.close_tabs_around(pane.active_tab(), true, true),
+        Command::CloseTabsToLeft => pane.close_tabs_around(pane.active_tab(), true, false),
+        Command::CloseTabsToRight => pane.close_tabs_around(pane.active_tab(), false, true),
+        Command::NewFolderInOther => {
+            set_active(other.index());
+            other.focus();
+            new_folder(&other);
+        }
         Command::ReopenClosedTab => reopen_closed_tab(),
         Command::ExportTree => export_tree(&pane),
         Command::ShowDropStack => drop_stack::toggle(),
         Command::ToggleTerminal => toggle_terminal(),
         Command::TerminalFollows => update_settings(|s| s.terminal_follows = !s.terminal_follows),
+        Command::ShowItemInfo => {
+            update_settings(|s| s.show_item_info = !s.show_item_info);
+            // The icons' size changes with it.
+            apply_appearance(&app);
+        }
         Command::DiskUsage => {
             let fs = pane.fs();
             let fs = fs.browse_fs().unwrap_or(fs);
@@ -3248,7 +3276,9 @@ fn renames_in_place() -> bool {
 }
 
 /// Renames an item (logged, undoable), then selects it.
-fn rename_to(pane: &PaneController, path: &Path, new_name: &str) {
+/// Renames an item; returns whether it was renamed (the pane lists its
+/// folder again).
+fn rename_to(pane: &PaneController, path: &Path, new_name: &str) -> bool {
     let name = title_of(path);
     let fs = pane.fs();
     match ops::rename(&fs, path, new_name) {
@@ -3269,10 +3299,12 @@ fn rename_to(pane: &PaneController, path: &Path, new_name: &str) {
             );
             pane.reload_selecting(&[renamed]);
             other_pane_reload(pane.index());
+            true
         }
         Err(e) => {
             oplog::record(oplog::Kind::Problem, format!("Could not rename \u{201c}{name}\u{201d}"), e.to_string());
             dialogs::show_error(format!("\u{201c}{name}\u{201d} could not be renamed."), e.to_string());
+            false
         }
     }
 }
@@ -5318,6 +5350,20 @@ fn git_status_arrived(
 ) {
     if let Some(pane) = app().and_then(|a| a.panes.get(index).cloned()) {
         pane.git_arrived(statuses, branch, repository);
+    }
+}
+
+/// Whether the icon view shows a line of item info under names.
+fn shows_item_info() -> bool {
+    app().is_some_and(|a| a.settings.borrow().show_item_info)
+}
+
+/// An item's info line was read (for the icon views showing it).
+fn item_info_ready(path: &Path) {
+    if let Some(app) = app() {
+        for pane in &app.panes {
+            pane.item_info_ready(path);
+        }
     }
 }
 

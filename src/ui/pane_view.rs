@@ -570,6 +570,21 @@ define_class!(
             self.close_tab(sender.tag() as usize);
         }
 
+        #[unsafe(method(closeOtherTabs:))]
+        fn close_other_tabs(&self, sender: &NSMenuItem) {
+            self.close_tabs_around(sender.tag() as usize, true, true);
+        }
+
+        #[unsafe(method(closeTabsToLeft:))]
+        fn close_tabs_to_left(&self, sender: &NSMenuItem) {
+            self.close_tabs_around(sender.tag() as usize, true, false);
+        }
+
+        #[unsafe(method(closeTabsToRight:))]
+        fn close_tabs_to_right(&self, sender: &NSMenuItem) {
+            self.close_tabs_around(sender.tag() as usize, false, true);
+        }
+
         #[unsafe(method(closeTabButton:))]
         fn close_tab_button(&self, sender: &NSButton) {
             self.close_tab(sender.tag() as usize);
@@ -1297,7 +1312,14 @@ impl PaneController {
                     } else {
                         Vec::new()
                     };
-                    let icon = if colors.is_empty() { icon } else { super::util::icon_with_tags(&icon, &colors) };
+                    let icon = if colors.is_empty() {
+                        icon
+                    } else if entry.is_folder_like() {
+                        let tinted = super::util::tinted_folder(&icon, &entry.path, &colors);
+                        super::util::icon_with_tags(&tinted, &colors)
+                    } else {
+                        super::util::icon_with_tags(&icon, &colors)
+                    };
                     image.setImage(Some(&icon));
                 }
                 entry.name.clone()
@@ -1509,6 +1531,9 @@ impl PaneController {
         // The filter field sits to the right of the path bar.
         let filter = objc2_app_kit::NSSearchField::new(mtm);
         filter.setPlaceholderString(Some(&ns("Filter")));
+        filter.setToolTip(Some(&ns(
+            "Shows names containing the text. Also takes patterns, such as *.pdf (several separated by ;), and regular expressions between slashes, such as /^IMG_\\d+/.",
+        )));
         filter.widthAnchor().constraintEqualToConstant(150.0).setActive(true);
         filter.setControlSize(objc2_app_kit::NSControlSize::Small);
         filter.setFont(Some(&objc2_app_kit::NSFont::systemFontOfSize(objc2_app_kit::NSFont::smallSystemFontSize())));
@@ -1688,6 +1713,25 @@ impl PaneController {
         }
     }
 
+    /// Closes the tabs to the left and right of tab `keep` (each can be
+    /// reopened), and shows it.
+    pub fn close_tabs_around(&self, keep: usize, left: bool, right: bool) {
+        if keep >= self.tab_count() {
+            return;
+        }
+        self.select_tab(keep);
+        if right {
+            for index in (keep + 1..self.tab_count()).rev() {
+                self.close_tab(index);
+            }
+        }
+        if left {
+            for index in (0..keep).rev() {
+                self.close_tab(index);
+            }
+        }
+    }
+
     /// Closes a tab (not the last one). Returns false if it was the last.
     pub fn close_tab(&self, index: usize) -> bool {
         let count = self.tab_count();
@@ -1759,17 +1803,29 @@ impl PaneController {
             }
             button.setToolTip(Some(&ns(&title)));
             let menu = NSMenu::new(mtm);
-            let close = unsafe {
-                NSMenuItem::initWithTitle_action_keyEquivalent(
-                    NSMenuItem::alloc(mtm),
-                    &ns("Close Tab"),
-                    Some(sel!(closeTabFromMenu:)),
-                    &ns(""),
-                )
-            };
-            close.setTag(index as isize);
-            unsafe { close.setTarget(Some(self)) };
-            menu.addItem(&close);
+            // Only what applies to this tab (the first has none to its left).
+            let choices = [
+                ("Close Tab", sel!(closeTabFromMenu:), true),
+                ("Close Other Tabs", sel!(closeOtherTabs:), true),
+                ("Close Tabs to the Left", sel!(closeTabsToLeft:), index > 0),
+                ("Close Tabs to the Right", sel!(closeTabsToRight:), index + 1 < count),
+            ];
+            for (title, action, applies) in choices {
+                if !applies {
+                    continue;
+                }
+                let item = unsafe {
+                    NSMenuItem::initWithTitle_action_keyEquivalent(
+                        NSMenuItem::alloc(mtm),
+                        &ns(title),
+                        Some(action),
+                        &ns(""),
+                    )
+                };
+                item.setTag(index as isize);
+                unsafe { item.setTarget(Some(self)) };
+                menu.addItem(&item);
+            }
             unsafe { button.setMenu(Some(&menu)) };
             button
                 .setContentCompressionResistancePriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
@@ -2223,6 +2279,13 @@ impl PaneController {
         }
     }
 
+    /// An item's info line is ready: the icon view showing it gets it.
+    pub fn item_info_ready(&self, path: &Path) {
+        if let Some(icons) = self.ivars().icons.get() {
+            icons.item_info_ready(path);
+        }
+    }
+
     /// A file's thumbnail is ready: the icon views showing it get it.
     pub fn thumbnail_ready(&self, path: &Path) {
         if let Some(icons) = self.ivars().icons.get() {
@@ -2435,6 +2498,10 @@ impl PaneController {
         if listed {
             super::note_recent_folder(&self.fs(), &self.location());
         }
+        // Renaming one item after another (Tab): the next, now it shows.
+        if !self.ivars().state.borrow().loading {
+            super::inline_rename::continue_with(Some(self.index()));
+        }
     }
 
     /// Runs `git status` in the background, in a repository on the Mac:
@@ -2547,7 +2614,10 @@ impl PaneController {
         }
         let table = self.table();
         let column = table.columnWithIdentifier(&ns("git"));
-        if column >= 0 {
+        if column >= 0 && super::inline_rename::is_editing(self.index()) {
+            // Redrawing rows would end the editing: once it is done.
+            super::inline_rename::reload_later();
+        } else if column >= 0 {
             let rows = NSIndexSet::indexSetWithIndexesInRange(objc2_foundation::NSRange::new(
                 0,
                 table.numberOfRows() as usize,
@@ -2723,6 +2793,11 @@ impl PaneController {
     }
 
     /// The entries shown for these paths (from the listing, no file access).
+    /// The item after (1) or before (-1) an item in the list.
+    pub fn neighbor(&self, path: &Path, step: isize) -> Option<PathBuf> {
+        self.ivars().state.borrow().neighbor(path, step)
+    }
+
     pub fn entries_for(&self, paths: &[PathBuf]) -> Vec<crate::fs::Entry> {
         let state = self.ivars().state.borrow();
         paths.iter().filter_map(|p| state.row_of(p).and_then(|r| state.entry(r))).cloned().collect()
@@ -2870,6 +2945,10 @@ impl PaneController {
     /// reload of the list alone loses its selection while another view
     /// shows (icons), and commands act on that selection.
     pub fn reload_rows_keeping_selection(&self) {
+        // Not while a name is edited (it would end the editing).
+        if super::inline_rename::is_editing(self.index()) {
+            return;
+        }
         let selected = self.selected_paths();
         self.table().reloadData();
         let set = NSMutableIndexSet::new();

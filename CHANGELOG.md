@@ -7,6 +7,17 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-27
+
+### Added
+
+- Tab and Shift-Tab while renaming in the list or icon view: the item is renamed, and the next or previous one is ready to rename.
+- Close Other Tabs (Option-Command-W), Close Tabs to the Left, and Close Tabs to the Right, in the Window menu and when you right-click a tab.
+- File > New Folder in Other Pane.
+- The filter field takes patterns (`*.pdf`, several separated by `;`) and regular expressions between slashes (`/^IMG_\d+/`), besides text in the name.
+- View > Show Item Info: under each name in the icon view, a folder's number of items, an image's size, or a movie's or song's length.
+- Tagged folders take their tag's color, as in Finder.
+
 ## [0.25.0] - 2026-11-27
 
 ### Added
@@ -531,7 +542,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/houseofmackee/forkz/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/houseofmackee/forkz/compare/v0.24.2...v0.25.0
 [0.24.2]: https://github.com/houseofmackee/forkz/compare/v0.24.1...v0.24.2
 [0.24.1]: https://github.com/houseofmackee/forkz/compare/v0.24.0...v0.24.1

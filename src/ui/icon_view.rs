@@ -28,12 +28,26 @@ use crate::fs::Entry;
 
 const ITEM: &str = "ForkzIcon";
 
-/// The item size for a text size (icons grow with zoom).
+/// The item size for a text size (icons grow with zoom), with room for
+/// the item info line when it shows.
 fn metrics() -> (f64, NSSize) {
     let (text, _) = super::pane_view::look_metrics();
     let icon = (64.0 * text / 13.0).round();
-    (icon, NSSize::new((icon * 1.65).round(), (icon + text * 2.6 + 16.0).round()))
+    let info = if super::shows_item_info() { info_height() } else { 0.0 };
+    (icon, NSSize::new((icon * 1.65).round(), (icon + text * 2.6 + 16.0 + info).round()))
 }
+
+/// The item info line's text size and height.
+fn info_size() -> f64 {
+    (super::pane_view::look_metrics().0 * 0.85).round()
+}
+
+fn info_height() -> f64 {
+    (info_size() * 1.35).round()
+}
+
+/// Tells the item info label from the name.
+const INFO_TAG: NSInteger = 2;
 
 /// The gallery strip's items: icons only (the name is under the preview).
 fn strip_metrics() -> (f64, NSSize) {
@@ -169,9 +183,16 @@ impl IconItem {
             label.setTextColor(Some(&colors.text));
         }
         label.setFrame(NSRect::new(NSPoint::new(4.0, 6.0), NSSize::new(size.width - 8.0, (text * 2.6).round())));
+        let info = NSTextField::labelWithString(&ns(""), mtm);
+        info.setFont(Some(&NSFont::systemFontOfSize(info_size())));
+        info.setAlignment(NSTextAlignment::Center);
+        info.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        info.setTag(INFO_TAG);
+        info.setHidden(true);
         view.addSubview(&highlight);
         view.addSubview(&image);
         view.addSubview(&label);
+        view.addSubview(&info);
         self.setView(&view);
         self.setImageView(Some(&image));
         self.setTextField(Some(&label));
@@ -203,6 +224,35 @@ impl IconItem {
                 (None, false) => NSColor::labelColor(),
             };
             label.setTextColor(Some(&text));
+        }
+        // Finder shows it in the accent color.
+        if let Some(info) = self.info() {
+            let color = match (super::themed::colors(), selected && focused) {
+                (Some(c), true) => c.selection_text,
+                (Some(c), false) => c.accent,
+                (None, true) => NSColor::alternateSelectedControlTextColor(),
+                (None, false) => NSColor::controlAccentColor(),
+            };
+            info.setTextColor(Some(&color));
+        }
+    }
+
+    /// The item info line.
+    fn info(&self) -> Option<Retained<NSTextField>> {
+        if !self.isViewLoaded() {
+            return None;
+        }
+        self.view()
+            .subviews()
+            .iter()
+            .filter_map(|v| v.downcast::<NSTextField>().ok())
+            .find(|field| field.tag() == INFO_TAG)
+    }
+
+    /// Shows an item's info line (none: hidden).
+    fn set_info(&self, text: Option<&str>) {
+        if let Some(info) = self.info() {
+            info.setStringValue(&ns(text.unwrap_or("")));
         }
     }
 
@@ -243,8 +293,16 @@ impl IconItem {
         highlight.setFrame(NSRect::new(NSPoint::new(2.0, 2.0), NSSize::new(size.width - 4.0, size.height - 4.0)));
         let top = if strip { ((size.height - icon) / 2.0).floor() } else { size.height - icon - 8.0 };
         image.setFrame(NSRect::new(NSPoint::new(((size.width - icon) / 2.0).floor(), top), NSSize::new(icon, icon)));
-        label.setFrame(NSRect::new(NSPoint::new(4.0, 6.0), NSSize::new(size.width - 8.0, (text * 2.6).round())));
+        let info_on = !strip && super::shows_item_info();
+        let below = if info_on { info_height() } else { 0.0 };
+        label
+            .setFrame(NSRect::new(NSPoint::new(4.0, 6.0 + below), NSSize::new(size.width - 8.0, (text * 2.6).round())));
         label.setHidden(strip);
+        if let Some(info) = self.info() {
+            info.setFont(Some(&NSFont::systemFontOfSize(info_size())));
+            info.setFrame(NSRect::new(NSPoint::new(4.0, 4.0), NSSize::new(size.width - 8.0, below)));
+            info.setHidden(!info_on);
+        }
     }
 
     fn show(&self, entry: &Entry, local: bool, strip: bool) {
@@ -252,6 +310,14 @@ impl IconItem {
         // The contents' thumbnail when there is one (it may come later).
         let thumbnail = super::thumbnails::applies(entry, local).then(|| super::thumbnails::get(entry)).flatten();
         let picture = thumbnail.unwrap_or_else(|| icon_of(entry, local));
+        // Tagged folders in their tag's color, as in Finder.
+        let picture = if local && entry.is_folder_like() {
+            let colors: Vec<u8> =
+                crate::fs::tags::read(&entry.path).iter().map(|t| t.color).filter(|c| *c > 0).collect();
+            super::util::tinted_folder(&picture, &entry.path, &colors)
+        } else {
+            picture
+        };
         self.set_picture(&picture, strip);
         let alpha = if entry.hidden { 0.5 } else { 1.0 };
         if let Some(image) = self.imageView() {
@@ -264,6 +330,28 @@ impl IconItem {
         }
         // The strip has no names: the icon's tooltip gives it.
         self.view().setToolTip(strip.then(|| ns(&entry.name)).as_deref());
+        let info = (!strip && super::shows_item_info() && super::item_info::applies(entry, local))
+            .then(|| super::item_info::get(entry))
+            .flatten();
+        self.set_info(info.as_deref());
+        self.place_info();
+    }
+
+    /// The info line right under the name: one line or two.
+    fn place_info(&self) {
+        let (Some(label), Some(info)) = (self.textField(), self.info()) else { return };
+        if info.isHidden() {
+            return;
+        }
+        let frame = label.frame();
+        let fits = label.sizeThatFits(NSSize::new(frame.size.width, frame.size.height));
+        let name_height = fits.height.min(frame.size.height);
+        let top = frame.origin.y + frame.size.height;
+        let height = info_height();
+        info.setFrame(NSRect::new(
+            NSPoint::new(frame.origin.x, (top - name_height - height).max(4.0)),
+            NSSize::new(frame.size.width, height),
+        ));
     }
 }
 
@@ -628,6 +716,24 @@ impl IconView {
             .and_then(|item| item.downcast::<IconItem>().ok())
         {
             item.set_picture(&thumbnail, self.ivars().strip);
+        }
+    }
+
+    /// An item's info line was read: the item showing it gets it.
+    pub fn item_info_ready(&self, path: &Path) {
+        if self.ivars().strip || !super::shows_item_info() {
+            return;
+        }
+        let Some((index, entry)) =
+            self.ivars().entries.borrow().iter().enumerate().find(|(_, e)| e.path == path).map(|(i, e)| (i, e.clone()))
+        else {
+            return;
+        };
+        if let Some(item) = self
+            .itemAtIndexPath(&NSIndexPath::indexPathForItem_inSection(index as NSInteger, 0))
+            .and_then(|item| item.downcast::<IconItem>().ok())
+        {
+            item.set_info(super::item_info::get(&entry).as_deref());
         }
     }
 

@@ -1,12 +1,14 @@
 //! Renaming in the list itself, as in Finder: press Return, or click the
 //! name of the selected item again (a slow double-click). The name becomes
 //! a field, with the part before the extension selected; Return or a click
-//! elsewhere renames, Escape leaves it as it was. Changes to the folder
-//! wait until the editing is done.
+//! elsewhere renames, Escape leaves it as it was. Tab and Shift-Tab rename
+//! and go on to the next or previous item, as in Path Finder. Changes to
+//! the folder wait until the editing is done.
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{NSObjectProtocol, Sel};
 use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
@@ -39,15 +41,25 @@ define_class!(
             finish(!self.ivars().cancelled.get());
         }
 
-        /// Escape: leave the name as it was.
+        /// Escape: leave the name as it was. Tab and Shift-Tab: rename,
+        /// then edit the next or previous item's name.
         #[unsafe(method(control:textView:doCommandBySelector:))]
         fn command(&self, _control: &NSControl, _view: &NSTextView, command: Sel) -> bool {
+            let step = if command == sel!(insertTab:) {
+                1
+            } else if command == sel!(insertBacktab:) {
+                -1
+            } else {
+                0
+            };
             let cancel = command == sel!(cancelOperation:);
             if cancel {
                 self.ivars().cancelled.set(true);
                 finish(false);
+            } else if step != 0 {
+                finish_and_move(step);
             }
-            cancel
+            cancel || step != 0
         }
     }
 
@@ -59,6 +71,9 @@ thread_local! {
     /// The pane's folder changed while a name was edited: list it again
     /// when done.
     static RELOAD_LATER: Cell<bool> = const { Cell::new(false) };
+    /// The item to edit next (Tab), once the pane has listed its folder
+    /// again after the rename.
+    static NEXT: RefCell<Option<(usize, PathBuf)>> = const { RefCell::new(None) };
 }
 
 /// Whether a name is being edited in a pane.
@@ -74,7 +89,9 @@ pub fn reload_later() {
 /// Starts editing an item's name in the list; false if it cannot be (not
 /// in list view, or the item is not shown).
 pub fn begin(pane: usize, path: &Path) -> bool {
-    finish(true);
+    if ACTIVE.with(|a| a.borrow().is_some()) {
+        finish(true);
+    }
     let Some(controller) = super::pane(pane) else { return false };
     let Some(field) = controller.name_field_for(path) else {
         tracing::debug!("rename in place: no name field for {}", path.display());
@@ -117,10 +134,43 @@ pub fn begin(pane: usize, path: &Path) -> bool {
     true
 }
 
+/// Tab or Shift-Tab: renames, then edits the next or previous item's name
+/// (after the folder is listed again, when the name changed).
+fn finish_and_move(step: isize) {
+    let next = ACTIVE.with(|a| {
+        let active = a.borrow();
+        let edit = active.as_ref()?;
+        let pane = super::pane(edit.ivars().pane)?;
+        Some((edit.ivars().pane, pane.neighbor(&edit.ivars().path, step)?))
+    });
+    NEXT.with(|n| *n.borrow_mut() = next);
+    if !finish(true) {
+        // Nothing to list again: on to the next one now.
+        continue_with(None);
+    }
+}
+
+/// The pane listed its folder: edit the name Tab moved to, if any.
+pub fn continue_with(pane: Option<usize>) {
+    let Some((index, path)) = NEXT.with(|n| {
+        let mut next = n.borrow_mut();
+        if pane.is_none_or(|p| next.as_ref().is_some_and(|(i, _)| *i == p)) { next.take() } else { None }
+    }) else {
+        return;
+    };
+    // After the list has settled.
+    DispatchQueue::main().exec_async(move || {
+        let Some(pane) = super::pane(index) else { return };
+        pane.select_paths(std::slice::from_ref(&path));
+        begin(index, &path);
+    });
+}
+
 /// Ends editing: renames if asked and the name changed, puts the field
-/// back as a label, and gives the list the focus again.
-fn finish(rename: bool) {
-    let Some(edit) = ACTIVE.with(|a| a.borrow_mut().take()) else { return };
+/// back as a label, and gives the list the focus again. Returns whether
+/// the folder is being listed again (after a rename).
+fn finish(rename: bool) -> bool {
+    let Some(edit) = ACTIVE.with(|a| a.borrow_mut().take()) else { return false };
     let ivars = edit.ivars();
     let field = &ivars.field;
     let typed = field.stringValue().to_string();
@@ -135,14 +185,21 @@ fn finish(rename: bool) {
         pane.focus();
     }
     let new_name = typed.trim();
+    let mut listing = false;
     if rename && !new_name.is_empty() && new_name != ivars.name {
         if let Some(pane) = &pane {
-            super::rename_to(pane, &ivars.path, new_name);
+            listing = super::rename_to(pane, &ivars.path, new_name);
+            if !listing {
+                // It could not be renamed: stay on it.
+                NEXT.with(|n| n.borrow_mut().take());
+            }
         }
     } else if RELOAD_LATER.with(|r| r.replace(false))
         && let Some(pane) = &pane
     {
         pane.reload();
+        listing = true;
     }
     RELOAD_LATER.with(|r| r.set(false));
+    listing
 }

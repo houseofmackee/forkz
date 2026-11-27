@@ -14,7 +14,7 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 
 - Two panes side by side, or stacked one above the other (View > Stack Panes), each with tabs, and a sidebar with favorites, smart folders, iCloud Drive, volumes, Network (the file servers on your network), saved sites, synclets, and Finder tags. Drag items in the sidebar to put them in the order you like, within each section. The sidebar, either pane, and the preview pane can each be hidden.
 - A line in your accent color along the top of the active pane shows where commands, new connections, and Go to Folder will open. Tabs show a close button when the pointer is over them.
-- A sortable list (name, date modified, size, kind, Git status, and more; on the Mac also image and video dimensions, duration, Date Last Opened, and Finder comments) with ".." on top to go up, groups by kind, date, size, or tag, a clickable path bar, a filter field, and a status line with the selection size and free space; or icons, or columns, as in Finder
+- A sortable list (name, date modified, size, kind, Git status, and more; on the Mac also image and video dimensions, duration, Date Last Opened, and Finder comments) with ".." on top to go up, groups by kind, date, size, or tag, a clickable path bar, a filter field (text in the name, patterns such as `*.pdf; *.png`, or a regular expression between slashes, such as `/^IMG_\d+/`), and a status line with the selection size and free space; or icons, or columns, as in Finder
 - A viewer for text and hex (F3) that highlights code and settings files and can edit them (on the Mac and on servers), and filename filters that hide items in the lists and leave them out of copies
 - Copy, move, duplicate, trash, rename, new file, and new folder (right-click Copy To and Move To send items to the other pane, another open tab, or a folder you choose), with progress, Stop, Pause, and a conflict dialog (Replace, Replace if Older, Keep Both, Skip, Merge, and "Apply to all")
 - Fast copies on APFS (clones), drag and drop with Finder, and Copy and Paste of files. Pasting an image (a screenshot, or an image copied in a browser) saves it as a PNG file in the pane's folder
@@ -26,7 +26,8 @@ A fast, native dual-pane file manager for macOS on Apple silicon, written in Rus
 - Commands > Copy to Several Folders: one copy of the selection to each folder checked (the other pane's, favorites, recent folders, or others you pick)
 - Quick Look (Space, Command-Y, or a force click on the trackpad, as in Finder), Share in the right-click menu, a hidden files toggle, and live updates when folders change
 - Flat View (Option-Command-F): every file in a folder and the folders in it, in one list
-- Reopen Closed Tab (Shift-Command-T), Move Tab to Other Pane, Select Same Type, and the mouse's Back and Forward buttons
+- Reopen Closed Tab (Shift-Command-T), Move Tab to Other Pane, Close Other Tabs (Option-Command-W) and Close Tabs to the Left or Right (also when you right-click a tab), New Folder in Other Pane, Select Same Type, and the mouse's Back and Forward buttons
+- View > Show Item Info: under each name in the icon view, how many items a folder holds, an image's size in pixels, or a movie's or song's length, as in Finder
 - Go > Recent Folders: the folders you were in lately, on the Mac and on servers
 - App Cleaner (Commands > App Cleaner, as the AppCleaner app does): the apps selected (or chosen) and everything they left, in your Library (settings, caches, support files, containers, crash reports) and for all users in /Library (support files, background services, helper tools), to move to the Trash in one go. Moving an app to the Trash offers the same for what it left. Files for all users start unchecked and need an administrator's password, which Finder asks for once
 - Sounds as in Finder for moving items to the Trash and deleting them, and a chime when a long transfer finishes (or a different sound if something failed); they follow macOS's "Play user interface sound effects" setting and can be turned off in Settings > General
@@ -157,7 +158,7 @@ Window > Show Drop Stack (also a toolbar button) opens a small shelf that floats
 
 ### Finder tags and Select Matching
 
-- Tags show as colors on file icons; Tags… edits them, and a tag in the sidebar finds everything with it.
+- Tags show as colors on file icons, and tagged folders take their tag's color, as in Finder; folders customized in Finder (macOS 26 and later) show their symbol or emoji. Tags… edits them, and a tag in the sidebar finds everything with it.
 - Select Matching (Option-Command-A) selects items by name pattern, and can add them to the selection or remove them from it.
 
 ### Shortcuts and forkz:// links
@@ -273,7 +274,7 @@ Settings > Tools holds your own commands, run by zsh in the pane's folder on the
 | Key | Action |
 | --- | --- |
 | Tab | Switch to the other pane |
-| Return or F2 | Rename in the list (several items: Rename Multiple Items); clicking the name of the selected item again does the same |
+| Return or F2 | Rename in the list (several items: Rename Multiple Items); clicking the name of the selected item again does the same. While renaming, Tab and Shift-Tab rename and go on to the next or previous item |
 | Command-Down or Command-O | Open |
 | Option-Command-O | Open with the default app (right-click > Open With for another) |
 | Command-Up, or open ".." | Enclosing folder |

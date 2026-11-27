@@ -38,6 +38,49 @@ pub fn tag_color(color: u8) -> Option<Retained<objc2_app_kit::NSColor>> {
     })
 }
 
+/// A folder's icon in its tag's color, as Finder tints tagged folders
+/// ("Tint folder based on tags"): `colors` are its tags' colors, and the
+/// last one counts. Folders with a picture of their own (a pasted icon)
+/// keep it.
+pub fn tinted_folder(icon: &NSImage, path: &Path, colors: &[u8]) -> Retained<NSImage> {
+    let Some(color) = colors.iter().rev().find_map(|c| tag_color(*c)) else { return icon.retain() };
+    if has_custom_icon(path) {
+        return icon.retain();
+    }
+    let base = icon.retain();
+    let size = icon.size();
+    let draw = block2::RcBlock::new(move |rect: objc2_foundation::NSRect| -> objc2::runtime::Bool {
+        use objc2_app_kit::NSCompositingOperation;
+        base.drawInRect(rect);
+        // The color's hue on the folder's shading, then only where the
+        // folder is.
+        color.setFill();
+        objc2_app_kit::NSRectFillUsingOperation(rect, NSCompositingOperation::Color);
+        base.drawInRect_fromRect_operation_fraction(
+            rect,
+            objc2_foundation::NSRect::ZERO,
+            NSCompositingOperation::DestinationIn,
+            1.0,
+        );
+        objc2::runtime::Bool::YES
+    });
+    NSImage::imageWithSize_flipped_drawingHandler(size, false, &draw)
+}
+
+/// Whether a folder has a pasted icon of its own (Finder's "has custom
+/// icon" flag).
+fn has_custom_icon(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(name) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
+    let mut info = [0u8; 32];
+    // SAFETY: reads at most 32 bytes into the buffer, for a valid C string.
+    let read = unsafe {
+        libc::getxattr(name.as_ptr(), c"com.apple.FinderInfo".as_ptr(), info.as_mut_ptr().cast(), info.len(), 0, 0)
+    };
+    // Finder flags (big-endian) at bytes 8 and 9; kHasCustomIcon is 0x0400.
+    read >= 10 && u16::from_be_bytes([info[8], info[9]]) & 0x0400 != 0
+}
+
 /// An icon with dots in its tags' colors at the bottom right (up to three).
 pub fn icon_with_tags(icon: &NSImage, colors: &[u8]) -> Retained<NSImage> {
     let colors: Vec<Retained<objc2_app_kit::NSColor>> = colors.iter().filter_map(|c| tag_color(*c)).take(3).collect();

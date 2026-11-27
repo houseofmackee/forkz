@@ -134,6 +134,11 @@ pub enum Command {
     SplitFile,
     JoinFiles,
     CopyToSeveral,
+    CloseOtherTabs,
+    CloseTabsToLeft,
+    CloseTabsToRight,
+    NewFolderInOther,
+    ShowItemInfo,
 }
 
 impl Command {
@@ -337,6 +342,11 @@ impl Command {
         Command::SplitFile,
         Command::JoinFiles,
         Command::CopyToSeveral,
+        Command::CloseOtherTabs,
+        Command::CloseTabsToLeft,
+        Command::CloseTabsToRight,
+        Command::NewFolderInOther,
+        Command::ShowItemInfo,
     ];
 
     pub fn tag(self) -> isize {
@@ -494,6 +504,11 @@ impl Command {
             Command::SplitFile => "Split File\u{2026}",
             Command::JoinFiles => "Join Files",
             Command::CopyToSeveral => "Copy to Several Folders\u{2026}",
+            Command::CloseOtherTabs => "Close Other Tabs",
+            Command::CloseTabsToLeft => "Close Tabs to the Left",
+            Command::CloseTabsToRight => "Close Tabs to the Right",
+            Command::NewFolderInOther => "New Folder in Other Pane",
+            Command::ShowItemInfo => "Show Item Info",
         }
     }
 
@@ -635,7 +650,13 @@ impl Command {
             | Command::MakePdf
             | Command::SplitFile
             | Command::JoinFiles
-            | Command::CopyToSeveral => ("", cmd),
+            | Command::CopyToSeveral
+            | Command::CloseTabsToLeft
+            | Command::CloseTabsToRight
+            | Command::NewFolderInOther
+            | Command::ShowItemInfo => ("", cmd),
+            // Option-Command-W, as in Safari.
+            Command::CloseOtherTabs => ("w", cmd | NSEventModifierFlags::Option),
             // F3, as in Total Commander (also handled in the lists).
             Command::ViewFile => ("\u{f706}", NSEventModifierFlags::empty()),
         }
@@ -670,6 +691,8 @@ impl Command {
             SplitFile => "scissors",
             JoinFiles => "rectangle.compress.vertical",
             CopyToSeveral => "doc.on.doc",
+            CloseOtherTabs | CloseTabsToLeft | CloseTabsToRight => "xmark.square",
+            NewFolderInOther => "folder.badge.plus",
             OpenInNewTab | NewTab => "plus.rectangle.on.rectangle",
             QuickLook => "eye",
             ViewFile => "doc.text.magnifyingglass",

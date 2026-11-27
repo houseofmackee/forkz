@@ -63,6 +63,8 @@ pub struct Settings {
     pub folder_views: Vec<FolderView>,
     /// The terminal pane goes where the active pane goes.
     pub terminal_follows: bool,
+    /// View > Show Item Info: a line under names in the icon view.
+    pub show_item_info: bool,
 }
 
 /// A shell command run on the selection (Settings > Tools).
@@ -498,6 +500,7 @@ impl Default for Settings {
             drop_stack: Vec::new(),
             folder_views: Vec::new(),
             terminal_follows: true,
+            show_item_info: false,
         }
     }
 }
