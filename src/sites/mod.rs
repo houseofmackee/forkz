@@ -1,6 +1,7 @@
 //! Saved servers ("sites"), in `~/Library/Application Support/forkz/sites.toml`.
 //! Passwords are not in that file: they are in the login Keychain.
 
+pub mod connect;
 pub mod filezilla;
 pub mod import;
 

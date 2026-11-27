@@ -3680,7 +3680,8 @@ pub fn open_synclet(index: usize) {
         for site in &missing {
             let password = crate::sites::keychain::password(&site.id);
             let prompter = UiPrompter { offer_save: true, save: std::sync::Mutex::new(false) };
-            let result = open_connection(site, password, timeout, extra_keys.clone(), &prompter).map(|(fs, _)| fs);
+            let result =
+                crate::sites::connect::open(site, password, timeout, extra_keys.clone(), &prompter).map(|(fs, _)| fs);
             connected.push((site.id.clone(), result));
         }
         DispatchQueue::main().exec_async(move || {
@@ -5199,9 +5200,7 @@ impl vfs::sftp::Prompter for UiPrompter {
 
 /// Shows the code of an AWS sign-in in the browser (from the connecting
 /// thread; the sign-in goes on while it shows).
-struct UiSignIn;
-
-impl vfs::aws::SignIn for UiSignIn {
+impl vfs::aws::SignIn for UiPrompter {
     fn show_code(&self, code: &str, _url: &str) {
         let code = code.to_string();
         DispatchQueue::main().exec_async(move || {
@@ -5210,6 +5209,12 @@ impl vfs::aws::SignIn for UiSignIn {
                 format!("Check that the page shows the code {code}, then allow forkz access. forkz connects once you have signed in."),
             );
         });
+    }
+}
+
+impl crate::sites::connect::Ask for UiPrompter {
+    fn for_renewal(&self) -> Box<dyn crate::sites::connect::Ask> {
+        Box::new(UiPrompter { offer_save: false, save: std::sync::Mutex::new(false) })
     }
 }
 
@@ -5237,7 +5242,7 @@ fn connect_site(site: crate::sites::Site, pane_index: usize, password: Option<St
             if saved_site { password.or_else(|| crate::sites::keychain::password(&site.id)) } else { password };
         let typed = password.is_some();
         let prompter = UiPrompter { offer_save: saved_site, save: std::sync::Mutex::new(false) };
-        let result = open_connection(&site, password, timeout, extra_keys, &prompter);
+        let result = crate::sites::connect::open(&site, password, timeout, extra_keys, &prompter);
         let save_typed = *prompter.save.lock().unwrap_or_else(|e| e.into_inner());
         DispatchQueue::main().exec_async(move || {
             let Some(app) = self::app() else { return };
@@ -5273,246 +5278,10 @@ fn connect_site(site: crate::sites::Site, pane_index: usize, password: Option<St
     });
 }
 
-/// What to mount for a share site: the server and the share (the first
-/// part of the remote folder).
-fn share_params(site: &crate::sites::Site, password: Option<String>) -> vfs::mount::ShareParams {
-    let scheme = site.protocol.scheme();
-    let share = site.remote_dir.clone().unwrap_or_default();
-    // NFS exports are paths; SMB and AFP mount the share, not a folder in it.
-    let share =
-        if scheme == "nfs" { share } else { share.trim_matches('/').split('/').next().unwrap_or("").to_string() };
-    vfs::mount::ShareParams {
-        scheme,
-        host: site.host.clone(),
-        port: (site.port != site.protocol.default_port()).then_some(site.port),
-        user: site.user.clone(),
-        password,
-        share,
-    }
-}
-
-/// Connects to a site with its protocol (off the main thread). Returns the
-/// file system and the password or key that worked.
-fn open_connection(
-    site: &crate::sites::Site,
-    password: Option<String>,
-    timeout: Duration,
-    extra_keys: Vec<PathBuf>,
-    prompter: &UiPrompter,
-) -> std::io::Result<(FsRef, Option<String>)> {
-    use crate::sites::Protocol;
-    let user = if site.user.is_empty() && !site.protocol.is_object_storage() {
-        std::env::var("USER").unwrap_or_default()
-    } else {
-        site.user.clone()
-    };
-    match site.protocol {
-        Protocol::Sftp => {
-            let ssh = vfs::ssh_config::SshConfig::load().resolve(&site.host);
-            let params = site.params(&ssh, password, timeout, extra_keys);
-            tracing::debug!("connecting with {params:?} (from ~/.ssh/config: {ssh:?})");
-            let fs = vfs::sftp::connect(params, prompter)?;
-            let secret = fs.secret().map(str::to_string);
-            Ok((fs, secret))
-        }
-        Protocol::Ftp | Protocol::Ftps | Protocol::FtpPlain => {
-            let security = match site.protocol {
-                Protocol::Ftps => vfs::ftp::Security::Tls,
-                Protocol::FtpPlain => vfs::ftp::Security::Plain,
-                _ => vfs::ftp::Security::TlsIfAvailable,
-            };
-            // FTP servers expect "anonymous" when there is no account.
-            let user = if site.user.is_empty() { "anonymous".to_string() } else { user };
-            let params =
-                vfs::ftp::FtpParams { host: site.host.clone(), port: site.port, user, password, security, timeout };
-            let fs = vfs::ftp::connect(params, prompter)?;
-            let secret = fs.secret().map(str::to_string);
-            Ok((fs, secret))
-        }
-        Protocol::Webdav | Protocol::Webdavs => {
-            let root = site.remote_dir.clone().unwrap_or_else(|| "/".to_string());
-            let params = vfs::webdav::DavParams {
-                host: site.host.clone(),
-                port: site.port,
-                secure: site.protocol == Protocol::Webdavs,
-                user: site.user.clone(),
-                password,
-                root,
-                timeout,
-            };
-            let fs = vfs::webdav::connect(params, prompter)?;
-            let secret = fs.secret().map(str::to_string);
-            Ok((fs, secret))
-        }
-        Protocol::Smb | Protocol::Afp | Protocol::Nfs => {
-            let params = share_params(site, password);
-            let mountpoint = vfs::mount::mount(&params)?;
-            let fs: FsRef = vfs::mount::MountFs::new(mountpoint, &params);
-            Ok((fs, params.password))
-        }
-        Protocol::S3 | Protocol::S3Http if site.aws_profile.is_some() => {
-            let profile = site.aws_profile.clone().unwrap_or_default();
-            let bucket = first_folder(site.remote_dir.as_deref());
-            let keys = vfs::aws::credentials(&profile, prompter, &UiSignIn)?;
-            // A renewal may ask again (an MFA code, a sign-in), from the
-            // thread that needs the keys.
-            let name = profile.clone();
-            let renew: vfs::s3::Renew = Box::new(move || {
-                let prompter = UiPrompter { offer_save: false, save: std::sync::Mutex::new(false) };
-                vfs::aws::credentials(&name, &prompter, &UiSignIn)
-            });
-            let host = if site.host.trim().is_empty() { "s3.amazonaws.com".to_string() } else { site.host.clone() };
-            // The site's region, else the bucket's (on AWS), else the
-            // profile's.
-            let set = site.region.as_deref().map(str::trim).filter(|r| !r.is_empty()).map(str::to_string);
-            let aws = host.eq_ignore_ascii_case("s3.amazonaws.com");
-            let found = if set.is_none() && aws {
-                bucket.as_deref().and_then(|b| vfs::s3::bucket_region(b, timeout))
-            } else {
-                None
-            };
-            let region = set.or(found).or_else(|| vfs::aws::region(&profile)).unwrap_or_else(|| site.s3_region());
-            let host = if aws { format!("s3.{region}.amazonaws.com") } else { host };
-            let params = vfs::s3::S3Params {
-                host,
-                port: site.port,
-                secure: site.protocol == Protocol::S3,
-                access_key: profile,
-                secret_key: None,
-                region,
-                timeout,
-                check: bucket,
-                session: Some(vfs::s3::Session::new(keys, renew)),
-            };
-            let fs: FsRef = vfs::s3::connect(params, prompter)?;
-            Ok((fs, None))
-        }
-        Protocol::S3 | Protocol::S3Http => {
-            let bucket = first_folder(site.remote_dir.as_deref());
-            // AWS's general server with no region: the bucket's region, and
-            // its server there (requests are signed for a region).
-            let general = site.host.eq_ignore_ascii_case("s3.amazonaws.com")
-                && site.region.as_deref().is_none_or(|r| r.trim().is_empty());
-            let found = bucket.as_deref().filter(|_| general).and_then(|b| vfs::s3::bucket_region(b, timeout));
-            let (host, region) = match found {
-                Some(region) => (format!("s3.{region}.amazonaws.com"), region),
-                None => (site.host.clone(), site.s3_region()),
-            };
-            let params = vfs::s3::S3Params {
-                host,
-                port: site.port,
-                secure: site.protocol == Protocol::S3,
-                access_key: site.user.clone(),
-                secret_key: password,
-                region,
-                timeout,
-                check: bucket,
-                session: None,
-            };
-            let fs = vfs::s3::connect(params, prompter)?;
-            let secret = fs.secret().map(str::to_string);
-            Ok((fs, secret))
-        }
-        // Google's S3-compatible API, with HMAC keys (region "auto").
-        Protocol::Gcs => {
-            let host =
-                if site.host.trim().is_empty() { "storage.googleapis.com".to_string() } else { site.host.clone() };
-            let params = vfs::s3::S3Params {
-                host,
-                port: site.port,
-                secure: true,
-                access_key: site.user.clone(),
-                secret_key: password,
-                region: site.region.clone().filter(|r| !r.trim().is_empty()).unwrap_or_else(|| "auto".into()),
-                timeout,
-                check: first_folder(site.remote_dir.as_deref()),
-                session: None,
-            };
-            let fs = vfs::s3::connect(params, prompter)?;
-            let secret = fs.secret().map(str::to_string);
-            Ok((fs, secret))
-        }
-        Protocol::Dropbox => {
-            let saved = crate::sites::SiteStore::load().get(&site.id).is_some();
-            let id = site.id.clone();
-            let save_token: Option<vfs::dropbox::SaveToken> = saved.then(|| {
-                std::sync::Arc::new(move |token: &str| crate::sites::keychain::save_password(&id, token)) as _
-            });
-            let params = vfs::dropbox::DropboxParams {
-                refresh_token: password,
-                save_token,
-                timeout,
-                service: Default::default(),
-                browser: true,
-            };
-            let fs = vfs::dropbox::connect(params)?;
-            Ok((fs, None))
-        }
-        Protocol::GoogleDrive => {
-            let saved = crate::sites::SiteStore::load().get(&site.id).is_some();
-            let id = site.id.clone();
-            let save_token: Option<vfs::gdrive::SaveToken> = saved.then(|| {
-                std::sync::Arc::new(move |token: &str| crate::sites::keychain::save_password(&id, token)) as _
-            });
-            let params = vfs::gdrive::DriveParams {
-                refresh_token: password,
-                save_token,
-                timeout,
-                service: Default::default(),
-                browser: true,
-            };
-            let fs = vfs::gdrive::connect(params)?;
-            Ok((fs, None))
-        }
-        Protocol::Box => {
-            // Box replaces the sign-in each time it is renewed: a saved
-            // site keeps the latest one in the Keychain.
-            let saved = crate::sites::SiteStore::load().get(&site.id).is_some();
-            let id = site.id.clone();
-            let save_token: Option<vfs::boxcom::SaveToken> = saved.then(|| {
-                std::sync::Arc::new(move |token: &str| crate::sites::keychain::save_password(&id, token)) as _
-            });
-            let params = vfs::boxcom::BoxParams {
-                refresh_token: password,
-                save_token,
-                timeout,
-                service: Default::default(),
-                browser: true,
-            };
-            let fs = vfs::boxcom::connect(params)?;
-            Ok((fs, None))
-        }
-        Protocol::Azure => {
-            let host = Protocol::Azure
-                .default_host(&site.user)
-                .filter(|_| site.host.trim().is_empty())
-                .unwrap_or_else(|| site.host.clone());
-            // Azurite (the emulator) answers over plain HTTP.
-            let local = host == "localhost" || host.parse::<std::net::IpAddr>().is_ok();
-            let params = vfs::azure::AzureParams {
-                host,
-                port: site.port,
-                secure: !local,
-                account: site.user.clone(),
-                key: password,
-                timeout,
-            };
-            let fs = vfs::azure::connect(params, prompter)?;
-            let key = fs.key().map(str::to_string);
-            Ok((fs, key))
-        }
-    }
-}
-
-/// The first folder of a remote path ("/bucket/folder" gives "bucket").
-fn first_folder(path: Option<&str>) -> Option<String> {
-    path?.trim_matches('/').split('/').next().filter(|b| !b.is_empty()).map(str::to_string)
-}
-
 fn show_site(site: &crate::sites::Site, fs: FsRef, pane_index: usize) {
     let Some(app) = app() else { return };
     // For WebDAV the remote folder is the server's WebDAV root (see
-    // open_connection), so the site opens at the top of it.
+    // sites::connect::open), so the site opens at the top of it.
     let webdav = matches!(site.protocol, crate::sites::Protocol::Webdav | crate::sites::Protocol::Webdavs);
     let folder = if site.protocol.is_share() && site.protocol != crate::sites::Protocol::Nfs {
         // The share is mounted; the rest of the remote folder is inside it.
@@ -5656,7 +5425,7 @@ fn open_target(target: &str) {
     let profiles = if on_aws { vfs::aws::profiles() } else { Vec::new() };
     let mut profile = profiles.iter().find(|p| **p == user).cloned();
     if profile.is_none() && on_aws && user.is_empty() && !profiles.is_empty() {
-        let bucket = first_folder(path.as_deref()).unwrap_or_default();
+        let bucket = crate::sites::connect::first_folder(path.as_deref()).unwrap_or_default();
         let mut choices: Vec<String> = profiles.iter().map(|p| format!("AWS profile \u{201c}{p}\u{201d}")).collect();
         choices.push("Access keys (typed next)".into());
         let names: Vec<&str> = choices.iter().map(String::as_str).collect();
@@ -5675,7 +5444,7 @@ fn open_target(target: &str) {
     let user = if profile.is_some() {
         String::new()
     } else if user.is_empty() && on_aws {
-        let bucket = first_folder(path.as_deref()).unwrap_or_default();
+        let bucket = crate::sites::connect::first_folder(path.as_deref()).unwrap_or_default();
         match dialogs::prompt(
             &format!("Access key ID for \u{201c}{bucket}\u{201d}"),
             "The access key ID of your AWS keys (it starts with AKIA). The secret key is asked next.",
@@ -6066,9 +5835,9 @@ mod tests {
         assert_eq!(bucket("localhost", None), None);
         assert_eq!(bucket("127.0.0.1", None), None);
         assert_eq!(s3_bucket_address(Protocol::Webdavs, "nas", None), None);
-        assert_eq!(first_folder(Some("/mybucket/pendo")), Some("mybucket".into()));
-        assert_eq!(first_folder(Some("/")), None);
-        assert_eq!(first_folder(None), None);
+        assert_eq!(crate::sites::connect::first_folder(Some("/mybucket/pendo")), Some("mybucket".into()));
+        assert_eq!(crate::sites::connect::first_folder(Some("/")), None);
+        assert_eq!(crate::sites::connect::first_folder(None), None);
     }
 
     #[test]

@@ -235,6 +235,23 @@ Sites forkz already has are left as they are. Transmit's exports are in a privat
 
 `forkz .` opens the current folder in forkz, and `forkz ~/Projects` or `forkz sftp://me@host/var/www` other places; a running forkz shows them in its window. Installed with Homebrew, the `forkz` command is there already; otherwise choose forkz > Install Command Line Tool (it asks for an administrator's password, and puts the command in /usr/local/bin). Without the command, `open -a forkz .` works too.
 
+### Copying and syncing without a window
+
+`forkz copy`, `forkz sync`, and `forkz synclet` move files to and from servers with no window, for scripts and quick uploads. They use your saved sites, their passwords in the Keychain, and the server keys forkz trusts, as the app does.
+
+```sh
+forkz copy report.pdf notes.txt "Web Server:/var/www/files"   # files and folders into a folder
+forkz sync --dry-run site/ mmg-staging.com:app/forkz          # what would change
+forkz sync --hidden --delete site/ mmg-staging.com:app/forkz  # make the server's folder like site/
+forkz synclet Website                                         # a saved synclet, with its options
+```
+
+- **Places:** a path on the Mac, `SITE:PATH` for a saved site (by its name; a relative path starts in the site's remote folder), or an address such as `sftp://me@host/var/www`. An address uses the saved site for that server if there is one.
+- **copy** copies into the destination folder, making it if needed. Files already there are replaced, and folders are merged.
+- **sync** copies what is new or changed. `--delete` also deletes what only the destination has, `--hidden` includes hidden items such as `.htaccess`, `--exclude 'PATTERNS'` leaves out names (separated by `;`; the default is `.DS_Store`), and `--dry-run` lists the changes without making them.
+- **Passwords:** from the Keychain for saved sites. Otherwise forkz asks in the terminal, or reads the password from standard input with `--password-stdin`. A server key forkz has not trusted yet is asked about in the terminal; with no terminal, the connection stops.
+- The exit status is 0 when everything worked, 1 when something failed, and 2 for a mistake in the command. `forkz --help` lists everything.
+
 ## Raycast
 
 The [Raycast](https://www.raycast.com) extension in `raycast/` connects to saved sites, opens recent folders and favorites, runs synclets, opens smart folders and workspaces, opens Finder's folder in forkz, and searches files, all through `forkz://` links. Its README is its Store page.

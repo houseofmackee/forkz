@@ -7,10 +7,13 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-27
+
 ### Added
 
 - A Raycast extension (in `raycast/`, for the Raycast Store): connect to saved sites, open recent folders and favorites, run synclets, open smart folders and workspaces, open Finder's folder in forkz, and search files.
 - A terms of use page with the home page and privacy policy (`site/forkz`).
+- Copying and syncing without a window: `forkz copy`, `forkz sync`, and `forkz synclet` upload and download with your saved sites from Terminal or a script.
 
 ## [0.24.2] - 2026-11-27
 
@@ -528,7 +531,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.24.2...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.25.0...HEAD
+[0.25.0]: https://github.com/houseofmackee/forkz/compare/v0.24.2...v0.25.0
 [0.24.2]: https://github.com/houseofmackee/forkz/compare/v0.24.1...v0.24.2
 [0.24.1]: https://github.com/houseofmackee/forkz/compare/v0.24.0...v0.24.1
 [0.24.0]: https://github.com/houseofmackee/forkz/compare/v0.23.1...v0.24.0

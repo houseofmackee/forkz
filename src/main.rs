@@ -11,17 +11,11 @@ Usage:
                                        box, smb, afp, and nfs addresses
   forkz 'forkz://open?path=...'        Follow a forkz:// link (see the README)
   forkz --version                      Print the version
-  forkz --help       Print this help
+  forkz --help                         Print this help
+
 ";
 
 fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("FORKZ_LOG").unwrap_or_else(|_| "forkz=info".into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
     // Launch Services may pass `-psn_*`, and Cocoa reads `-Name value`
     // defaults (like `-AppleLanguages "(de)"`); neither is ours.
     let mut args = Vec::new();
@@ -36,6 +30,19 @@ fn main() -> ExitCode {
         }
         args.push(arg);
     }
+    // Commands without a window print what they do themselves. (A folder
+    // called "copy" on its own still opens.)
+    let command = args.first().is_some_and(|first| {
+        forkz::cli::COMMANDS.contains(&first.as_str()) && (args.len() > 1 || !std::path::Path::new(first).is_dir())
+    });
+    let level = if command { "forkz=warn" } else { "forkz=info" };
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("FORKZ_LOG").unwrap_or_else(|_| level.into()))
+        .with_writer(std::io::stderr)
+        .init();
+    if command {
+        return ExitCode::from(forkz::cli::run(&args));
+    }
     match args.first().map(String::as_str) {
         None => match forkz::ui::run(None) {
             Ok(()) => ExitCode::SUCCESS,
@@ -49,7 +56,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("--help" | "-h") => {
-            print!("{USAGE}");
+            print!("{USAGE}{}", forkz::cli::USAGE);
             ExitCode::SUCCESS
         }
         Some(target)
@@ -73,7 +80,7 @@ fn main() -> ExitCode {
             }
         }
         Some(other) => {
-            eprintln!("forkz: unknown argument \"{other}\"\n\n{USAGE}");
+            eprintln!("forkz: unknown argument \"{other}\"\n\n{USAGE}{}", forkz::cli::USAGE);
             ExitCode::from(2)
         }
     }
