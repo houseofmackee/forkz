@@ -48,6 +48,7 @@ struct Controls {
     app_leftovers: Retained<NSButton>,
     sound_effects: Retained<NSButton>,
     transfer_sounds: Retained<NSButton>,
+    menu_bar_icon: Retained<NSButton>,
     drag_moves: Retained<NSButton>,
     terminal: Retained<NSPopUpButton>,
     terminals: Vec<&'static str>,
@@ -354,6 +355,7 @@ impl SettingsWindow {
             ),
             sound_effects: checkbox("Play sounds when moving items to the Trash and deleting them", self, mtm),
             transfer_sounds: checkbox("Play a sound when a long transfer finishes", self, mtm),
+            menu_bar_icon: checkbox("Show forkz in the menu bar (synclets, sites, and transfers)", self, mtm),
             drag_moves: checkbox("Always move items dragged between panes", self, mtm),
             terminal: popup(&terminal_names, self, mtm),
             terminals: terminals.iter().map(|t| t.0).collect(),
@@ -464,6 +466,7 @@ impl SettingsWindow {
                 (label("Apps:", mtm), view(&*controls.app_leftovers)),
                 (label("Sounds:", mtm), view(&*controls.sound_effects)),
                 (empty(mtm), view(&*controls.transfer_sounds)),
+                (label("Menu bar:", mtm), view(&*controls.menu_bar_icon)),
                 (label("Dragging:", mtm), view(&*controls.drag_moves)),
                 (
                     empty(mtm),
@@ -792,6 +795,7 @@ impl SettingsWindow {
         set(&c.app_leftovers, settings.general.app_leftovers);
         set(&c.sound_effects, settings.general.sound_effects);
         set(&c.transfer_sounds, settings.general.transfer_sounds);
+        set(&c.menu_bar_icon, settings.general.menu_bar_icon);
         set(&c.drag_moves, settings.general.drag_moves);
         let terminal = c.terminals.iter().position(|k| *k == settings.general.terminal).unwrap_or(0);
         c.terminal.selectItemAtIndex(terminal as isize);
@@ -855,6 +859,7 @@ impl SettingsWindow {
             s.general.app_leftovers = on(&c.app_leftovers);
             s.general.sound_effects = on(&c.sound_effects);
             s.general.transfer_sounds = on(&c.transfer_sounds);
+            s.general.menu_bar_icon = on(&c.menu_bar_icon);
             s.general.drag_moves = on(&c.drag_moves);
             if let Some(key) = c.terminals.get(index(&c.terminal)) {
                 s.general.terminal = key.to_string();

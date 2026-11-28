@@ -34,6 +34,7 @@ mod sidebar;
 mod site_form;
 mod site_transfer;
 mod sounds;
+mod status_item;
 mod sync_window;
 mod terminal;
 mod theme_editor;
@@ -706,6 +707,8 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     apply_schedules(&app, false);
     watch_synclet_runs(None, true);
     APP.with(|a| a.set(app.clone())).map_err(|_| anyhow::anyhow!("the app is already running"))?;
+    // forkz in the menu bar (Settings > General).
+    status_item::update();
     // Folders that keep their own view show it from the start.
     apply_folder_view(0);
     apply_folder_view(1);
@@ -1786,6 +1789,7 @@ pub fn update_settings(change: impl FnOnce(&mut Settings)) {
     if synclets_changed {
         apply_schedules(&app, true);
     }
+    status_item::update();
     if filters_changed {
         apply_filters(&app);
     }
@@ -1864,6 +1868,7 @@ fn watch_synclet_runs(seen: Option<std::time::SystemTime>, first: bool) {
     let changed = file.and_then(|f| std::fs::metadata(f).ok()).and_then(|m| m.modified().ok());
     if !first && changed != seen {
         reload_sidebar();
+        status_item::update();
     }
     let when = DispatchTime::try_from(Duration::from_secs(15)).unwrap_or(DispatchTime::NOW);
     let _ = DispatchQueue::main().after(when, move || watch_synclet_runs(changed, false));
@@ -3847,6 +3852,10 @@ pub fn schedule_synclet(index: usize) {
             found.schedule = schedule;
         }
     });
+    // To say when a scheduled run fails (macOS asks once).
+    if schedule.is_some() {
+        crate::alerts::ask_permission();
+    }
     reload_sidebar();
 }
 

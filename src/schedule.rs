@@ -212,6 +212,23 @@ pub fn apply(synclets: &[Synclet], program: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Whether this process is a scheduled synclet's job (launchd names the
+/// job it runs).
+pub fn is_scheduled_run() -> bool {
+    std::env::var("XPC_SERVICE_NAME").is_ok_and(|name| name.starts_with(PREFIX))
+}
+
+/// What to tell the user after a scheduled run, given how the run before
+/// went: that it stopped working, or works again (not every failure: a
+/// synclet that fails every 15 minutes says so once).
+pub fn news(previous: Option<bool>, ok: bool) -> Option<&'static str> {
+    match (previous, ok) {
+        (Some(true) | None, false) => Some("failed"),
+        (Some(false), true) => Some("recovered"),
+        _ => None,
+    }
+}
+
 /// How a synclet's last run went (scheduled or from the command line).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Run {
@@ -274,6 +291,16 @@ mod tests {
         assert_ne!(a, label("My Website  Blog"), "names that differ stay apart");
         assert!(label("Fotos ä").chars().all(|c| c.is_ascii_alphanumeric() || ".-".contains(c)));
         assert!(label("ääää").starts_with(PREFIX));
+    }
+
+    #[test]
+    fn tells_of_changes_only() {
+        assert_eq!(news(None, false), Some("failed"));
+        assert_eq!(news(Some(true), false), Some("failed"));
+        assert_eq!(news(Some(false), false), None, "still failing: said once");
+        assert_eq!(news(Some(false), true), Some("recovered"));
+        assert_eq!(news(Some(true), true), None);
+        assert_eq!(news(None, true), None);
     }
 
     #[test]

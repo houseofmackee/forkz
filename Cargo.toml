@@ -1,6 +1,6 @@
 [package]
 name = "forkz"
-version = "0.29.0"
+version = "0.30.0"
 edition = "2024"
 description = "A native dual-pane file manager for macOS"
 license = "MIT OR Apache-2.0"
@@ -52,6 +52,7 @@ alacritty_terminal = "0.26.0"
 objc2-quick-look-thumbnailing = "0.3"
 objc2-image-io = "0.3"
 objc2-pdf-kit = "0.3"
+objc2-user-notifications = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

@@ -329,7 +329,20 @@ impl Cli {
             }
         };
         if !dry_run {
+            let previous = crate::schedule::runs().remove(&synclet.name).map(|run| run.ok);
             crate::schedule::record(&synclet.name, ok, &summary);
+            if crate::schedule::is_scheduled_run() {
+                let id = format!("synclet:{}", synclet.name);
+                match crate::schedule::news(previous, ok) {
+                    Some("failed") => {
+                        crate::alerts::post(&id, &format!("\u{201c}{}\u{201d} did not sync", synclet.name), &summary)
+                    }
+                    Some(_) => {
+                        crate::alerts::post(&id, &format!("\u{201c}{}\u{201d} syncs again", synclet.name), &summary)
+                    }
+                    None => {}
+                }
+            }
         }
         ok
     }

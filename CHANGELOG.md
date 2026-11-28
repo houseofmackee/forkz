@@ -7,6 +7,13 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-11-28
+
+### Added
+
+- forkz in the menu bar: the synclets with their schedules and last runs (Run Now, Open in forkz, Show Log), the saved sites to connect to, and the transfers (Pause All, Stop All). The icon warns when a scheduled synclet's last run failed. Settings > General turns it off.
+- Notifications when a scheduled synclet stops working, and when it works again (once each, not at every failed run).
+
 ## [0.29.0] - 2026-11-28
 
 ### Added
@@ -567,7 +574,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/houseofmackee/forkz/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/houseofmackee/forkz/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/houseofmackee/forkz/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/houseofmackee/forkz/compare/v0.26.0...v0.27.0

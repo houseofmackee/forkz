@@ -244,6 +244,8 @@ pub struct GeneralSettings {
     /// Return, and a click on the selected item's name, rename it in the
     /// list (else Return asks in a dialog).
     pub rename_in_place: bool,
+    /// forkz in the menu bar: synclets, sites, and transfers.
+    pub menu_bar_icon: bool,
 }
 
 impl Default for GeneralSettings {
@@ -258,6 +260,7 @@ impl Default for GeneralSettings {
             drag_moves: false,
             remember_folder_views: false,
             rename_in_place: true,
+            menu_bar_icon: true,
         }
     }
 }

@@ -500,6 +500,24 @@ impl Activity {
     }
 
     /// Ids of the rows with a job (transfers and other file work).
+    /// Jobs running and waiting, and whether all are paused (for the
+    /// menu bar's menu).
+    pub fn job_counts(&self) -> (usize, usize, bool) {
+        let ids = self.job_ids();
+        let waiting = ids.iter().filter(|id| self.is_waiting(**id)).count();
+        (ids.len() - waiting, waiting, self.all_paused())
+    }
+
+    /// Pause All or Resume All, from elsewhere (the menu bar's menu).
+    pub fn set_all_paused(&self, paused: bool) {
+        self.pause_all(paused);
+    }
+
+    /// Stop All, from elsewhere (the menu bar's menu).
+    pub fn stop_everything(&self) {
+        self.stop_all();
+    }
+
     fn job_ids(&self) -> Vec<isize> {
         self.ivars().rows.borrow().iter().filter(|r| r.pause.is_some()).map(|r| r.id).collect()
     }

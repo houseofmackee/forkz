@@ -93,7 +93,11 @@ Sync Folders (Shift-Command-S) compares the two panes' folders, on the Mac or on
 
 A sync can be saved as a synclet in the sidebar: clicking it connects to its sites if needed and compares right away. Sync Browsing (Shift-Command-B) keeps the other pane in the matching folder while you browse.
 
-Synclets can also run by themselves: right-click one and choose Schedule to run it every 15 minutes, every hour, every 6 hours, every day at a time, or a few seconds after files change in its folder on the Mac. A scheduled synclet runs in the background through macOS's launchd, even when forkz is closed (while you are logged in), using the saved sites and their Keychain passwords. Its icon in the sidebar shows a clock, or a warning if the last run failed; point at it to see when it last ran and what it did. Each run's output goes to `~/Library/Logs/forkz`. A synclet with a folder in Desktop, Documents, or Downloads may need macOS's permission for forkz to reach that folder the first time it runs.
+Synclets can also run by themselves: right-click one and choose Schedule to run it every 15 minutes, every hour, every 6 hours, every day at a time, or a few seconds after files change in its folder on the Mac. A scheduled synclet runs in the background through macOS's launchd, even when forkz is closed (while you are logged in), using the saved sites and their Keychain passwords. Its icon in the sidebar shows a clock, or a warning if the last run failed; point at it to see when it last ran and what it did. Each run's output goes to `~/Library/Logs/forkz`. A synclet with a folder in Desktop, Documents, or Downloads may need macOS's permission for forkz to reach that folder the first time it runs. When a scheduled synclet stops working, forkz posts a notification (once, not at every failed run), and another when it works again; macOS asks the first time you schedule one whether forkz may post notifications.
+
+### Menu bar
+
+forkz also sits in the menu bar (Settings > General turns it off, as does Hide Menu Bar Icon in its menu). Its menu lists the synclets, each with its schedule and how its last run went, and Run Now (in the background), Open in forkz, and Show Log; the saved sites, to connect to one; and the running transfers, with Pause All (or Resume All) and Stop All. The icon shows a warning when a scheduled synclet's last run failed, and turns while one runs from the menu.
 
 ### Transfer queue
 
