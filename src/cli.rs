@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::fs::ops::{self, Answer, CancelToken, Conflict, ErrorAnswer, Job, JobKind, Observer, Progress, Resolution};
 use crate::fs::sync::{self, Action, Direction};
-use crate::settings::{Settings, WorkspaceTab};
+use crate::settings::{Settings, Synclet, WorkspaceTab};
 use crate::sites::{Protocol, Site, SiteStore};
 use crate::vfs::known_hosts::Status;
 use crate::vfs::{self, FsRef};
@@ -31,6 +31,9 @@ Without a window:
                                        (the default is .DS_Store)
       --dry-run                        show what would change, change nothing
   forkz synclet NAME [--dry-run]       Run a saved synclet
+      --watch                          keep running: sync again a few
+                                       seconds after files change in its
+                                       folder on the Mac
 
   A place is a path on the Mac, SITE:PATH for a saved site (by its name, as
   in mmg-staging.com:/var/www), or an address (sftp://user@host/path). A
@@ -89,6 +92,7 @@ struct Options {
     exclude: Option<String>,
     dry_run: bool,
     password_stdin: bool,
+    watch: bool,
 }
 
 impl Options {
@@ -108,6 +112,7 @@ impl Options {
                 "--" => only_places = true,
                 "--dry-run" if command != "copy" => options.dry_run = true,
                 "--password-stdin" => options.password_stdin = true,
+                "--watch" if command == "synclet" => options.watch = true,
                 "--delete" => {
                     sync_only(arg)?;
                     options.delete = true;
@@ -128,6 +133,7 @@ impl Options {
             "copy" if count < 2 => Err("copy needs a source and a destination".into()),
             "sync" if count != 2 => Err("sync needs a source and a destination".into()),
             "synclet" if count != 1 => Err("synclet needs the name of one synclet".into()),
+            "synclet" if options.watch && options.dry_run => Err("--watch and --dry-run do not go together".into()),
             "copy" | "sync" | "synclet" => Ok(options),
             other => Err(format!("unknown command \"{other}\"")),
         }
@@ -201,6 +207,8 @@ struct Cli {
     connections: HashMap<String, FsRef>,
     /// The password from standard input, for the first site that needs one.
     password: Mutex<Option<String>>,
+    /// What the last sync did, in a few words (for the synclet's record).
+    summary: String,
 }
 
 impl Cli {
@@ -216,7 +224,13 @@ impl Cli {
         let transfers = &settings.transfers;
         ops::set_speed_limits(transfers.upload_limit_kbps * 1024, transfers.download_limit_kbps * 1024);
         ops::set_reliability(transfers.verify_checksums, transfers.reconnect);
-        Ok(Cli { sites: SiteStore::load(), settings, connections: HashMap::new(), password: Mutex::new(password) })
+        Ok(Cli {
+            sites: SiteStore::load(),
+            settings,
+            connections: HashMap::new(),
+            password: Mutex::new(password),
+            summary: String::new(),
+        })
     }
 
     /// The file system and full path of a place, connecting if needed.
@@ -297,8 +311,80 @@ impl Cli {
             .ok_or_else(|| format!("no synclet is called \u{201c}{name}\u{201d}"))?;
         let left = self.tab_place(&synclet.left)?;
         let right = self.tab_place(&synclet.right)?;
-        eprintln!("Running \u{201c}{}\u{201d}", synclet.name);
-        self.run_sync(&left, &right, &synclet.options, options.dry_run)
+        if options.watch {
+            return self.watch(&synclet, &left, &right);
+        }
+        Ok(self.run_synclet(&synclet, &left, &right, options.dry_run))
+    }
+
+    /// Runs a synclet once, and notes how it went (not for a dry run).
+    fn run_synclet(&mut self, synclet: &Synclet, left: &Place, right: &Place, dry_run: bool) -> bool {
+        let now = crate::vfs::http::iso_utc(std::time::SystemTime::now());
+        eprintln!("Running \u{201c}{}\u{201d} ({now})", synclet.name);
+        let (ok, summary) = match self.run_sync(left, right, &synclet.options, dry_run) {
+            Ok(ok) => (ok, self.summary.clone()),
+            Err(message) => {
+                eprintln!("forkz: {message}");
+                (false, message)
+            }
+        };
+        if !dry_run {
+            crate::schedule::record(&synclet.name, ok, &summary);
+        }
+        ok
+    }
+
+    /// Runs a synclet, then again a few seconds after files stop changing
+    /// in its folders on the Mac, until stopped.
+    fn watch(&mut self, synclet: &Synclet, left: &Place, right: &Place) -> Result<bool, String> {
+        use notify::Watcher;
+        // The side changes come from (a sync's own copies into its target
+        // would only set off another run).
+        let sources = match synclet.options.direction {
+            Direction::LeftToRight => vec![left],
+            Direction::RightToLeft => vec![right],
+            Direction::Both => vec![left, right],
+        };
+        let folders: Vec<PathBuf> = sources
+            .into_iter()
+            .filter_map(|place| match place {
+                Place::Local(path) => Some(path.clone()),
+                Place::Remote(..) => None,
+            })
+            .collect();
+        if folders.is_empty() {
+            return Err("--watch needs a synclet that syncs from a folder on the Mac".into());
+        }
+        let (send, changes) = std::sync::mpsc::channel();
+        let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if event.is_ok_and(|e| !e.kind.is_access()) {
+                let _ = send.send(());
+            }
+        })
+        .map_err(|e| format!("could not watch for changes: {e}"))?;
+        for folder in &folders {
+            watcher
+                .watch(folder, notify::RecursiveMode::Recursive)
+                .map_err(|e| format!("could not watch {}: {e}", folder.display()))?;
+        }
+        self.run_synclet(synclet, left, right, false);
+        eprintln!(
+            "Watching for changes in {}",
+            folders.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(" and ")
+        );
+        while changes.recv().is_ok() {
+            // Until nothing has changed for a few seconds (a save, a build,
+            // or a copy is many changes).
+            loop {
+                match changes.recv_timeout(SETTLE) {
+                    Ok(()) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(false),
+                }
+            }
+            self.run_synclet(synclet, left, right, false);
+        }
+        Ok(false)
     }
 
     /// A synclet's side as a place (its path is the full path).
@@ -330,6 +416,7 @@ impl Cli {
         let chosen: Vec<&sync::Item> = items.iter().filter(|i| i.action.is_some()).collect();
         if chosen.is_empty() {
             eprintln!("Already in sync.");
+            self.summary = "Already in sync".into();
             return Ok(true);
         }
         for item in &chosen {
@@ -350,9 +437,18 @@ impl Cli {
         for job in sync::jobs(&chosen, &left_fs, &left_root, &right_fs, &right_root, true) {
             outcomes.push(ops::run(&job, &mut Report::new(), CancelToken::default()));
         }
+        let failed: usize = outcomes.iter().map(|o| o.failed.len()).sum();
+        let changed = chosen.len().saturating_sub(failed);
+        self.summary = match failed {
+            0 => format!("{} changed", count(changed, "item")),
+            _ => format!("{} changed, {failed} failed", count(changed, "item")),
+        };
         Ok(summarize(&outcomes))
     }
 }
+
+/// How long files must stay unchanged before a watching synclet runs.
+const SETTLE: Duration = Duration::from_secs(5);
 
 /// Makes a folder and the folders it is in, as needed.
 fn make_folder(fs: &FsRef, folder: &Path) -> Result<(), String> {
@@ -550,6 +646,9 @@ mod tests {
         let dashed = Options::parse("sync", &strings(&["--", "--odd", "b"])).unwrap();
         assert_eq!(dashed.places, ["--odd", "b"]);
         assert_eq!(Options::parse("synclet", &strings(&["Site"])).unwrap().places, ["Site"]);
+        assert!(Options::parse("synclet", &strings(&["Site", "--watch"])).unwrap().watch);
+        assert!(Options::parse("synclet", &strings(&["Site", "--watch", "--dry-run"])).is_err());
+        assert!(Options::parse("sync", &strings(&["a", "b", "--watch"])).is_err(), "synclets only");
         assert!(Options::parse("synclet", &strings(&[])).is_err());
     }
 
@@ -600,6 +699,7 @@ mod tests {
             settings: Settings::default(),
             connections: HashMap::new(),
             password: Mutex::new(None),
+            summary: String::new(),
         };
         let copy = Options { places: vec![from.display().to_string(), to.display().to_string()], ..Default::default() };
         assert_eq!(cli.copy(&copy), Ok(true));

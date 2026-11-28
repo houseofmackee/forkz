@@ -7,6 +7,13 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-11-28
+
+### Added
+
+- Scheduled synclets: right-click a synclet and choose Schedule to run it every 15 minutes, hourly, every 6 hours, daily at a time, or when files change in its folder on the Mac. Scheduled synclets run in the background through launchd, even with forkz closed; the sidebar shows a clock, or a warning when the last run failed, with the last run's result when you point at it.
+- `forkz synclet NAME --watch` keeps running and syncs a few seconds after files stop changing in the synclet's folder on the Mac.
+
 ## [0.28.0] - 2026-11-28
 
 ### Added
@@ -560,7 +567,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/houseofmackee/forkz/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/houseofmackee/forkz/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/houseofmackee/forkz/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/houseofmackee/forkz/compare/v0.25.0...v0.26.0

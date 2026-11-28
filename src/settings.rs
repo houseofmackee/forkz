@@ -136,6 +136,9 @@ pub struct Synclet {
     pub right: WorkspaceTab,
     #[serde(default)]
     pub options: crate::fs::sync::Options,
+    /// When it runs by itself (none: only when opened).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<crate::schedule::Schedule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

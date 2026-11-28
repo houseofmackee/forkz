@@ -153,6 +153,18 @@ define_class!(
             }
         }
 
+        #[unsafe(method(scheduleSynclet:))]
+        fn schedule_synclet(&self, _sender: Option<&AnyObject>) {
+            let row = self.ivars().menu_row.take();
+            let index = row.and_then(|r| match self.ivars().rows.borrow().get(r) {
+                Some(Row::Synclet { index, .. }) => Some(*index),
+                _ => None,
+            });
+            if let Some(index) = index {
+                super::schedule_synclet(index);
+            }
+        }
+
         #[unsafe(method(deleteSynclet:))]
         fn delete_synclet(&self, _sender: Option<&AnyObject>) {
             let row = self.ivars().menu_row.take();
@@ -376,16 +388,20 @@ define_class!(
                     return;
                 }
                 Some(Row::Synclet { .. }) => {
-                    let item = unsafe {
-                        NSMenuItem::initWithTitle_action_keyEquivalent(
-                            NSMenuItem::alloc(self.mtm()),
-                            &ns("Delete Synclet"),
-                            Some(sel!(deleteSynclet:)),
-                            &ns(""),
-                        )
-                    };
-                    unsafe { item.setTarget(Some(self)) };
-                    menu.addItem(&item);
+                    for (title, action) in
+                        [("Schedule\u{2026}", sel!(scheduleSynclet:)), ("Delete Synclet", sel!(deleteSynclet:))]
+                    {
+                        let item = unsafe {
+                            NSMenuItem::initWithTitle_action_keyEquivalent(
+                                NSMenuItem::alloc(self.mtm()),
+                                &ns(title),
+                                Some(action),
+                                &ns(""),
+                            )
+                        };
+                        unsafe { item.setTarget(Some(self)) };
+                        menu.addItem(&item);
+                    }
                     return;
                 }
                 Some(Row::Preset { .. }) => {
@@ -527,8 +543,33 @@ impl Sidebar {
                 cell(self.mtm(), name, &icon, Some(accent()), Some("Search again and show what is found"), zoom)
             }
             Row::Synclet { name, .. } => {
-                let icon = symbol("arrow.triangle.2.circlepath", name).unwrap_or_else(super::util::folder_icon);
-                cell(self.mtm(), name, &icon, Some(accent()), Some("Open this sync"), zoom)
+                // Scheduled: a clock; its last run failed: a warning.
+                let schedule = super::current_settings()
+                    .and_then(|s| s.synclets.iter().find(|x| &x.name == name).and_then(|x| x.schedule));
+                let run = schedule.and(crate::schedule::runs().remove(name.as_str()));
+                let failed = run.as_ref().is_some_and(|r| !r.ok);
+                let (glyph, tint) = match (schedule, failed) {
+                    (_, true) => ("exclamationmark.triangle", objc2_app_kit::NSColor::systemOrangeColor()),
+                    (Some(_), false) => ("clock.arrow.2.circlepath", accent()),
+                    (None, false) => ("arrow.triangle.2.circlepath", accent()),
+                };
+                let icon = symbol(glyph, name).unwrap_or_else(super::util::folder_icon);
+                let mut tip = "Open this sync".to_string();
+                if let Some(schedule) = schedule {
+                    tip.push_str(&format!("\nRuns {} by itself.", schedule.describe()));
+                    match &run {
+                        Some(run) => {
+                            let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(run.when);
+                            tip.push_str(&format!(
+                                "\nLast run {}: {}.",
+                                super::util::format_date(Some(when)),
+                                run.summary
+                            ));
+                        }
+                        None => tip.push_str("\nNot run yet."),
+                    }
+                }
+                cell(self.mtm(), name, &icon, Some(tint), Some(&tip), zoom)
             }
             Row::Preset { name, .. } => {
                 let icon = symbol("character.cursor.ibeam", name).unwrap_or_else(super::util::folder_icon);

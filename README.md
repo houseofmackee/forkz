@@ -93,6 +93,8 @@ Sync Folders (Shift-Command-S) compares the two panes' folders, on the Mac or on
 
 A sync can be saved as a synclet in the sidebar: clicking it connects to its sites if needed and compares right away. Sync Browsing (Shift-Command-B) keeps the other pane in the matching folder while you browse.
 
+Synclets can also run by themselves: right-click one and choose Schedule to run it every 15 minutes, every hour, every 6 hours, every day at a time, or a few seconds after files change in its folder on the Mac. A scheduled synclet runs in the background through macOS's launchd, even when forkz is closed (while you are logged in), using the saved sites and their Keychain passwords. Its icon in the sidebar shows a clock, or a warning if the last run failed; point at it to see when it last ran and what it did. Each run's output goes to `~/Library/Logs/forkz`. A synclet with a folder in Desktop, Documents, or Downloads may need macOS's permission for forkz to reach that folder the first time it runs.
+
 ### Transfer queue
 
 ![Five uploads to a server: two running, three waiting with their place in line, and Pause All and Stop All above them](docs/images/queue.png)
@@ -248,6 +250,7 @@ forkz copy report.pdf notes.txt "Web Server:/var/www/files"   # files and folder
 forkz sync --dry-run site/ mmg-staging.com:app/forkz          # what would change
 forkz sync --hidden --delete site/ mmg-staging.com:app/forkz  # make the server's folder like site/
 forkz synclet Website                                         # a saved synclet, with its options
+forkz synclet Website --watch                                 # again after each change, until stopped
 ```
 
 - **Places:** a path on the Mac, `SITE:PATH` for a saved site (by its name; a relative path starts in the site's remote folder), or an address such as `sftp://me@host/var/www`. An address uses the saved site for that server if there is one.

@@ -701,6 +701,10 @@ pub fn run(open: Option<String>) -> anyhow::Result<()> {
     }
     apply_appearance(&app);
     apply_transfer_settings(&app);
+    // The scheduled synclets' jobs, pointing at this copy of the app (it
+    // may have moved, or been updated).
+    apply_schedules(&app, false);
+    watch_synclet_runs(None, true);
     APP.with(|a| a.set(app.clone())).map_err(|_| anyhow::anyhow!("the app is already running"))?;
     // Folders that keep their own view show it from the start.
     apply_folder_view(0);
@@ -1762,11 +1766,12 @@ pub fn current_settings() -> Option<Settings> {
 /// Changes settings, saves them, and applies what changed.
 pub fn update_settings(change: impl FnOnce(&mut Settings)) {
     let Some(app) = app() else { return };
-    let (show_hidden, limit, appearance_changed, shortcuts_changed, filters_changed) = {
+    let (show_hidden, limit, appearance_changed, shortcuts_changed, filters_changed, synclets_changed) = {
         let mut settings = app.settings.borrow_mut();
         let (appearance, shortcuts, workspaces) =
             (settings.appearance.clone(), settings.shortcuts.clone(), settings.workspaces.clone());
         let filters = (settings.filters.clone(), settings.filters_on);
+        let synclets = settings.synclets.clone();
         change(&mut settings);
         settings.save();
         (
@@ -1775,8 +1780,12 @@ pub fn update_settings(change: impl FnOnce(&mut Settings)) {
             settings.appearance != appearance,
             settings.shortcuts != shortcuts || settings.workspaces != workspaces,
             (settings.filters.clone(), settings.filters_on) != filters,
+            settings.synclets != synclets,
         )
     };
+    if synclets_changed {
+        apply_schedules(&app, true);
+    }
     if filters_changed {
         apply_filters(&app);
     }
@@ -1831,6 +1840,33 @@ fn apply_filters(app: &App) {
     for pane in &app.panes {
         pane.filters_changed();
     }
+}
+
+/// Makes macOS's launchd jobs match the synclets' schedules (see
+/// `crate::schedule`). A problem is shown when the user changed something
+/// (`tell`), and logged at launch.
+fn apply_schedules(app: &App, tell: bool) {
+    let synclets = app.settings.borrow().synclets.clone();
+    let program = std::env::current_exe().and_then(|p| p.canonicalize());
+    let result = program.and_then(|program| crate::schedule::apply(&synclets, &program));
+    if let Err(e) = result {
+        tracing::warn!("could not schedule the synclets: {e}");
+        if tell {
+            dialogs::show_error("The synclet could not be scheduled.".into(), e.to_string());
+        }
+    }
+}
+
+/// Scheduled synclets run in other processes: when one notes a run, the
+/// sidebar shows it (checked every 15 seconds, by the file's date).
+fn watch_synclet_runs(seen: Option<std::time::SystemTime>, first: bool) {
+    let file = dirs::data_dir().map(|d| d.join("forkz").join("synclet-runs.json"));
+    let changed = file.and_then(|f| std::fs::metadata(f).ok()).and_then(|m| m.modified().ok());
+    if !first && changed != seen {
+        reload_sidebar();
+    }
+    let when = DispatchTime::try_from(Duration::from_secs(15)).unwrap_or(DispatchTime::NOW);
+    let _ = DispatchQueue::main().after(when, move || watch_synclet_runs(changed, false));
 }
 
 /// Speed limits, checksum checks, and reconnecting, from settings.
@@ -3739,6 +3775,87 @@ pub fn open_synclet(index: usize) {
             open_synclet(index);
         });
     });
+}
+
+/// Right-click a synclet > Schedule: when it runs by itself, in the
+/// background (even with forkz closed).
+pub fn schedule_synclet(index: usize) {
+    use crate::schedule::Schedule;
+    let Some(synclet) = current_settings().and_then(|s| s.synclets.get(index).cloned()) else { return };
+    // Following changes needs the side they come from on the Mac.
+    let on_mac = match synclet.options.direction {
+        crate::fs::sync::Direction::LeftToRight => synclet.left.site.is_none(),
+        crate::fs::sync::Direction::RightToLeft => synclet.right.site.is_none(),
+        crate::fs::sync::Direction::Both => synclet.left.site.is_none() || synclet.right.site.is_none(),
+    };
+    let mut choices: Vec<(&str, Option<Schedule>)> = vec![
+        ("Not scheduled (runs when opened)", None),
+        ("Every 15 minutes", Some(Schedule::Every { minutes: 15 })),
+        ("Every hour", Some(Schedule::Every { minutes: 60 })),
+        ("Every 6 hours", Some(Schedule::Every { minutes: 360 })),
+        ("Every day at a time\u{2026}", Some(Schedule::Daily { hour: 9, minute: 0 })),
+    ];
+    if on_mac {
+        choices.push(("When files change on the Mac", Some(Schedule::OnChange)));
+    }
+    let current = choices
+        .iter()
+        .position(|(_, s)| match (s, synclet.schedule) {
+            (Some(Schedule::Daily { .. }), Some(Schedule::Daily { .. })) => true,
+            (a, b) => *a == b,
+        })
+        .unwrap_or(0);
+    let mut informative = "A scheduled synclet runs in the background, even when forkz is closed (while you are logged in), and copies what changed as Sync Folders would. Its last run shows when you point at it in the sidebar.".to_string();
+    if synclet.options.delete_orphans {
+        informative.push_str(" This synclet also deletes what only its target has.");
+    }
+    let titles: Vec<&str> = choices.iter().map(|(t, _)| *t).collect();
+    let Some(chosen) =
+        dialogs::choose(&format!("Run \u{201c}{}\u{201d}", synclet.name), &informative, "Schedule", &titles, current)
+    else {
+        return;
+    };
+    let mut schedule = choices[chosen].1;
+    if let Some(Schedule::Daily { .. }) = schedule {
+        let (hour, minute) = match synclet.schedule {
+            Some(Schedule::Daily { hour, minute }) => (hour, minute),
+            _ => (9, 0),
+        };
+        let Some(text) = dialogs::prompt(
+            "Run it every day at",
+            "A time on the 24-hour clock, such as 09:30 or 18:00.",
+            "Schedule",
+            &format!("{hour:02}:{minute:02}"),
+            None,
+        ) else {
+            return;
+        };
+        match parse_time(&text) {
+            Some((hour, minute)) => schedule = Some(Schedule::Daily { hour, minute }),
+            None => {
+                dialogs::show_error(
+                    format!("\u{201c}{}\u{201d} is not a time.", text.trim()),
+                    "Write it as 09:30 or 18:00.".into(),
+                );
+                return;
+            }
+        }
+    }
+    let name = synclet.name.clone();
+    update_settings(|s| {
+        if let Some(found) = s.synclets.iter_mut().find(|x| x.name == name) {
+            found.schedule = schedule;
+        }
+    });
+    reload_sidebar();
+}
+
+/// "9:30", "09:30", or "18" as an hour and minute.
+fn parse_time(text: &str) -> Option<(u8, u8)> {
+    let text = text.trim();
+    let (hour, minute) = text.split_once([':', '.']).unwrap_or((text, "0"));
+    let (hour, minute) = (hour.trim().parse::<u8>().ok()?, minute.trim().parse::<u8>().ok()?);
+    (hour < 24 && minute < 60).then_some((hour, minute))
 }
 
 pub fn delete_synclet(index: usize) {
@@ -5859,6 +5976,16 @@ fn folder_changed(paths: &[PathBuf]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_times() {
+        assert_eq!(parse_time("09:30"), Some((9, 30)));
+        assert_eq!(parse_time(" 7.05 "), Some((7, 5)));
+        assert_eq!(parse_time("18"), Some((18, 0)));
+        assert_eq!(parse_time("24:00"), None);
+        assert_eq!(parse_time("12:60"), None);
+        assert_eq!(parse_time("noon"), None);
+    }
 
     fn entry(path: &Path) -> crate::fs::Entry {
         crate::fs::Entry {

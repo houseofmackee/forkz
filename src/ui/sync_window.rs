@@ -400,9 +400,16 @@ impl SyncWindow {
         ) else {
             return;
         };
-        let synclet = crate::settings::Synclet { name: name.trim().to_string(), left, right, options: self.options() };
+        let synclet = crate::settings::Synclet {
+            name: name.trim().to_string(),
+            left,
+            right,
+            options: self.options(),
+            schedule: None,
+        };
         super::update_settings(|s| match s.synclets.iter_mut().find(|x| x.name == synclet.name) {
-            Some(existing) => *existing = synclet,
+            // Saved again: it keeps its schedule.
+            Some(existing) => *existing = crate::settings::Synclet { schedule: existing.schedule, ..synclet },
             None => s.synclets.push(synclet),
         });
         super::reload_sidebar();
