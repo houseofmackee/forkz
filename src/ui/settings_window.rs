@@ -495,7 +495,7 @@ impl SettingsWindow {
                 (
                     empty(mtm),
                     note(
-                        "After an upload or download, its checksum is compared with the server's (S3, Google Drive, Dropbox, Box, Azure, and SFTP servers that run sha256sum). A copy that differs is made again.",
+                        "After an upload or download, its checksum is compared with the server's (S3, Google Drive, Dropbox, OneDrive, Box, Azure, and SFTP servers that run sha256sum). A copy that differs is made again.",
                         mtm,
                     ),
                 ),

@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use forkz::fs::ops::{self, Answer, CancelToken, Conflict, ErrorAnswer, Job, JobKind, Observer, Progress, Resolution};
 use forkz::vfs::known_hosts::Status;
 use forkz::vfs::sftp::Prompter;
-use forkz::vfs::{self, FsRef, Vfs, aws, azure, boxcom, dropbox, ftp, gdrive, s3, webdav};
+use forkz::vfs::{self, FsRef, Vfs, aws, azure, boxcom, dropbox, ftp, gdrive, onedrive, s3, webdav};
 
 /// Trusts certificates and gives the password when asked.
 struct Answers {
@@ -726,6 +726,73 @@ fn dropbox_api() {
     // A refused sign-in says so (and asks to sign in again in the app).
     let stale = dropbox::DropboxParams { refresh_token: Some("revoked".into()), ..params };
     assert_eq!(dropbox::connect(stale).err().map(|e| e.kind()), Some(io::ErrorKind::PermissionDenied));
+}
+
+#[test]
+#[ignore = "needs the OneDrive stand-in (scripts/test_protocols.sh)"]
+fn onedrive_api() {
+    let Some((host, port)) = address("FORKZ_TEST_ONEDRIVE") else { return };
+    let base = format!("http://{host}:{port}");
+    let saved: std::sync::Arc<Mutex<Vec<String>>> = Default::default();
+    let keep = saved.clone();
+    let params = onedrive::OneDriveParams {
+        refresh_token: Some("refresh-od".into()),
+        save_token: Some(std::sync::Arc::new(move |token: &str| keep.lock().unwrap().push(token.to_string()))),
+        timeout: Duration::from_secs(10),
+        service: onedrive::Service {
+            graph: format!("{base}/v1.0"),
+            token: format!("{base}/token"),
+            authorize: format!("{base}/authorize"),
+            // Files over 1 MB go in upload sessions, in parts of 640 KiB.
+            simple_upload: 1_000_000,
+            part: 2 * 320 * 1024,
+            client_id: Some("forkz-test".into()),
+        },
+        browser: false,
+    };
+    let fs: FsRef = onedrive::connect(params.clone()).unwrap();
+    assert_eq!(fs.label(), "OneDrive: tester@example.com");
+    // Microsoft replaced the sign-in: the new one is what is kept.
+    let kept = saved.lock().unwrap().clone();
+    assert_eq!(kept.len(), 1);
+    assert_ne!(kept[0], "refresh-od");
+    exercise(fs.clone(), Path::new("/onedrive-run"), true);
+    // Copies by OneDrive itself (watched until done), also over a file.
+    fs.create_dir(Path::new("/od-copy")).unwrap();
+    for (name, text) in [("a.txt", b"one"), ("b.txt", b"two")] {
+        let mut file = fs.open_write_sized(&Path::new("/od-copy").join(name), Some(3)).unwrap();
+        file.write_all(text).unwrap();
+        file.flush().unwrap();
+    }
+    // Dates can be set (as copies keep them).
+    let date = std::time::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    fs.set_attributes(Path::new("/od-copy/a.txt"), Some(date), None).unwrap();
+    assert_eq!(fs.stat(Path::new("/od-copy/a.txt")).unwrap().modified, Some(date));
+    fs.copy_on_server(Path::new("/od-copy/a.txt"), Path::new("/od-copy/b.txt")).unwrap().unwrap();
+    assert_eq!(read_all(&fs, Path::new("/od-copy/b.txt")), b"one");
+    // OneDrive dates copies when they are made: the original's date is
+    // put back, also inside a copied folder.
+    assert_eq!(fs.stat(Path::new("/od-copy/b.txt")).unwrap().modified, Some(date));
+    fs.create_dir(Path::new("/od-copy/folder")).unwrap();
+    fs.copy_on_server(Path::new("/od-copy/a.txt"), Path::new("/od-copy/folder/a.txt")).unwrap().unwrap();
+    fs.copy_on_server(Path::new("/od-copy/folder"), Path::new("/od-copy/folder 2")).unwrap().unwrap();
+    assert_eq!(fs.stat(Path::new("/od-copy/folder 2/a.txt")).unwrap().modified, Some(date));
+    fs.remove_dir(Path::new("/od-copy/folder 2")).unwrap();
+    fs.remove_dir(Path::new("/od-copy/folder")).unwrap();
+    // A link that cannot expire on this (personal) account.
+    let (link, expires) = fs.share_link(Path::new("/od-copy/a.txt"), Duration::from_secs(3600)).unwrap();
+    assert!(link.starts_with("https://1drv.ms/") && !expires, "{link}");
+    // Paging: more than one page of items.
+    for n in 0..5 {
+        fs.create_dir(&Path::new("/od-copy").join(format!("f{n}"))).unwrap();
+    }
+    assert_eq!(names(&fs, Path::new("/od-copy")).len(), 7);
+    assert_eq!(fs.create_dir(Path::new("/od-copy/f0")).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    fs.remove_dir(Path::new("/od-copy")).unwrap();
+    assert_eq!(fs.stat(Path::new("/od-copy")).unwrap_err().kind(), io::ErrorKind::NotFound);
+    // A refused sign-in says so (and asks to sign in again in the app).
+    let stale = onedrive::OneDriveParams { refresh_token: Some("revoked".into()), ..params };
+    assert_eq!(onedrive::connect(stale).err().map(|e| e.kind()), Some(io::ErrorKind::PermissionDenied));
 }
 
 #[test]

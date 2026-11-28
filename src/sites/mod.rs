@@ -67,6 +67,10 @@ pub enum Protocol {
     Dropbox,
     /// Google Drive (signing in in the browser).
     GoogleDrive,
+    /// OneDrive, personal or for work or school (signing in in the
+    /// browser).
+    #[serde(rename = "onedrive")]
+    OneDrive,
     /// Network shares, mounted by macOS.
     Smb,
     Afp,
@@ -74,7 +78,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub const ALL: [Protocol; 16] = [
+    pub const ALL: [Protocol; 17] = [
         Protocol::Sftp,
         Protocol::Ftp,
         Protocol::Ftps,
@@ -88,6 +92,7 @@ impl Protocol {
         Protocol::Box,
         Protocol::Dropbox,
         Protocol::GoogleDrive,
+        Protocol::OneDrive,
         Protocol::Smb,
         Protocol::Afp,
         Protocol::Nfs,
@@ -108,6 +113,7 @@ impl Protocol {
             Protocol::Box => "Box",
             Protocol::Dropbox => "Dropbox",
             Protocol::GoogleDrive => "Google Drive",
+            Protocol::OneDrive => "OneDrive",
             Protocol::Smb => "SMB (Windows and Mac sharing)",
             Protocol::Afp => "AFP (older Mac sharing)",
             Protocol::Nfs => "NFS",
@@ -128,6 +134,7 @@ impl Protocol {
             Protocol::Box => "box",
             Protocol::Dropbox => "dropbox",
             Protocol::GoogleDrive => "gdrive",
+            Protocol::OneDrive => "onedrive",
             Protocol::Smb => "smb",
             Protocol::Afp => "afp",
             Protocol::Nfs => "nfs",
@@ -147,6 +154,7 @@ impl Protocol {
             "box" => Protocol::Box,
             "dropbox" => Protocol::Dropbox,
             "gdrive" | "googledrive" => Protocol::GoogleDrive,
+            "onedrive" => Protocol::OneDrive,
             "smb" | "cifs" => Protocol::Smb,
             "afp" => Protocol::Afp,
             "nfs" => Protocol::Nfs,
@@ -165,7 +173,8 @@ impl Protocol {
             | Protocol::Azure
             | Protocol::Box
             | Protocol::Dropbox
-            | Protocol::GoogleDrive => 443,
+            | Protocol::GoogleDrive
+            | Protocol::OneDrive => 443,
             Protocol::Smb => 445,
             Protocol::Afp => 548,
             Protocol::Nfs => 2049,
@@ -189,15 +198,16 @@ impl Protocol {
             Protocol::Box => Some("box.com".into()),
             Protocol::Dropbox => Some("dropbox.com".into()),
             Protocol::GoogleDrive => Some("drive.google.com".into()),
+            Protocol::OneDrive => Some("onedrive.live.com".into()),
             Protocol::Azure if !user.trim().is_empty() => Some(crate::vfs::azure::account_host(user.trim())),
             _ => None,
         }
     }
 
     /// A cloud drive signed in to in the browser (Box, Dropbox, Google
-    /// Drive): no server, user, or password in the site.
+    /// Drive, OneDrive): no server, user, or password in the site.
     pub fn signs_in_with_browser(self) -> bool {
-        matches!(self, Protocol::Box | Protocol::Dropbox | Protocol::GoogleDrive)
+        matches!(self, Protocol::Box | Protocol::Dropbox | Protocol::GoogleDrive | Protocol::OneDrive)
     }
 
     /// A network share that macOS mounts (SMB, AFP, NFS).

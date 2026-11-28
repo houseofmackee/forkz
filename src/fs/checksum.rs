@@ -182,6 +182,8 @@ pub enum Kind {
     Sha256,
     /// Dropbox's content hash: SHA-256 of the SHA-256 of each 4 MiB block.
     Dropbox,
+    /// Microsoft's QuickXorHash (OneDrive and SharePoint).
+    QuickXor,
 }
 
 impl Kind {
@@ -191,6 +193,7 @@ impl Kind {
             Kind::Sha1 => "SHA-1",
             Kind::Sha256 => "SHA-256",
             Kind::Dropbox => "content hash",
+            Kind::QuickXor => "QuickXorHash",
         }
     }
 }
@@ -204,6 +207,7 @@ pub enum StreamHasher {
     Sha1(Sha1),
     Sha256(Sha256),
     Dropbox { block: Sha256, in_block: usize, digests: Vec<u8> },
+    QuickXor(QuickXor),
 }
 
 impl StreamHasher {
@@ -213,6 +217,7 @@ impl StreamHasher {
             Kind::Sha1 => StreamHasher::Sha1(Sha1::new()),
             Kind::Sha256 => StreamHasher::Sha256(Sha256::new()),
             Kind::Dropbox => StreamHasher::Dropbox { block: Sha256::new(), in_block: 0, digests: Vec::new() },
+            Kind::QuickXor => StreamHasher::QuickXor(QuickXor::default()),
         }
     }
 
@@ -221,6 +226,7 @@ impl StreamHasher {
             StreamHasher::Md5(h) => h.update(bytes),
             StreamHasher::Sha1(h) => h.update(bytes),
             StreamHasher::Sha256(h) => h.update(bytes),
+            StreamHasher::QuickXor(h) => h.update(bytes),
             StreamHasher::Dropbox { block, in_block, digests } => {
                 while !bytes.is_empty() {
                     let take = (DROPBOX_BLOCK - *in_block).min(bytes.len());
@@ -242,6 +248,7 @@ impl StreamHasher {
             StreamHasher::Md5(h) => h.finalize().to_vec(),
             StreamHasher::Sha1(h) => h.finalize().to_vec(),
             StreamHasher::Sha256(h) => h.finalize().to_vec(),
+            StreamHasher::QuickXor(h) => h.finish().to_vec(),
             StreamHasher::Dropbox { block, in_block, mut digests } => {
                 if in_block > 0 {
                     digests.extend_from_slice(&block.finalize());
@@ -253,8 +260,87 @@ impl StreamHasher {
     }
 }
 
+/// Microsoft's QuickXorHash, as OneDrive reports it: 160 bits, each byte
+/// XORed in 11 bits further along (wrapping around), then the length
+/// XORed into the last 8 bytes. Ported from Microsoft's published C#.
+#[derive(Debug, Clone, Default)]
+pub struct QuickXor {
+    /// 160 bits: two 64-bit cells and a last one of 32.
+    data: [u64; 3],
+    /// Where the next byte goes, in bits.
+    shift: usize,
+    length: u64,
+}
+
+const QUICK_XOR_WIDTH: usize = 160;
+const QUICK_XOR_SHIFT: usize = 11;
+
+impl QuickXor {
+    pub fn update(&mut self, bytes: &[u8]) {
+        let mut index = self.shift / 64;
+        let mut offset = self.shift % 64;
+        // Each of the first 160 bytes starts a stride through the rest:
+        // bytes 160 apart land on the same bits.
+        for i in 0..bytes.len().min(QUICK_XOR_WIDTH) {
+            let last = index == self.data.len() - 1;
+            let bits = if last { 32 } else { 64 };
+            if offset <= bits - 8 {
+                for &byte in bytes[i..].iter().step_by(QUICK_XOR_WIDTH) {
+                    self.data[index] ^= u64::from(byte) << offset;
+                }
+            } else {
+                // Across the end of a cell: the rest goes into the next one.
+                let next = if last { 0 } else { index + 1 };
+                let folded = bytes[i..].iter().step_by(QUICK_XOR_WIDTH).fold(0u8, |acc, &b| acc ^ b);
+                self.data[index] ^= u64::from(folded) << offset;
+                self.data[next] ^= u64::from(folded) >> (bits - offset);
+            }
+            offset += QUICK_XOR_SHIFT;
+            while offset >= bits {
+                index = if last { 0 } else { index + 1 };
+                offset -= bits;
+            }
+        }
+        self.shift = (self.shift + QUICK_XOR_SHIFT * (bytes.len() % QUICK_XOR_WIDTH)) % QUICK_XOR_WIDTH;
+        self.length += bytes.len() as u64;
+    }
+
+    pub fn finish(&self) -> [u8; 20] {
+        let mut out = [0u8; 20];
+        out[..8].copy_from_slice(&self.data[0].to_le_bytes());
+        out[8..16].copy_from_slice(&self.data[1].to_le_bytes());
+        out[16..].copy_from_slice(&self.data[2].to_le_bytes()[..4]);
+        for (i, byte) in self.length.to_le_bytes().iter().enumerate() {
+            out[12 + i] ^= byte;
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quick_xor_hash() {
+        use base64::Engine;
+        let b64 = |parts: &[&[u8]]| {
+            let mut hash = QuickXor::default();
+            for part in parts {
+                hash.update(part);
+            }
+            base64::engine::general_purpose::STANDARD.encode(hash.finish())
+        };
+        assert_eq!(b64(&[]), "AAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+        // One byte: it, and the length in the last 8 bytes.
+        assert_eq!(b64(&[b"a"]), "YQAAAAAAAAAAAAAAAQAAAAAAAAA=");
+        // The same however the bytes arrive.
+        let data: Vec<u8> = (0..100_000u32).map(|i| (i * 7 % 256) as u8).collect();
+        let whole = b64(&[&data]);
+        assert_eq!(b64(&[&data[..1], &data[1..161], &data[161..5000], &data[5000..]]), whole);
+        let pieces: Vec<&[u8]> = data.chunks(97).collect();
+        assert_eq!(b64(&pieces), whole);
+        assert_ne!(b64(&[&data[..data.len() - 1]]), whole);
+    }
+
     #[test]
     fn streamed_checksums() {
         let hash = |kind: Kind, parts: &[&[u8]]| {

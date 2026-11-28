@@ -14,6 +14,7 @@ pub mod known_hosts;
 pub mod mount;
 pub mod network;
 pub mod oauth;
+pub mod onedrive;
 pub mod results;
 pub mod s3;
 pub mod sftp;

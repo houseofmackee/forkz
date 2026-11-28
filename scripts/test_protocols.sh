@@ -1,9 +1,10 @@
 #!/bin/sh
-# Runs the live FTP/FTPS, WebDAV, S3, Azure, and Box tests against throwaway
-# servers on 127.0.0.1: pyftpdlib (FTP with explicit TLS, a self-signed
-# certificate; two more for FXP, one of which refuses it), WsgiDAV, moto (an
-# S3 emulator), Azurite (if Node is installed), and a stand-in for Box's API
-# (scripts/box_mock.py). They run from a Python virtual
+# Runs the live FTP/FTPS, WebDAV, S3, Azure, Box, Dropbox, Google Drive, and
+# OneDrive tests against throwaway servers on 127.0.0.1: pyftpdlib (FTP with
+# explicit TLS, a self-signed certificate; two more for FXP, one of which
+# refuses it), WsgiDAV, moto (an S3 emulator), Azurite (if Node is
+# installed), and stand-ins for Box's, Dropbox's, Google Drive's, and
+# OneDrive's APIs (scripts/*_mock.py). They run from a Python virtual
 # environment in a temporary folder that is removed afterwards, along with
 # everything the servers stored.
 #
@@ -88,10 +89,12 @@ PIDS="$PIDS $!"
 "$DIR/venv/bin/python" scripts/box_mock.py 9777 > "$DIR/box.log" 2>&1 &
 PIDS="$PIDS $!"
 
-# Stand-ins for Dropbox's and Google Drive's APIs.
+# Stand-ins for Dropbox's, Google Drive's, and OneDrive's APIs.
 "$DIR/venv/bin/python" scripts/dropbox_mock.py 9778 > "$DIR/dropbox.log" 2>&1 &
 PIDS="$PIDS $!"
 "$DIR/venv/bin/python" scripts/gdrive_mock.py 9779 > "$DIR/gdrive.log" 2>&1 &
+PIDS="$PIDS $!"
+"$DIR/venv/bin/python" scripts/onedrive_mock.py 9780 > "$DIR/onedrive.log" 2>&1 &
 PIDS="$PIDS $!"
 
 # A stand-in for AWS's sign-in services (SSO and STS).
@@ -108,7 +111,7 @@ if command -v npx >/dev/null 2>&1; then
 fi
 
 # Wait for all of them to listen.
-for port in 2121 2122 2123 8080 9555 9777 9778 9779 9888 ${AZURE:+10000}; do
+for port in 2121 2122 2123 8080 9555 9777 9778 9779 9780 9888 ${AZURE:+10000}; do
     for _ in $(seq 1 50); do
         nc -z 127.0.0.1 "$port" 2>/dev/null && break
         sleep 0.2
@@ -119,6 +122,7 @@ status=0
 FORKZ_TEST_FTP=127.0.0.1:2121 FORKZ_TEST_FTP2=127.0.0.1:2122 FORKZ_TEST_FTP_NO_FXP=127.0.0.1:2123 \
 FORKZ_TEST_DAV=127.0.0.1:8080 FORKZ_TEST_S3=127.0.0.1:9555 FORKZ_TEST_AZURE="$AZURE" FORKZ_TEST_BOX=127.0.0.1:9777 \
 FORKZ_TEST_AWS=127.0.0.1:9888 FORKZ_TEST_DROPBOX=127.0.0.1:9778 FORKZ_TEST_GDRIVE=127.0.0.1:9779 \
+FORKZ_TEST_ONEDRIVE=127.0.0.1:9780 \
     cargo test --test protocols_live -- --ignored --test-threads=1 "$@" || status=$?
 if [ "$status" -ne 0 ]; then
     for log in ftp ftp2 ftp3 dav s3 azure box; do

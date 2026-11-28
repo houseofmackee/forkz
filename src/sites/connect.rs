@@ -188,6 +188,24 @@ pub fn open(
             let fs = vfs::dropbox::connect(params)?;
             Ok((fs, None))
         }
+        Protocol::OneDrive => {
+            // Microsoft replaces the sign-in each time it is renewed: a
+            // saved site keeps the latest one in the Keychain.
+            let saved = crate::sites::SiteStore::load().get(&site.id).is_some();
+            let id = site.id.clone();
+            let save_token: Option<vfs::onedrive::SaveToken> = saved.then(|| {
+                std::sync::Arc::new(move |token: &str| crate::sites::keychain::save_password(&id, token)) as _
+            });
+            let params = vfs::onedrive::OneDriveParams {
+                refresh_token: password,
+                save_token,
+                timeout,
+                service: Default::default(),
+                browser: true,
+            };
+            let fs = vfs::onedrive::connect(params)?;
+            Ok((fs, None))
+        }
         Protocol::GoogleDrive => {
             let saved = crate::sites::SiteStore::load().get(&site.id).is_some();
             let id = site.id.clone();

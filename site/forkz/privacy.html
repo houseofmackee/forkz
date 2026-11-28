@@ -38,14 +38,14 @@
 
   <main id="main" class="prose">
     <h1>Privacy policy</h1>
-    <p class="updated">Last updated November 27, 2026</p>
+    <p class="updated">Last updated November 28, 2026</p>
 
     <p>forkz is a file manager for macOS. It runs on your Mac and works with your files there and on the servers and cloud services you connect it to. This policy explains what forkz does with your data. In short: your data stays on your Mac and with the services you connect to. forkz has no servers, no accounts, no analytics, and no advertising, and the developer of forkz never receives your files or your sign-ins.</p>
 
     <h2>What stays on your Mac</h2>
     <ul>
       <li><strong>Settings:</strong> your preferences, saved sites, favorites, recent folders, trusted server keys, and similar settings are kept in files in your Library folder (<code>~/Library/Application Support/forkz</code>).</li>
-      <li><strong>Passwords and sign-ins:</strong> passwords, keys, and the sign-ins for cloud services (such as Google Drive, Dropbox, and Box) are kept in your Mac&#8217;s login Keychain, and only for sites you choose to save.</li>
+      <li><strong>Passwords and sign-ins:</strong> passwords, keys, and the sign-ins for cloud services (such as Google Drive, Dropbox, OneDrive, and Box) are kept in your Mac&#8217;s login Keychain, and only for sites you choose to save.</li>
       <li><strong>Your files:</strong> forkz reads and changes files only when you ask it to, such as to show a folder, copy, or rename. Folder listings from servers may be kept in memory while forkz runs, so folders open quickly; they are not written to disk.</li>
       <li><strong>Temporary copies:</strong> a server file you preview, or open in another app, is downloaded to a temporary folder on your Mac. forkz empties that folder each time it starts.</li>
       <li><strong>AWS sign-ins:</strong> if you sign in to AWS IAM Identity Center through forkz, the sign-in is kept where the AWS command line tools keep theirs (<code>~/.aws/sso/cache</code>), so each can use the other&#8217;s.</li>
@@ -71,7 +71,7 @@
 
     <h2>Removing your data</h2>
     <ul>
-      <li>To remove forkz&#8217;s access to Google Drive, open your Google Account, go to Security, then &#8220;Your connections to third-party apps &amp; services&#8221;, and remove forkz. For Dropbox and Box, remove forkz in their account settings.</li>
+      <li>To remove forkz&#8217;s access to Google Drive, open your Google Account, go to Security, then &#8220;Your connections to third-party apps &amp; services&#8221;, and remove forkz. For OneDrive, open your Microsoft account&#8217;s privacy settings, go to the apps and services that can access your data, and remove forkz (work and school accounts: in My Apps). For Dropbox and Box, remove forkz in their account settings.</li>
       <li>To remove a saved sign-in from your Mac, delete the site in forkz, or remove its entry in the Keychain Access app.</li>
       <li>To remove everything forkz keeps, delete the app and the <code>~/Library/Application Support/forkz</code> folder.</li>
     </ul>

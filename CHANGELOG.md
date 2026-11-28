@@ -7,6 +7,17 @@ the GitHub release and Sparkle's update window show.
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-11-28
+
+### Added
+
+- OneDrive: personal Microsoft accounts and work or school accounts, signed in in the browser. Browse, upload (large files in parts), download, rename, move, copy on Microsoft's servers, delete to the recycle bin, keep file dates, make share links, and check copies against OneDrive's QuickXorHash. `onedrive://` addresses work too.
+
+### Fixed
+
+- Signing in to a cloud service in Safari could end on a "cannot connect to 127.0.0.1" page (Safari loads the return page twice) even though the sign-in worked: forkz now answers both.
+- Deleting one item on a cloud service says "It goes to the recycle bin", not "They go".
+
 ## [0.27.0] - 2026-11-27
 
 ### Added
@@ -549,7 +560,8 @@ the GitHub release and Sparkle's update window show.
 - Drag and drop between panes and with Finder; Copy and Paste of files.
 - Quick Look, hidden files toggle, live folder updates, and keyboard shortcuts for every command.
 
-[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/houseofmackee/forkz/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/houseofmackee/forkz/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/houseofmackee/forkz/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/houseofmackee/forkz/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/houseofmackee/forkz/compare/v0.24.2...v0.25.0

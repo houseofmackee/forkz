@@ -3053,7 +3053,11 @@ fn delete(pane: &PaneController, paths: Vec<PathBuf>) {
     let why = if fs.outside().is_some() {
         "Items in an archive cannot go to the Trash: this cannot be undone.".to_string()
     } else if let Some(place) = fs.deleted_items_go() {
-        format!("They go to {place}, where they can be restored.")
+        if paths.len() == 1 {
+            format!("It goes to {place}, where it can be restored.")
+        } else {
+            format!("They go to {place}, where they can be restored.")
+        }
     } else {
         "Servers have no Trash: this cannot be undone.".to_string()
     };

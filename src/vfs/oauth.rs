@@ -94,6 +94,49 @@ fn reply_page(stream: &mut TcpStream, status: &str, text: &str) {
     let _ = stream.shutdown(std::net::Shutdown::Write);
 }
 
+/// The query of a request to the redirect. All of the request is read
+/// (closing with some of it unread would reset the connection, and the
+/// browser would not show the page), but only its first line matters.
+fn read_query(stream: &mut TcpStream) -> io::Result<HashMap<String, String>> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while head.len() < 16_384 && !head.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&head);
+    Ok(callback_query(text.lines().next().unwrap_or("")))
+}
+
+/// After the code came: the browser may load the redirect again (Safari
+/// can load it twice), so the same page is shown for a while instead of
+/// "cannot connect".
+fn keep_answering(listener: &TcpListener, state: &str, page: String) {
+    let Ok(listener) = listener.try_clone() else { return };
+    let state = state.to_string();
+    std::thread::spawn(move || {
+        let until = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < until {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let Ok(query) = read_query(&mut stream) else { continue };
+                    if query.get("state") == Some(&state) {
+                        reply_page(&mut stream, "200 OK", &page);
+                    } else {
+                        reply_page(&mut stream, "404 Not Found", "Not found");
+                    }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(Duration::from_millis(100)),
+                Err(_) => return,
+            }
+        }
+    });
+}
+
 /// Waits for the browser to come back with the authorization code.
 pub fn wait_for_code(service: &str, listener: &TcpListener, state: &str, wait: Duration) -> io::Result<String> {
     listener.set_nonblocking(true)?;
@@ -107,32 +150,16 @@ pub fn wait_for_code(service: &str, listener: &TcpListener, state: &str, wait: D
             }
             Err(e) => return Err(e),
         };
-        stream.set_nonblocking(false)?;
-        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        // All of the request is read (closing with some of it unread
-        // would reset the connection, and the browser would not show the
-        // page), but only its first line matters.
-        let mut head = Vec::new();
-        let mut byte = [0u8; 1];
-        while head.len() < 16_384 && !head.ends_with(b"\r\n\r\n") {
-            match stream.read(&mut byte) {
-                Ok(1) => head.push(byte[0]),
-                _ => break,
-            }
-        }
-        let text = String::from_utf8_lossy(&head);
-        let query = callback_query(text.lines().next().unwrap_or(""));
+        let query = read_query(&mut stream)?;
         if query.get("state").map(String::as_str) != Some(state) {
             // Something else (the browser asking for an icon).
             reply_page(&mut stream, "404 Not Found", "Not found");
             continue;
         }
         if let Some(code) = query.get("code") {
-            reply_page(
-                &mut stream,
-                "200 OK",
-                &format!("Signed in to {service}. You can close this tab and go back to forkz."),
-            );
+            let signed_in = format!("Signed in to {service}. You can close this tab and go back to forkz.");
+            reply_page(&mut stream, "200 OK", &signed_in);
+            keep_answering(listener, state, signed_in);
             return Ok(code.clone());
         }
         let error = query.get("error").cloned().unwrap_or_default();
@@ -189,5 +216,31 @@ mod tests {
         // RFC 7636's example.
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(b"dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"));
         assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    }
+
+    #[test]
+    fn the_redirect_answers_again_after_the_code() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let get = move |query: &str| {
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            write!(stream, "GET /?{query} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            reply
+        };
+        let browser = std::thread::spawn(move || {
+            let icon = get("x=1");
+            let first = get("code=abc&state=s1");
+            // Loaded again (Safari can): the same page, not "cannot connect".
+            let again = get("code=abc&state=s1");
+            (icon, first, again)
+        });
+        let code = wait_for_code("Test", &listener, "s1", Duration::from_secs(10)).unwrap();
+        assert_eq!(code, "abc");
+        let (icon, first, again) = browser.join().unwrap();
+        assert!(icon.starts_with("HTTP/1.1 404"), "{icon}");
+        assert!(first.contains("Signed in to Test"), "{first}");
+        assert!(again.starts_with("HTTP/1.1 200") && again.contains("Signed in to Test"), "{again}");
     }
 }

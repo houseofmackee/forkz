@@ -114,6 +114,8 @@ jobs:
           FORKZ_DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
           FORKZ_GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           FORKZ_GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          # forkz's Microsoft app (OneDrive; PKCE, no secret).
+          FORKZ_ONEDRIVE_CLIENT_ID: ${{ secrets.ONEDRIVE_CLIENT_ID }}
         run: |
           if [ -z "$FORKZ_BOX_CLIENT_ID" ] || [ -z "$FORKZ_BOX_CLIENT_SECRET" ]; then
             echo "::warning::BOX_CLIENT_ID and BOX_CLIENT_SECRET are not set: this build cannot sign in to Box"
@@ -123,6 +125,9 @@ jobs:
           fi
           if [ -z "$FORKZ_GOOGLE_CLIENT_ID" ] || [ -z "$FORKZ_GOOGLE_CLIENT_SECRET" ]; then
             echo "::warning::GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are not set: this build cannot sign in to Google Drive"
+          fi
+          if [ -z "$FORKZ_ONEDRIVE_CLIENT_ID" ]; then
+            echo "::warning::ONEDRIVE_CLIENT_ID is not set: this build cannot sign in to OneDrive"
           fi
           if [ -z "$FORKZ_TEAM_ID" ] || [ -z "$FORKZ_NOTARY_KEY_ID" ] || [ -z "$FORKZ_NOTARY_ISSUER" ]; then
             echo "::error::the APPLE_TEAM_ID, NOTARY_KEY_ID and NOTARY_ISSUER_ID variables must be set"
